@@ -1,0 +1,13 @@
+.DS_Store
+.build/
+build/
+.cache/
+.venv/
+node_modules/
+*.xcuserstate
+xcuserdata/
+.env
+.env.*
+!.env.example
+coverage/
+test-results/

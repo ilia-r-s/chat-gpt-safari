@@ -1,0 +1,55 @@
+SAFARI CHAT — UNSIGNED DEVELOPMENT BUILD
+
+This archive contains a native macOS app with its Safari Web Extension embedded.
+It has no external runtime dependencies. It does not require Node, Python, Rust,
+a local web server, or the ChatGPT desktop app to run.
+
+This is an unsigned development artifact, not a public installer. macOS or Safari
+may refuse to launch/load it. Shared Keychain and App Groups access requires valid
+Apple signing. The unsigned archive is intended for inspecting the packaged build;
+it does not bypass Apple's signing or extension approval requirements.
+
+To preview the interface without signing (Safari with Add Temporary Extension):
+1. In Safari Settings > Advanced, enable Show features for web developers.
+2. In Developer settings, choose Add Temporary Extension and select this repo's
+   extension folder. Allow unsigned extensions when prompted.
+3. Enable Safari Chat and open its toolbar panel on a website.
+Temporary extensions cannot use this app's native messaging. Connect account
+shows setup instructions; sign-in, inference, and native cleanup need the
+packaged app and its embedded extension. Adding the folder does not install the
+companion app. Safari removes temporary extensions on quit or after 24 hours.
+
+To test the complete extension:
+1. Open SafariChat.xcodeproj from the source repository in Xcode.
+2. Select an Apple development team for BOTH targets. Configure App Groups and
+   Keychain Sharing with the same group for both targets. Customize the
+   SAFARI_CHAT_BUNDLE_ID and SAFARI_CHAT_GROUP_ID build settings if necessary.
+3. Build and run the Safari Chat scheme.
+4. In Safari's developer settings, enable Allow Unsigned Extensions if required
+   for your local development configuration. This alone does not grant Keychain
+   or App Groups entitlements.
+5. Open Safari > Settings > Extensions and enable Safari Chat.
+6. Open the Safari Chat app, select Continue with ChatGPT (or use an API key),
+   complete sign-in in your browser, then click the extension on a website.
+
+If an older preview opens safarichat://connect and Safari says the address is
+invalid, reload the temporary extension after updating the repo. Current builds
+request a native app launch instead and show setup help when it is unavailable.
+For a packaged build, rebuild the app and enable its embedded extension; opening
+the companion alone does not give a temporary extension native messaging access.
+
+A public release must be signed and notarized, or distributed through the
+Mac App Store. Its installation flow is one app plus Safari's enable step.
+
+This is an independent companion and is not affiliated with OpenAI.
+ChatGPT conversation history, desktop plugins, and account memories do not sync
+through the public sign-in API. See docs/parity.md in the source repository.
+
+REMOVAL
+Before uninstalling, select Erase local data in the extension settings in each
+Safari profile, check that cleanup succeeded, then open the companion app and
+select Erase native data and quit. Uninstall in Safari Settings and delete the
+app. The unsigned build may be unable to access native data until signed.
+System records, backups, shared browser sign-in data, remote authorizations and
+files you explicitly exported are outside this cleanup. It is not a guarantee
+of forensic or zero-trace erasure. See docs/data-lifecycle.md in the repository.

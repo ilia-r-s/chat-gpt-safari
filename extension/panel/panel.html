@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Safari Chat</title>
+  <link rel="stylesheet" href="panel.css">
+  <script type="module" src="panel.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <button class="icon-button" id="history-button" title="Recent chats" aria-label="Recent chats"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 4v16"/></svg></button>
+    <div class="brand"><span class="brand-mark">✳</span><span>Safari Chat</span><span class="beta">Preview</span></div>
+    <button class="icon-button" id="new-button" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24"><path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6M14 4l6 6M10 14l1-5 7-7 4 4-7 7z"/></svg></button>
+    <button class="icon-button" id="close-button" title="Close panel" aria-label="Close panel"><svg viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
+  </header>
+
+  <main id="conversation" aria-label="Conversation">
+    <section id="welcome" class="welcome">
+      <div class="welcome-orbit" aria-hidden="true"><span>✳</span><i></i><b></b></div>
+      <p class="eyebrow">A LITTLE HELP, RIGHT HERE</p>
+      <h1>Your browser.<br>A fresh perspective.</h1>
+      <p class="intro">Think it through, make sense of a page,<br>or get something done. Stay in your flow.</p>
+      <div class="suggestions">
+        <button data-prompt="summarize"><span class="suggestion-icon">≋</span><span><strong>Find the essentials</strong><small>Summarize this page</small></span><span class="arrow">↗</span></button>
+        <button data-prompt="explain"><span class="suggestion-icon">⌘</span><span><strong>Make it make sense</strong><small>Explain selected text</small></span><span class="arrow">↗</span></button>
+        <button data-prompt="write"><span class="suggestion-icon">✎</span><span><strong>Find the right words</strong><small>Draft, rewrite, or brainstorm</small></span><span class="arrow">↗</span></button>
+      </div>
+      <div class="connect-card" id="connect-card" hidden>
+        <span class="connect-dot"></span><div><strong>Bring your ChatGPT account</strong><p>Connect in the companion app to get started.</p></div>
+        <button class="primary" id="connect-button" data-oai-siwc-button>Continue with ChatGPT <span>↗</span></button>
+        <button class="text-button" id="api-key-button">Use an OpenAI API key</button>
+      </div>
+    </section>
+    <div id="messages" role="log" aria-live="polite" aria-relevant="additions"></div>
+  </main>
+
+  <section id="approval" class="approval" hidden aria-label="Browser action approval">
+    <p class="eyebrow">YOUR PERMISSION</p><strong id="approval-title"></strong><pre id="approval-detail"></pre>
+    <div><button id="decline-button" class="secondary">Decline</button><button id="approve-button" class="primary">Allow once</button></div>
+  </section>
+
+  <div id="notice" class="notice" role="status" hidden></div>
+  <footer class="bottom">
+    <div class="context-bar"><button id="attach-page" class="pill"><span>⊕</span> Add current page</button><button id="attach-tabs" class="icon-button small" aria-label="Attach another tab" title="Attach another tab">@</button><span class="context-note">Only what you choose</span></div>
+    <div class="attachments" id="attachments"></div>
+    <form id="composer" class="composer">
+      <label class="sr-only" for="prompt">Message Safari Chat</label>
+      <textarea id="prompt" rows="2" maxlength="12000" placeholder="Ask anything, or ask about this page…"></textarea>
+      <div class="composer-toolbar">
+        <label class="icon-button small" for="file-input" title="Attach a text file" aria-label="Attach a text file">＋</label><input id="file-input" type="file" accept=".txt,.md,.csv,.json,.log,.js,.ts,.py,.html,.css" hidden>
+        <label class="model-label"><span class="sr-only">Model</span><select id="model" aria-label="Model"><option value="">Choose a model</option></select></label>
+        <button class="send-button" id="send-button" type="submit" aria-label="Send message"><svg viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
+        <button class="send-button" id="stop-button" type="button" aria-label="Stop response" hidden><span class="stop-square"></span></button>
+      </div>
+    </form>
+    <div class="status-row"><button id="account-button" class="account-button"><span class="account-avatar">S</span><span id="account-label">Connect account</span></button><span id="usage" title="Estimated context size; actual tokens appear after a response">Local context</span><button id="settings-button" class="icon-button small" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg></button></div>
+    <p class="disclaimer">Independent Safari companion. Check important information.</p>
+  </footer>
+
+  <dialog id="history-dialog"><div class="dialog-head"><h2>Recent chats</h2><button class="icon-button" data-close="history-dialog" aria-label="Close recent chats">×</button></div><input id="history-search" type="search" placeholder="Search chats" aria-label="Search chats"><div id="history-list" class="item-list"></div><p class="muted">Saved on this Mac, separately for each account.</p></dialog>
+  <dialog id="tabs-dialog"><div class="dialog-head"><h2>Add a tab</h2><button class="icon-button" data-close="tabs-dialog" aria-label="Close tabs">×</button></div><div id="tabs-list" class="item-list"></div><p class="muted">Safari shows tabs where you have allowed access. Open the extension on another website to grant access.</p></dialog>
+  <dialog id="companion-dialog" aria-labelledby="companion-title">
+    <div class="dialog-head"><h2 id="companion-title">Open Safari Chat</h2><button class="icon-button" data-close="companion-dialog" aria-label="Close app setup">×</button></div>
+    <p id="companion-error" class="muted" role="alert"></p>
+    <ol class="muted"><li>Open <strong>Safari Chat.app</strong> from Finder and connect your account there.</li><li>In Safari → Settings → Extensions, enable the extension included with that app.</li></ol>
+    <p class="muted">If you added a temporary extension, it can preview the interface but cannot connect to the companion app. This development build needs to be run from <strong>SafariChat.xcodeproj</strong> in Xcode with signing configured for both targets.</p>
+    <div class="dialog-actions"><button class="primary" id="retry-companion-button">Try opening app again</button><button class="secondary" data-close="companion-dialog">Close</button></div>
+  </dialog>
+  <dialog id="settings-dialog">
+    <div class="dialog-head"><h2>Make yourself at home</h2><button class="icon-button" data-close="settings-dialog" aria-label="Close settings">×</button></div>
+    <label class="setting-row">Appearance<select id="theme-setting" aria-label="Appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+    <label class="setting-row">Browser actions<input id="tools-setting" type="checkbox" role="switch"></label><p class="muted">Let the assistant read and act in tabs. You approve each change before it happens. For tasks across pages, keep this chat in its own tab.</p><button class="secondary" id="popout-button">Open chat in a tab ↗</button>
+    <div class="setting-section"><h3>Context & efficiency</h3><p class="muted">Smaller context uses fewer tokens. Older turns and long pages may be trimmed.</p>
+      <label class="setting-row">Page size<select id="page-setting"><option value="6000">6,000 characters</option><option value="12000">12,000 characters</option><option value="24000">24,000 characters</option></select></label>
+      <label class="setting-row">Total input budget<select id="budget-setting"><option value="24000">24,000 characters</option><option value="48000">48,000 characters</option><option value="96000">96,000 characters</option></select></label>
+      <label class="setting-row">Recent turns<select id="turns-setting"><option value="4">4 turns</option><option value="8">8 turns</option><option value="16">16 turns</option></select></label>
+    </div>
+    <div class="dialog-actions"><button class="secondary" id="export-button">Export chat</button><button class="secondary" id="signout-button">Sign out</button><button class="primary" id="save-settings">Save settings</button></div>
+    <div class="setting-section"><h3>Remove your data</h3><p class="muted">Erase this Safari profile's chats, drafts and settings, plus all Safari Chat accounts saved on this Mac. Active tasks stop. Run this in each profile before uninstalling.</p><button class="secondary" id="erase-data-button">Erase local data…</button><button class="secondary" id="finish-removal-button" hidden>Open companion app to finish removal ↗</button><p id="cleanup-result" class="muted" role="status" hidden></p></div>
+  </dialog>
+</body>
+</html>
