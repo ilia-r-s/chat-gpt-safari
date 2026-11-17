@@ -4,6 +4,9 @@ import { settings, saveChat, listChats, chatKey } from "./core/storage.js";
 import { readTab, createBrowserTools } from "./core/browser-tools.js";
 import { runAgent } from "./core/agent.js";
 import { LocalData } from "./core/local-data.js";
+import { draftKey, sessionKey, saveDraft } from "./core/drafts.js";
+import { DesktopController } from "./core/desktop.js";
+import { modelCatalog, resolveEffort } from "./core/models.js";
 
 const api = browser;
 const panelURL = api.runtime.getURL("panel/panel.html");
@@ -12,6 +15,26 @@ const localData = new LocalData(api.storage.local);
 const modelRequests = new Set();
 let cleanupTask;
 let catalogCache;
+let nativePort;
+const desktop = new DesktopController({
+  api, preferences: () => settings(api.storage.local), isClosed: () => localData.closed,
+  verify: async sessionId => native("desktop.verify", { sessionId }),
+  reply: async payload => native("desktop.reply", { payload }),
+});
+
+function connectNativeEvents() {
+  if (nativePort || localData.closed || !api.runtime.connectNative) return;
+  try {
+    const port = api.runtime.connectNative("org.safarichat.app"); nativePort = port;
+    port.onDisconnect.addListener(() => { if (nativePort === port) nativePort = null; desktop.cancelAll().catch(() => {}); });
+    port.onMessage.addListener(message => {
+      const payload = message?.userInfo ?? message?.message ?? message;
+      if (payload?.type === "auth.changed") { catalogCache = null; api.runtime.sendMessage(payload).catch(() => {}); }
+      else if (payload?.type === "desktop.request") desktop.handle(payload).catch(() => {});
+    });
+  } catch { nativePort = null; } // Temporary extensions have no native bridge.
+}
+connectNativeEvents();
 
 function isPanel(sender) {
   return sender.id === api.runtime.id && typeof sender.url === "string" && sender.url.split(/[?#]/)[0] === panelURL;
@@ -44,8 +67,7 @@ async function models(account) {
   if (!response.ok) throw new Error(`Could not load models (HTTP ${response.status}). Check your connection and account access.`);
   const data = await response.json();
   if (localData.closed) throw new Error("Local data is being erased.");
-  const values = data.models ? data.models.filter(model => model.visibility === "list").map(model => ({ id: model.slug, name: model.display_name }))
-    : (data.data ?? []).filter(model => /^(gpt-|o[134])/.test(model.id) && !/audio|realtime|transcribe|image|tts|search|instruct/.test(model.id)).map(model => ({ id: model.id, name: model.id }));
+  const values = modelCatalog(data);
   catalogCache = { account, models: values, expires: Date.now() + 300000 };
   return values;
   } finally { clearTimeout(timer); modelRequests.delete(controller); }
@@ -56,6 +78,8 @@ async function eraseLocalData() {
   catalogCache = null;
   for (const run of activeRuns.values()) run.abort();
   for (const request of modelRequests) request.abort();
+  await desktop.cancelAll();
+  nativePort?.disconnect(); nativePort = null;
   // Every open panel drops in-memory chat, input, and attachments before cancellation finishes.
   await api.runtime.sendMessage({ type: "data.erasing" }).catch(() => {});
   const failures = [];
@@ -73,7 +97,8 @@ async function showPanel(tab, selection) {
   const url = `${panelURL}?tab=${tab.id}`;
   try {
     await api.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/mount.js"] });
-    await api.tabs.sendMessage(tab.id, { type: "panel.show", url });
+    const result = await api.tabs.sendMessage(tab.id, { type: "panel.show", url });
+    if (result?.standalone) await api.tabs.create({ url });
   } catch { await api.tabs.create({ url }); }
 }
 
@@ -95,6 +120,7 @@ async function handleMessage(message, sender) {
   if (localData.closed && !["bootstrap", "auth.open", "panel.close"].includes(message.type)) throw new Error("Local data was erased. Close the extension before removing the app.");
   switch (message.type) {
     case "bootstrap": {
+      connectNativeEvents();
       if (localData.closed) return { prefs: normalizeSettings(), auth: { connected: false, account: "local" }, models: [], removalPrepared: true };
       const prefs = await settings(api.storage.local);
       let auth;
@@ -105,12 +131,27 @@ async function handleMessage(message, sender) {
       const key = `draft:${message.tabId}`;
       const stored = await api.storage.local.get(key);
       await api.storage.local.remove(key);
-      return { prefs, auth, models: catalog, modelError, draft: stored[key]?.created > Date.now() - 300000 ? stored[key] : null };
+      const pointer = sessionKey(auth.account ?? "local", message.tabId);
+      const session = (await api.storage.local.get(pointer))[pointer];
+      return { prefs, auth, models: catalog, modelError, activeChat: session?.id, draft: stored[key]?.created > Date.now() - 300000 ? stored[key] : null };
     }
-    case "settings.save": { const prefs = normalizeSettings(message.settings); await localData.write(storage => storage.set({ settings: prefs })); return prefs; }
+    case "settings.save": {
+      let prefs;
+      await localData.write(async storage => {
+        const before = await settings(storage);
+        prefs = normalizeSettings({ ...before, ...message.settings });
+        if (before.desktopControl !== prefs.desktopControl) {
+          await desktop.cancelAll(); await native("desktop.enable", { enabled: prefs.desktopControl });
+        }
+        await storage.set({ settings: prefs });
+      });
+      return prefs;
+    }
     case "auth.open": await native("app.open"); return { ok: true };
+    case "auth.signin": await native("auth.signin"); return { ok: true };
     case "auth.signout": {
       for (const run of activeRuns.values()) run.abort();
+      await desktop.cancelAll();
       catalogCache = null;
       return native("auth.signout");
     }
@@ -119,24 +160,40 @@ async function handleMessage(message, sender) {
       const page = await readTab(api, message.tabId, prefs.pageChars);
       return { kind: message.selection && page.selection ? "selection" : "page", key: `${message.selection ? "selection" : "page"}:${publicURL(page.url)}`, tabId: message.tabId, title: page.title, url: publicURL(page.url), text: message.selection && page.selection ? page.selection : page.text, truncated: page.truncated };
     }
-    case "tabs.list": return (await api.tabs.query({ currentWindow: true })).filter(tab => safeWebURL(tab.url)).map(tab => ({ id: tab.id, title: tab.title ?? "Untitled", url: publicURL(tab.url) }));
+    case "tabs.list": return (await api.tabs.query({ currentWindow: true })).filter(tab => safeWebURL(tab.url)).slice(0, 200).map(tab => ({ id: tab.id, title: (tab.title ?? "Untitled").slice(0, 160), url: publicURL(tab.url) }));
     case "chats.list": { const auth = await native("auth.status"); return listChats(api.storage.local, auth.account ?? "local"); }
     case "chat.load": {
       const auth = await native("auth.status");
       const data = (await api.storage.local.get(chatKey(message.id)))[chatKey(message.id)];
-      if (data?.account !== (auth.account ?? "local")) throw new Error("This chat belongs to a different account.");
+      if (data && data.account !== (auth.account ?? "local")) throw new Error("This chat belongs to a different account.");
       return data;
     }
+    case "draft.load": {
+      const auth = await native("auth.status");
+      const data = (await api.storage.local.get(draftKey(message.id)))[draftKey(message.id)];
+      if (data && data.account !== (auth.account ?? "local")) throw new Error("This draft belongs to a different account.");
+      return data;
+    }
+    case "draft.save": return localData.write(async storage => {
+      const auth = await native("auth.status");
+      if (message.draft.account !== (auth.account ?? "local")) throw new Error("Your account changed. This draft was not saved to the new account.");
+      if (typeof message.draft.id !== "string" || !/^[a-f0-9-]{36}$/i.test(message.draft.id)) throw new Error("Invalid draft identifier.");
+      return saveDraft(storage, message.draft, message.tabId);
+    });
     case "chat.save": {
       const auth = await native("auth.status");
       if (message.chat.account !== (auth.account ?? "local")) throw new Error("Your account changed. This chat was not saved to the new account.");
       return localData.write(storage => saveChat(storage, message.chat));
     }
     case "chat.delete": {
-      const auth = await native("auth.status");
-      const data = (await api.storage.local.get(chatKey(message.id)))[chatKey(message.id)];
-      if (data && data.account !== (auth.account ?? "local")) throw new Error("This chat belongs to a different account.");
-      await api.storage.local.remove(chatKey(message.id)); return { ok: true };
+      return localData.write(async storage => {
+        const auth = await native("auth.status");
+        const all = await storage.get(null);
+        const data = all[chatKey(message.id)] ?? all[draftKey(message.id)];
+        if (data && data.account !== (auth.account ?? "local")) throw new Error("This chat belongs to a different account.");
+        const pointers = Object.entries(all).filter(([key, value]) => key.startsWith("panel:") && value.account === (auth.account ?? "local") && value.id === message.id).map(([key]) => key);
+        await storage.remove([chatKey(message.id), draftKey(message.id), ...pointers]); return { ok: true };
+      });
     }
     case "panel.close": if (sender.tab?.id) await api.tabs.sendMessage(sender.tab.id, { type: "panel.close" }).catch(() => {}); return { ok: true };
     case "panel.popout": {
@@ -179,14 +236,18 @@ api.runtime.onConnect.addListener(port => {
     const timer = setTimeout(() => controller.abort(new Error("This task timed out. Please try again.")), 300000);
     let runChat;
     let partialText = "";
-    const runEmit = event => { if (event.type === "delta") partialText += event.text; emit(event); };
+    const runEmit = event => { if (event.type === "delta") partialText += event.text; else if (event.type === "replace") partialText = event.text; emit(event); };
     try {
       const auth = await native("auth.status");
       if (!auth.connected || !auth.canInfer) throw new Error("Connect ChatGPT plan usage or an API key in the companion app first.");
       if (message.account !== auth.account) throw new Error("Your account changed. Refresh the panel before continuing.");
       if (typeof message.chatId !== "string" || !/^[a-f0-9-]{36}$/i.test(message.chatId)) throw new Error("Invalid chat identifier. Start a new chat.");
       runChat = { id: message.chatId, title: String(message.title || "New chat"), account: auth.account, messages: message.messages };
-      const prefs = await settings(api.storage.local);
+      const prefs = { ...await settings(api.storage.local), webSearch: message.webSearch === true };
+      controller.signal.throwIfAborted();
+      const requestedEffort = message.effort ?? "auto";
+      const selectedModel = requestedEffort === "auto" ? undefined : (await models(auth.account)).find(model => model.id === message.model);
+      const effort = resolveEffort(selectedModel, requestedEffort);
       const built = buildInput(message.messages, prefs);
       emit({ type: "context", chars: built.chars, trimmed: built.trimmed });
       const approve = (details, signal) => new Promise((resolve, reject) => {
@@ -199,8 +260,10 @@ api.runtime.onConnect.addListener(port => {
         emit({ type: "approval", id, ...details });
       });
       const initialTabs = (message.messages.at(-1)?.contexts ?? []).map(c => ({ id: c.tabId, url: c.url }));
-      const executeTool = createBrowserTools({ api, pageChars: prefs.pageChars, approve, initialTabs });
-      const result = await runAgent({ input: built.input, model: message.model, settings: prefs, signal: controller.signal }, { credential: () => credential(auth.account), executeTool, emit: runEmit });
+      const source = new URL(port.sender.url).searchParams.get("tab");
+      const defaultTabId = source !== null && /^\d+$/.test(source) ? Number(source) : null;
+      const executeTool = createBrowserTools({ api, pageChars: prefs.pageChars, approve, initialTabs, defaultTabId, protectedTabId: message.embedded ? port.sender.tab?.id : null });
+      const result = await runAgent({ input: built.input, model: message.model, effort, settings: prefs, signal: controller.signal }, { credential: () => credential(auth.account), executeTool, emit: runEmit });
       await localData.write(storage => saveChat(storage, { ...runChat, messages: [...runChat.messages, { role: "assistant", text: result.text }] }));
       emit({ type: "done", usage: result.usage });
     } catch (error) {

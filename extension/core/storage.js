@@ -45,6 +45,12 @@ export async function saveChat(storage, chat) {
 
 export async function listChats(storage, account) {
   const all = await storage.get(null);
-  return Object.entries(all).filter(([key, value]) => key.startsWith("chat:") && value.account === account)
-    .map(([, { id, title, updated }]) => ({ id, title, updated })).sort((a, b) => b.updated - a.updated);
+  const chats = new Map(Object.entries(all).filter(([key, value]) => key.startsWith("chat:") && value.account === account)
+    .map(([, { id, title, updated }]) => [id, { id, title, updated }]));
+  for (const [key, draft] of Object.entries(all)) {
+    if (!key.startsWith("composer:") || draft.account !== account) continue;
+    const item = chats.get(draft.id) ?? { id: draft.id, title: draft.text.trim().slice(0, 80) || "New chat", updated: 0 };
+    chats.set(draft.id, { ...item, draft: true, updated: Math.max(item.updated, draft.updated) });
+  }
+  return [...chats.values()].sort((a, b) => b.updated - a.updated);
 }

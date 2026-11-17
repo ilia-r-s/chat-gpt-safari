@@ -12,4 +12,4 @@ for kind, size in representations.items():
     assert data.startswith(b"\x89PNG\r\n\x1a\n") and struct.unpack(">II", data[16:24]) == (size, size)
     chunks.append(kind.encode() + struct.pack(">I", len(data) + 8) + data)
 payload = b"".join(chunks)
-(root / "native/App/AppIcon.icns").write_bytes(b"icns" + struct.pack(">I", len(payload) + 8) + payload)
+(root / "native/App/SafariChatIcon.icns").write_bytes(b"icns" + struct.pack(">I", len(payload) + 8) + payload)

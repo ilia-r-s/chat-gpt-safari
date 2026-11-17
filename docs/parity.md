@@ -1,23 +1,28 @@
 # Feature coverage
 
-Reference: [OpenAI ChatGPT Chrome extension](https://chromewebstore.google.com/detail/chatgpt/hehggadaopoacecdllhhajmbjkdcmajg), store version 1.26.1102.11740, inspected 2026-11-05.
+Reference: [OpenAI's browser-extension guide](https://learn.chatgpt.com/docs/chrome-extension), inspected 2026-11-17. Its supported browsers are Chrome, Edge, Brave, Opera, and Vivaldi; Safari is not listed. The earlier Chrome store comparison used version 1.26.1102.11740, inspected 2026-11-05.
 
 | Capability | This development build |
 | --- | --- |
-| Side chat | Extension-origin panel on ordinary pages; standalone tab fallback when injection is unavailable. Not Safari's built-in sidebar. |
-| ChatGPT login | Documented open-source OAuth flow implemented. Needs signed native app and a live account test. Available authentication providers are determined by OpenAI's browser login page. |
+| Side chat | Extension-origin dock reserves page space on the right, adjusts common fixed controls, and restores styles/focus on close. Its left edge supports bounded dragging, keyboard resizing, and reset. Narrow windows and unavailable injection use a standalone tab. This adjusts page layout, not Safari's native viewport; viewport media queries, complex canvases, and closed shadow DOM can still need the standalone view. |
+| ChatGPT login | The extension starts browser OAuth automatically through the installed native helper, without a separate setup-window click. Needs a signed app and live account test. Available authentication providers are determined by OpenAI's browser login page; this does not reuse the official desktop app's private session. |
 | API-key login | Native secure entry and Keychain storage implemented; live account test outstanding. |
 | Account/workspace selection | Separate issued OAuth registrations, native account picker, refresh, reconnect, sign-out. |
-| Model selection and streamed chat | Account model catalog and public Responses API integration implemented; simulated integration tests pass. |
+| Model selection and streamed chat | Account model catalog and public Responses API integration implemented; Auto or supported reasoning efforts beside the model selector. Completion-only text is recovered and empty responses fail visibly. Simulated integration tests pass; live effort requests remain unverified. |
 | Page/selection context | Explicit extraction, context menu, bounded attachments, source deduplication. |
-| Tab mentions | Accessible-tab picker attaches context. No integration with the official desktop app's `@Safari` surface. |
-| Browser actions | DOM read/click/fill/navigation/open/close/list with per-action approval. Browser actions are off by default. Canvas, OS dialogs, closed shadow DOM, cross-origin frames, and full CDP parity are not implemented. |
-| Conversation history | Local history/search/export. Existing ChatGPT cloud conversations do not sync through the public identity/plan API. |
+| Tab mentions | Searchable, multi-select accessible-tab picker under **+** or **@**; listing tabs does not read their content. No integration with the official desktop app's `@Safari` surface. |
+| Browser actions | Available in every chat: viewport reads, click, text filling, native dropdown selection, checkbox/radio changes, page/region scrolling, navigation, and open/close/list tabs, with per-action approval and visible status. Includes horizontal/RTL strips and identifiable carousels with ARIA tab navigation, including selection changes during approval; arbitrary drag-only galleries are not supported. New-tab reads wait for loading. Canvas, OS dialogs, closed shadow DOM, cross-origin frames, and full CDP parity are not implemented. |
+| Desktop control and approvals | Experimental local MCP plugin and native bridge implemented; desktop-originated approvals return through MCP form elicitation, with no fallback to sidebar approval. One opted-in Safari profile, bounded sessions, account checks, and cleanup cancellation. The signed ChatGPT/Safari handoff has not been exercised. This is a custom plugin, not registration with OpenAI's built-in browser integration. |
+| Regular ChatGPT conversations | No hosted MCP endpoint or Secure MCP Tunnel integration is provided. The local plugin requires a compatible local desktop thread; regular ChatGPT remote control is not implemented or claimed. |
+| Conversation history | Local history/search/export, account-separated composer drafts, active-chat restoration per source tab, and edit/retry branches that retain the original. Existing ChatGPT cloud conversations do not sync through the public identity/plan API. |
+| Chat appearance and controls | Neutral light/dark/system themes that apply immediately and save automatically, original blossom artwork, unified **+** menu, visible message actions and source labels, draft status, keyboard send hints, and opening chat in a tab. All supported tools belong to one chat interface; there is no cosmetic mode restricting browser capabilities. |
+| Companion app appearance | Matching neutral light/dark/system themes, official blossom artwork for this personal build, resizable/scrollable setup, visible saved-account and connection status, and a Local data section. App and Safari profile theme preferences are independent. |
 | Data removal | Explicit browser/native cleanup, no custom lock files, blocked late writes, verified storage clearing, and visible failures. OS/browser records and backups are outside its scope; no automatic zero-trace uninstall promise. |
-| Plugins, memories, local filesystem | Official ChatGPT desktop integration is not reproduced; the public sign-in scope does not expose existing account context. |
-| Files | Explicit small text-file attachments. PDF/image/audio/video inputs, uploads, download management, and browser history are not implemented. |
+| Projects, library, plugins, memories, local filesystem | Official ChatGPT integration is not reproduced; the public sign-in scope does not expose existing account context. No nonfunctional cloud-project/library/plugin menu items are shown. |
+| Files | Multiple UTF-8 text/code/data attachments through file selection, drop or paste; six total sources, 200 KB per file, with per-source and aggregate prompt bounds. PDF/image/audio/video inputs, hosted uploads, download management, and browser history are not implemented. |
+| Web search | Opt-in public Responses `web_search` tool, progress and clickable persisted URL citations. Model/account support is provider-dependent; simulated requests/citations are tested, live hosted search is not. It does not grant Safari action permissions. |
 | YouTube transcript | No special transcript extraction; only ordinary visible page text. |
-| Voice, image generation, hosted tools | Not implemented. Several hosted tools are unsupported by the documented plan-usage preview. |
+| Voice, image generation, other hosted tools | Not implemented. Several hosted tools are unsupported by the documented plan-usage preview. |
 | Cross-page task continuity | Full navigation removes the injected panel. A standalone panel tab can keep a task open. There is no automatic panel reinjection or persistent daemon. |
 | macOS installation | One native app contains the extension. Unsigned artifact provided; signing/notarization is still needed for normal installation. |
 | iPhone / iPad | Not targeted in this macOS preview. |

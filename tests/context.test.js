@@ -4,12 +4,13 @@ import { buildInput, compactText, safeWebURL, publicURL, estimateTokens } from "
 import { normalizeSettings } from "../extension/core/config.js";
 
 test("context includes only explicit sources and keeps the newest snapshot once", () => {
-  const source = { key: "page:one", kind: "page", title: "Source", url: "https://example.com/?code=secret", text: "OLD" };
+  const source = { key: "page:one", kind: "page", title: "Source", url: "https://example.com/?code=secret", tabId: 9, text: "OLD" };
   const result = buildInput([{ role: "user", text: "First", contexts: [source] }, { role: "assistant", text: "Reply" }, { role: "user", text: "Second", contexts: [{ ...source, text: "NEW" }] }], {});
   assert.equal(result.sourceCount, 1);
   assert.ok(JSON.stringify(result.input).includes("NEW"));
   assert.ok(!JSON.stringify(result.input).includes("OLD"));
   assert.ok(!JSON.stringify(result.input).includes("secret"));
+  assert.equal(JSON.parse(result.input[0].content.split("\n")[1]).tabId, 9, "explicit attachments retain their actionable tab ID");
   assert.equal(result.input.at(-1).content, "Second");
 });
 test("history trims whole turns without orphaning assistant replies", () => {
@@ -37,7 +38,7 @@ test("settings clamp resource limits and reject non-boolean tools", () => {
   assert.equal(normalizeSettings({ inputChars: Infinity }).inputChars, 48000);
   assert.equal(normalizeSettings({ pageChars: -1 }).pageChars, 2000);
   assert.equal(normalizeSettings({ maxToolRounds: 1000 }).maxToolRounds, 10);
-  assert.equal(normalizeSettings({ browserTools: "true" }).browserTools, false);
+  assert.equal(normalizeSettings({ desktopControl: "true" }).desktopControl, false);
 });
 test("text compaction and token estimate handle Unicode and whitespace", () => {
   assert.equal(compactText("  a   b\n\n\n c ", 100), "a b\n\n c");

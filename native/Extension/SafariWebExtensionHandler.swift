@@ -9,12 +9,29 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             NativeReply(context).send(["ok": false, "error": "Invalid native request."]); return
         }
         let reply = NativeReply(context)
+        let profileID: String
+        do { profileID = try DesktopRelay.profileIdentifier(item.userInfo?[SFExtensionProfileKey]) }
+        catch { reply.send(["ok": false, "error": error.localizedDescription]); return }
+        let sessionID = message["sessionId"] as? String ?? ""
+        let desktopEnabled = message["enabled"] as? Bool
+        let desktopPayload = (message["payload"] as? [String: Any]).flatMap { try? JSONSerialization.data(withJSONObject: $0) }
         Task {
             do {
                 let result: [String: Any]
                 switch type {
                 case "app.open":
-                    try await CompanionApp.open(); result = ["ok": true]
+                    try await CompanionApp.open(extensionBundle: Bundle(for: SafariWebExtensionHandler.self)); result = ["ok": true]
+                case "auth.signin":
+                    try await CompanionApp.open(extensionBundle: Bundle(for: SafariWebExtensionHandler.self), signIn: true); result = ["ok": true]
+                case "desktop.verify":
+                    result = try DesktopRelay.verify(sessionID, profileID: profileID)
+                case "desktop.enable":
+                    guard let enabled = desktopEnabled else { throw ChatError.message("Invalid desktop setting.") }
+                    try DesktopRelay.setEnabled(enabled, profileID: profileID); result = ["ok": true]
+                case "desktop.reply":
+                    guard let desktopPayload, desktopPayload.count <= 250000,
+                          let payload = try JSONSerialization.jsonObject(with: desktopPayload) as? [String: Any] else { throw ChatError.message("Invalid desktop response.") }
+                    try await DesktopRelay.reply(payload, profileID: profileID); result = ["ok": true]
                 case "auth.status":
                     let account = try CredentialStore.read().active
                     result = ["ok": true, "connected": account?.accessToken != nil,

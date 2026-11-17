@@ -1,21 +1,63 @@
 /** Self-contained functions: Safari serializes these into its isolated content-script world. */
-export function snapshotPage(limit = 12000) {
+export function snapshotPage(limit = 12000, viewportOnly = false) {
+  const viewportWidth = Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth);
+  const labelFor = element => {
+    const labelled = (element.getAttribute("aria-labelledby") || "").split(/\s+/).slice(0, 8).map(id => document.getElementById(id)?.textContent?.slice(0, 120) || "").join(" ").trim();
+    const field = element.matches("input,textarea,select") || element.isContentEditable;
+    return (element.getAttribute("aria-label") || labelled || element.labels?.[0]?.innerText || element.getAttribute("placeholder") || (!field && element.innerText) || element.name || element.tagName).trim().slice(0, 120);
+  };
+  const sensitive = /password|passcode|credit.?card|debit.?card|card.?number|\bcc[-_](number|csc|exp|name)|\bcvc\b|\bcvv\b|security.?code|verification.?code|one.?time|\botp\b|secret|token/i;
+  const signature = (element, ignoreSelection = false) => JSON.stringify([element.tagName, element.type, element.name, element.getAttribute("role"), element.getAttribute("href"), element.getAttribute("target"), element.getAttribute("download"), element.form?.action, element.form?.method, element.getAttribute("formaction"), element.getAttribute("aria-controls"), ignoreSelection ? null : element.getAttribute("aria-selected"), element.getAttribute("aria-orientation")]);
+  const scrollDirections = element => {
+    const style = getComputedStyle(element);
+    return [
+      ...(/^(auto|scroll|hidden)$/.test(style.overflowX) && element.scrollWidth > element.clientWidth + 1 ? ["left", "right"] : []),
+      ...(/^(auto|scroll|hidden)$/.test(style.overflowY) && element.scrollHeight > element.clientHeight + 1 ? ["up", "down", "top", "bottom"] : []),
+    ];
+  };
+  const scrollAreas = new Set();
+  const checkedAreas = new Set();
+  const trackScrollAreas = element => {
+    for (let parent = element, depth = 0; parent && depth < 8 && checkedAreas.size < 500; parent = parent.parentElement, depth++) {
+      if (checkedAreas.has(parent)) break;
+      checkedAreas.add(parent);
+      if (parent === document.scrollingElement || parent === document.body) continue;
+      if (scrollDirections(parent).length) {
+        if (scrollAreas.size < 10) scrollAreas.add(parent);
+      }
+    }
+  };
   const visible = element => {
     if (!element || element.closest("[hidden],[aria-hidden='true'],[inert],#safari-chat-host")) return false;
     const style = getComputedStyle(element);
-    return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
+    if (style.display === "none" || style.visibility !== "visible" || style.opacity === "0" || !element.getClientRects().length) return false;
+    const rect = element.getBoundingClientRect();
+    if (viewportOnly && (rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= viewportWidth)) return false;
+    let depth = 0;
+    for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+      if (++depth > 64) return false;
+      const parentStyle = getComputedStyle(parent);
+      if (parentStyle.opacity === "0") return false;
+      if (!viewportOnly || parent === document.body || parent === document.documentElement) continue;
+      const clip = parent.getBoundingClientRect();
+      if (/auto|scroll|hidden|clip/.test(parentStyle.overflowY) && (rect.bottom <= clip.top || rect.top >= clip.bottom)) return false;
+      if (/auto|scroll|hidden|clip/.test(parentStyle.overflowX) && (rect.right <= clip.left || rect.left >= clip.right)) return false;
+    }
+    return true;
   };
-  const root = document.querySelector("main,article,[role='main']") ?? document.body;
+  // Action reads include navigation and dialogs; attachments prefer the article's text.
+  const root = viewportOnly ? document.body : document.querySelector("main,article,[role='main']") ?? document.body;
   if (!root) throw new Error("This page has no readable content.");
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const chunks = [];
   let length = 0;
   let visited = 0;
   let node;
-  // Stop traversal as soon as the budget is met; never serialize the whole DOM.
   while ((node = walker.nextNode()) && length < limit && ++visited <= 20000) {
     const parent = node.parentElement;
-    if (!parent || parent.closest("script,style,noscript,nav,footer,textarea,input,select,[contenteditable],svg") || !visible(parent)) continue;
+    const excluded = viewportOnly ? "script,style,noscript,textarea,input,select,[contenteditable],svg" : "script,style,noscript,nav,footer,textarea,input,select,[contenteditable],svg";
+    if (!parent || parent.closest(excluded) || !visible(parent)) continue;
+    trackScrollAreas(parent);
     const text = node.textContent.slice(0, limit - length + 1).replace(/\s+/g, " ").trim();
     if (text) { chunks.push(text.slice(0, limit - length)); length += text.length + 1; }
   }
@@ -23,48 +65,217 @@ export function snapshotPage(limit = 12000) {
   const prefix = [...crypto.getRandomValues(new Uint8Array(8))].map(byte => byte.toString(16).padStart(2, "0")).join("");
   const refs = new Map();
   const elements = [];
-  for (const element of document.querySelectorAll("a[href],button,input,textarea,select,[role='button'],[contenteditable='true']")) {
-    if (elements.length >= 60) break;
-    if (!visible(element) || element.disabled || element.matches("input[type='hidden'],input[type='password'],input[type='file']")) continue;
-    const sensitive = /password|credit.?card|card.?number|\bcvc\b|\bcvv\b|one.?time|\botp\b|secret|token/i;
-    if (sensitive.test([element.name, element.id, element.autocomplete, element.getAttribute("aria-label")].join(" "))) continue;
-    const label = (element.getAttribute("aria-label") || element.innerText || element.getAttribute("placeholder") || element.labels?.[0]?.innerText || element.name || element.tagName).trim().slice(0, 120);
+  let elementChars = 0;
+  let elementsTruncated = false;
+  const add = (element, label, properties, budget = 4300, extra = {}) => {
     const id = `${prefix}-${elements.length + 1}`;
-    refs.set(id, { element, label });
-    elements.push({ id, tag: element.tagName.toLowerCase(), label });
+    const entry = { id, tag: element.tagName.toLowerCase(), label, ...properties };
+    const size = JSON.stringify(entry).length;
+    if (elementChars + size > budget) { elementsTruncated = true; return; }
+    elementChars += size;
+    refs.set(id, { element, label: labelFor(element), signature: signature(element), ...extra });
+    elements.push(entry);
+  };
+  // Transform-based carousels are moved through their own tab controls, never
+  // by changing page styles or guessing at a product link / "Next" button.
+  const galleries = [];
+  let tablists = 0;
+  for (const list of document.querySelectorAll("[role='tablist']")) {
+    if (++tablists > 40 || galleries.length >= 4) break;
+    if (!visible(list)) continue;
+    const tabs = [...list.querySelectorAll("[role='tab']")];
+    if (tabs.length < 2 || tabs.length > 40 || tabs.some(tab => tab.closest("[role='tablist']") !== list)) continue;
+    const controls = tabs.map(tab => tab.getAttribute("aria-controls"));
+    if (controls.some(id => !id || /\s/.test(id) || id.length > 256) || new Set(controls).size !== tabs.length) continue;
+    const safeTab = tab => {
+      if (tab.matches(":disabled,[aria-disabled='true']") || tab.closest("form") || tab.form) return false;
+      if (tab.matches("a[href]")) {
+        const url = new URL(tab.href, location.href), here = new URL(location.href);
+        let panel;
+        try { panel = decodeURIComponent(url.hash.slice(1)); } catch { return false; }
+        return url.origin === here.origin && url.pathname === here.pathname && url.search === here.search && panel === tab.getAttribute("aria-controls") && !tab.hasAttribute("download") && !tab.target;
+      }
+      return tab.matches("button,[role='tab']:not(a):not(input)");
+    };
+    if (!tabs.every(safeTab)) continue;
+    const selected = tabs.findIndex(tab => tab.getAttribute("aria-selected") === "true");
+    if (selected < 0 || tabs.filter(tab => tab.getAttribute("aria-selected") === "true").length !== 1) continue;
+    let scope = list.parentElement, panels;
+    for (let depth = 0; scope && depth < 6 && scope !== document.body; scope = scope.parentElement, depth++) {
+      if (!/(^|[\s_-])(gallery|carousel|slideshow)([\s_-]|$)/i.test(`${scope.id} ${scope.getAttribute("class")} ${scope.getAttribute("aria-roledescription")}`)) continue;
+      const candidates = [...scope.querySelectorAll("[role='tabpanel'][id]")].slice(0, 80);
+      panels = controls.map(id => candidates.find(panel => panel.id === id));
+      if (panels.every(Boolean)) break;
+      panels = null;
+    }
+    if (!panels || !scope || scope === document.body) continue;
+    const orientation = list.getAttribute("aria-orientation") === "vertical" ? "vertical" : "horizontal";
+    const label = (scope.getAttribute("aria-label") || scope.querySelector("h1,h2,h3,[role='heading']")?.textContent || "Gallery").trim().slice(0, 100);
+    const gallery = { scope, panels, orientation, label, rtl: getComputedStyle(list).direction === "rtl", tabs: tabs.map(tab => ({ element: tab, label: labelFor(tab), signature: signature(tab, true) })) };
+    galleries.push(gallery);
+    add(list, `${label} navigation`, { actions: ["scroll"], kind: "carousel", directions: orientation === "vertical" ? ["up", "down"] : ["left", "right"], currentItem: selected + 1, itemCount: tabs.length }, 1500, { gallery });
+  }
+  let examined = 0;
+  for (const element of document.querySelectorAll("a[href],button,input,textarea,select,[role='button'],[role='tab'],[role='checkbox'],[role='radio'],[role='combobox'],[role='option'],[contenteditable='true'],[contenteditable='plaintext-only']")) {
+    if (elements.length >= 50 || ++examined > 5000) { elementsTruncated = true; break; }
+    if (!visible(element) || element.matches(":disabled,[aria-disabled='true'],input[type='hidden'],input[type='password'],input[type='file']")) continue;
+    const label = labelFor(element);
+    if (sensitive.test([label, element.name, element.id, element.autocomplete, element.getAttribute("placeholder")].join(" "))) continue;
+    trackScrollAreas(element);
+    let actions = ["click"];
+    if (element.matches("input[type='checkbox'],input[type='radio']")) actions.push("set_checked");
+    else if (element instanceof HTMLSelectElement) { if (!element.multiple) actions.push("select"); }
+    else if (!element.readOnly && (element.matches("input:not([type='button']):not([type='submit']):not([type='reset']):not([type='image']),textarea") || element.isContentEditable)) actions.push("fill");
+    let options;
+    if (element instanceof HTMLSelectElement) {
+      options = [];
+      for (const option of element.options) {
+        const item = { value: option.value.slice(0, 120), label: option.label.slice(0, 120), disabled: option.disabled || !!option.closest("optgroup[disabled]") };
+        if (options.length >= 30 || JSON.stringify([...options, item]).length > 800) break;
+        options.push(item);
+      }
+    }
+    add(element, label, { actions, ...(element.getAttribute("role") === "tab" ? { role: "tab", selected: element.getAttribute("aria-selected") === "true" } : {}), ...(element.type ? { type: element.type } : {}), ...(element.required ? { required: true } : {}), ...(options ? { options, optionsTruncated: element.options.length > options.length } : {}) });
+  }
+  // Image-only strips have no text or clickable descendants to discover them.
+  let media = 0;
+  for (const element of root.querySelectorAll("img,canvas,video,[role='region'],[role='group']")) {
+    if (++media > 300 || checkedAreas.size >= 500) break;
+    if (visible(element)) trackScrollAreas(element);
+  }
+  for (const area of scrollAreas) {
+    if (!visible(area) || galleries.some(gallery => gallery.scope.contains(area) && getComputedStyle(area).overflowX === "hidden")) continue;
+    add(area, labelFor(area), { actions: ["scroll"], directions: scrollDirections(area), scrollTop: Math.round(area.scrollTop), scrollLeft: Math.round(area.scrollLeft) }, 5000);
   }
   globalThis.__safariChatRefs = { url: location.href, refs };
   let selection = getSelection()?.toString() ?? "";
   const anchor = getSelection()?.anchorNode?.parentElement;
   if (anchor?.closest("input,textarea,[contenteditable]")) selection = "";
-  return { title: document.title.slice(0, 180), url: location.href, text: chunks.join("\n"), selection: selection.slice(0, limit), truncated: length >= limit || visited > 20000, elements };
+  const page = document.scrollingElement ?? document.documentElement;
+  return {
+    title: document.title.slice(0, 180), url: location.href, text: chunks.join("\n"), selection: selection.slice(0, limit),
+    truncated: length >= limit || visited > 20000, elements, elementsTruncated,
+    viewport: { width: viewportWidth, height: innerHeight, scrollX: Math.round(page.scrollLeft), scrollY: Math.round(page.scrollTop), pageWidth: page.scrollWidth, pageHeight: page.scrollHeight },
+    viewportOnly,
+  };
 }
 
-export function actOnPage(operation, elementId, text, expectedURL) {
+export function actOnPage(operation, elementId, text, expectedURL, { direction, checked } = {}) {
   const state = globalThis.__safariChatRefs;
   if (!state || state.url !== location.href || location.href !== expectedURL) throw new Error("The page changed. Read it again before acting.");
+  const labelFor = element => {
+    const labelled = (element.getAttribute("aria-labelledby") || "").split(/\s+/).slice(0, 8).map(id => document.getElementById(id)?.textContent?.slice(0, 120) || "").join(" ").trim();
+    const field = element.matches("input,textarea,select") || element.isContentEditable;
+    return (element.getAttribute("aria-label") || labelled || element.labels?.[0]?.innerText || element.getAttribute("placeholder") || (!field && element.innerText) || element.name || element.tagName).trim().slice(0, 120);
+  };
+  const signature = (element, ignoreSelection = false) => JSON.stringify([element.tagName, element.type, element.name, element.getAttribute("role"), element.getAttribute("href"), element.getAttribute("target"), element.getAttribute("download"), element.form?.action, element.form?.method, element.getAttribute("formaction"), element.getAttribute("aria-controls"), ignoreSelection ? null : element.getAttribute("aria-selected"), element.getAttribute("aria-orientation")]);
   const reference = state.refs.get(elementId);
   const element = reference?.element;
-  if (!element?.isConnected || element.disabled || !element.getClientRects().length || element.closest("[hidden],[inert],[aria-hidden='true']")) throw new Error("This element changed or is no longer available. Read the page again.");
-  const label = (element.getAttribute("aria-label") || element.innerText || element.getAttribute("placeholder") || element.labels?.[0]?.innerText || element.name || element.tagName).trim().slice(0, 120);
-  if (label !== reference.label) throw new Error("The element changed since approval. Read the page again.");
-  if (element.matches("input[type='password'],input[type='file'],input[type='hidden']") || /password|credit.?card|card.?number|\bcvc\b|\bcvv\b|one.?time|\botp\b|secret|token/i.test([element.name, element.id, element.autocomplete, element.getAttribute("aria-label")].join(" "))) throw new Error("Enter sensitive information directly in the website.");
+  const pageScroll = operation === "scroll" && !elementId;
+  let label = "Page";
+  if (!pageScroll) {
+    if (!element?.isConnected || element.matches(":disabled,[aria-disabled='true']") || !element.getClientRects().length || element.closest("[hidden],[inert],[aria-hidden='true'],#safari-chat-host")) throw new Error("This element changed or is no longer available. Read the page again.");
+    const style = getComputedStyle(element);
+    if (style.visibility !== "visible" || style.opacity === "0") throw new Error("This element is no longer visible. Read the page again.");
+    let depth = 0;
+    for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+      if (++depth > 64 || getComputedStyle(parent).opacity === "0") throw new Error("This element is no longer visible. Read the page again.");
+    }
+    label = labelFor(element);
+    if (label !== reference.label || signature(element) !== reference.signature) throw new Error("The element changed since approval. Read the page again.");
+    if (element.matches("input[type='password'],input[type='file'],input[type='hidden']") || /password|passcode|credit.?card|debit.?card|card.?number|\bcc[-_](number|csc|exp|name)|\bcvc\b|\bcvv\b|security.?code|verification.?code|one.?time|\botp\b|secret|token/i.test([label, element.name, element.id, element.autocomplete, element.getAttribute("placeholder")].join(" "))) throw new Error("Enter sensitive information directly in the website.");
+  }
+  // Invalidate even if a page handler rejects or changes the requested value.
+  globalThis.__safariChatRefs = null;
+  if (operation === "scroll") {
+    if (!["up", "down", "left", "right", "top", "bottom"].includes(direction)) throw new Error("Choose a valid scroll direction.");
+    const gallery = reference?.gallery;
+    if (gallery) {
+      const { tabs, orientation, rtl, panels, scope } = gallery;
+      const currentTabs = [...element.querySelectorAll("[role='tab']")];
+      const currentLabel = (scope.getAttribute("aria-label") || scope.querySelector("h1,h2,h3,[role='heading']")?.textContent || "Gallery").trim().slice(0, 100);
+      const changedTab = tabs.some((tab, i) => currentTabs[i] !== tab.element || signature(tab.element, true) !== tab.signature || labelFor(tab.element) !== tab.label || tab.element.closest("form") || tab.element.form || !panels[i].isConnected || !scope.contains(panels[i]) || panels[i].id !== tab.element.getAttribute("aria-controls"));
+      if (!scope.isConnected || !scope.contains(element) || currentLabel !== gallery.label || tabs.length !== currentTabs.length || changedTab || (getComputedStyle(element).direction === "rtl") !== rtl) throw new Error("The gallery changed since approval. Read the page again.");
+      const forward = orientation === "vertical" ? "down" : rtl ? "left" : "right";
+      const backward = orientation === "vertical" ? "up" : rtl ? "right" : "left";
+      if (![forward, backward].includes(direction)) throw new Error("Use one of this gallery's listed scroll directions.");
+      // Approval is for a direction within this gallery, not a fixed slide.
+      // Autoplay may advance while the user reviews it; use the live selection
+      // after checking the gallery structure and every navigation destination.
+      const selected = tabs.findIndex(tab => tab.element.getAttribute("aria-selected") === "true");
+      if (selected < 0 || tabs.filter(tab => tab.element.getAttribute("aria-selected") === "true").length !== 1) throw new Error("The gallery selection is unavailable. Read the page again.");
+      const next = selected + (direction === forward ? 1 : -1);
+      if (next < 0 || next >= tabs.length) return { ok: true, operation, moved: false, message: "This gallery is at its first or last item. Scroll in the other direction." };
+      const control = tabs[next].element;
+      const rect = control.getBoundingClientRect();
+      if (control.matches(":disabled,[aria-disabled='true']") || control.closest("[hidden],[inert],[aria-hidden='true']") || !control.getClientRects().length || rect.width === 0 || rect.height === 0 || rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth) || getComputedStyle(control).visibility !== "visible") throw new Error("The next gallery control is not available. Read the page again.");
+      let depth = 0;
+      for (let parent = control; parent; parent = parent.parentElement) {
+        const style = getComputedStyle(parent), clip = parent.getBoundingClientRect();
+        if (++depth > 64 || style.opacity === "0" || (/auto|scroll|hidden|clip/.test(style.overflowX) && (rect.right <= clip.left || rect.left >= clip.right)) || (/auto|scroll|hidden|clip/.test(style.overflowY) && (rect.bottom <= clip.top || rect.top >= clip.bottom))) throw new Error("The next gallery control is not visible. Read the page again.");
+      }
+      control.click();
+      return { ok: true, operation, dispatched: true, fromItem: selected + 1, requestedItem: next + 1, message: "Gallery navigation activated. Read the page again to verify the newly visible cards." };
+    }
+    const target = pageScroll ? document.scrollingElement ?? document.documentElement : element;
+    const axis = ["left", "right"].includes(direction) ? "overflowX" : "overflowY";
+    if (!pageScroll && !/^(auto|scroll|hidden)$/.test(getComputedStyle(target)[axis])) throw new Error("This area cannot scroll in that direction. Use its listed directions or gallery controls.");
+    const before = { x: target.scrollLeft, y: target.scrollTop };
+    let top = before.y, left = before.x;
+    const height = pageScroll ? innerHeight : target.clientHeight;
+    const width = pageScroll ? Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth) : target.clientWidth;
+    if (direction === "up") top -= Math.max(1, Math.round(height * 0.8));
+    if (direction === "down") top += Math.max(1, Math.round(height * 0.8));
+    if (direction === "left") left -= Math.max(1, Math.round(width * 0.8));
+    if (direction === "right") left += Math.max(1, Math.round(width * 0.8));
+    if (direction === "top") top = 0;
+    if (direction === "bottom") top = target.scrollHeight;
+    target.scrollTo({ top, left, behavior: "instant" });
+    const moved = target.scrollLeft !== before.x || target.scrollTop !== before.y;
+    return { ok: true, operation, label, moved, scrollX: Math.round(target.scrollLeft), scrollY: Math.round(target.scrollTop), message: moved ? "Scrolled. Read the visible page again before the next action." : "No movement; this area is at its scroll boundary." };
+  }
+  element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
   if (operation === "click") {
     const link = element.closest("a[href]");
     if (link && !/^https?:$/.test(new URL(link.href).protocol)) throw new Error("Only ordinary web links can be opened.");
     element.click();
-  } else if (operation === "fill") {
-    if (typeof text !== "string" || text.length > 12000) throw new Error("Invalid field text.");
-    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
-      const prototype = element instanceof HTMLInputElement ? HTMLInputElement.prototype : element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLSelectElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(prototype, "value").set;
-      setter.call(element, text);
-    } else if (element.isContentEditable) element.textContent = text;
-    else throw new Error("This element is not an editable field.");
+    return { ok: true, operation, label, message: "Click dispatched. Read the page again to verify the outcome." };
+  }
+  if (operation === "set_checked") {
+    if (!element.matches("input[type='checkbox'],input[type='radio']") || typeof checked !== "boolean") throw new Error("Choose a checkbox or radio button and a boolean checked state.");
+    if (element.type === "radio" && !checked) throw new Error("Select another radio option instead of unchecking this one.");
+    if (element.checked !== checked) element.click();
+    if (element.checked !== checked) throw new Error("The page did not keep the requested checked state. Read it again.");
+    return { ok: true, operation, label, checked: element.checked };
+  }
+  if (operation === "select") {
+    if (!(element instanceof HTMLSelectElement) || element.multiple) throw new Error("Choose a single-choice dropdown. Use clicks for custom controls.");
+    if (typeof text !== "string" || text.length > 12000) throw new Error("Invalid option text.");
+    const options = [...element.options];
+    const byValue = options.filter(option => option.value === text);
+    const matches = byValue.length ? byValue : options.filter(option => option.label === text);
+    if (matches.length !== 1 || matches[0].disabled || matches[0].closest("optgroup[disabled]")) throw new Error("Choose one enabled option by its exact value or unique label.");
+    const option = matches[0];
+    element.focus({ preventScroll: true });
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(element, option.value);
     element.dispatchEvent(new Event("input", { bubbles: true }));
     element.dispatchEvent(new Event("change", { bubbles: true }));
-  } else throw new Error("Unsupported page operation.");
-  // Invalidate references after every write, including SPA changes.
-  globalThis.__safariChatRefs = null;
-  return { ok: true, operation, label };
+    if (element.value !== option.value) throw new Error("The page did not keep the selected option. Read it again.");
+    return { ok: true, operation, label, message: "Option selected; the form was not submitted." };
+  }
+  if (operation !== "fill") throw new Error("Unsupported page operation.");
+  if (typeof text !== "string" || text.length > 12000) throw new Error("Invalid field text.");
+  if (element.readOnly) throw new Error("This field is read-only.");
+  if (element instanceof HTMLSelectElement) throw new Error("Use select to choose a dropdown option.");
+  if (element instanceof HTMLInputElement && ["checkbox", "radio", "button", "submit", "reset", "image"].includes(element.type)) throw new Error("Use click or set_checked for this control.");
+  element.focus({ preventScroll: true });
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+    const prototype = element instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+    Object.getOwnPropertyDescriptor(prototype, "value").set.call(element, text);
+  } else if (element.isContentEditable) element.textContent = text;
+  else throw new Error("This element is not an editable field.");
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+  if ((element.isContentEditable ? element.textContent : element.value) !== text) throw new Error("The page did not keep the entered text. Read it again.");
+  return { ok: true, operation, label, message: "Text entered; the form was not submitted." };
 }

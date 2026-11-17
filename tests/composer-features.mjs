@@ -1,0 +1,103 @@
+import assert from "node:assert/strict";
+
+export async function testComposerFeatures(page, origin) {
+  const errors = []; page.on("pageerror", error => errors.push(error.message));
+  await page.goto(`${origin}/panel/panel.html?tab=1`);
+  await page.getByText("Test account", { exact: true }).waitFor();
+  const add = page.locator("#add-button"), menu = page.locator("#add-menu");
+  await add.focus(); await page.keyboard.press("Enter");
+  await menu.waitFor({ state: "visible" });
+  await page.waitForFunction(() => document.getElementById("add-button").getAttribute("aria-expanded") === "true");
+  await page.setViewportSize({ width: 320, height: 640 });
+  const bounds = await menu.boundingBox();
+  assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 320 && bounds.y >= 0 && bounds.y + bounds.height <= 640);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.screenshot({ path: "build/screenshots/panel-add-menu-small.png" });
+  await page.keyboard.press("Escape"); await menu.waitFor({ state: "hidden" });
+  assert.equal(await add.evaluate(el => el === document.activeElement), true);
+  await page.setViewportSize({ width: 440, height: 900 });
+  assert.equal(await page.getByRole("group", { name: "Conversation mode" }).count(), 0);
+  assert.equal(await page.locator("#actions-guidance").isVisible(), true);
+  assert.deepEqual(await page.evaluate(() => globalThis.__reads), [], "available browser tools do not read a page until requested");
+  await add.click(); await page.locator("#web-search").click();
+  await page.locator("#search-chip").waitFor({ state: "visible" });
+  await page.reload(); await page.getByText("Test account", { exact: true }).waitFor();
+  assert.equal(await page.locator("#search-chip").isVisible(), true);
+  await page.locator("#prompt").fill("Look up a fact."); await page.locator("#send-button").click();
+  await page.locator("#stop-button").waitFor({ state: "hidden" });
+  const run = await page.evaluate(() => globalThis.__runs.at(-1));
+  assert.equal(run.webSearch, true); assert.equal("browserTools" in run, false, "ordinary messages do not carry a browser-mode gate");
+  assert.equal(await page.locator("#messages .assistant a").getAttribute("href"), "https://example.com/source");
+  await page.reload(); await page.getByText("Test account", { exact: true }).waitFor();
+  assert.equal(await page.locator("#messages .assistant a").getAttribute("href"), "https://example.com/source", "citations persist with the answer");
+  await page.locator("#search-chip").click(); await page.locator("#search-chip").waitFor({ state: "hidden" });
+  await page.locator("#new-button").click();
+
+  await add.click(); await page.locator("#menu-tabs").click();
+  await page.locator("#tabs-dialog").waitFor({ state: "visible" });
+  assert.deepEqual(await page.evaluate(() => globalThis.__reads), [], "listing tabs does not read their content");
+  const search = page.locator("#tabs-search");
+  await search.fill("Guide");
+  assert.equal(await page.locator("#tabs-list input").count(), 1);
+  await page.getByRole("checkbox", { name: /Guide/ }).check();
+  await search.fill("Notes"); await page.getByRole("checkbox", { name: /Notes/ }).check();
+  await page.evaluate(() => { globalThis.__contextErrorId = 3; });
+  await page.locator("#add-selected-tabs").click();
+  await page.locator("#tabs-status").filter({ hasText: "access was denied" }).waitFor();
+  assert.equal(await page.locator("#attachments .attachment").count(), 1);
+  assert.equal(await page.locator("#add-selected-tabs").textContent(), "Add 1 tab");
+  await page.evaluate(() => { delete globalThis.__contextErrorId; });
+  await page.locator("#add-selected-tabs").click();
+  await page.locator("#tabs-dialog").waitFor({ state: "hidden" });
+  assert.equal(await page.locator("#attachments .attachment").count(), 2);
+  assert.deepEqual(await page.evaluate(() => globalThis.__reads), [2, 3, 3]);
+  await page.locator("#new-button").click();
+
+  await page.locator("#file-input").setInputFiles([{ name: "notes.md", mimeType: "text/markdown", buffer: Buffer.from("Notes") }, { name: "data.json", mimeType: "application/json", buffer: Buffer.from('{"value":1}') }]);
+  await page.waitForFunction(() => document.querySelectorAll("#attachments .attachment").length === 2);
+  await page.locator("#file-input").setInputFiles([{ name: "wrong.pdf", mimeType: "application/pdf", buffer: Buffer.from("pdf") }]);
+  await page.locator("#notice").filter({ hasText: "not supported" }).waitFor();
+  assert.equal(await page.locator("#attachments .attachment").count(), 2, "a rejected file leaves existing attachments intact");
+  await page.evaluate(() => {
+    const transfer = new DataTransfer(); transfer.items.add(new File(["Dropped"], "dropped.txt", { type: "text/plain" }));
+    const event = new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true });
+    document.dispatchEvent(event); globalThis.__dropPrevented = event.defaultPrevented;
+  });
+  await page.waitForFunction(() => document.querySelectorAll("#attachments .attachment").length === 3);
+  assert.equal(await page.evaluate(() => globalThis.__dropPrevented), true);
+  await page.locator("#settings-button").click();
+  await page.getByLabel("Appearance", { exact: true }).selectOption("dark");
+  await page.getByRole("button", { name: "Close settings", exact: true }).click();
+  await add.click();
+  await page.screenshot({ path: "build/screenshots/panel-tools-menu.png" });
+  await page.keyboard.press("Escape");
+  await page.locator("#new-button").click();
+
+  // Finish an old account's read while a different account has reopened the picker.
+  await page.evaluate(() => {
+    const text = File.prototype.text;
+    File.prototype.text = function () { return this.name === "pending.txt" ? new Promise(resolve => { globalThis.__releaseFile = () => resolve("invalid\0text"); }) : text.call(this); };
+  });
+  await page.locator("#file-input").setInputFiles([{ name: "pending.txt", mimeType: "text/plain", buffer: Buffer.from("Pending") }]);
+  await page.waitForFunction(() => typeof globalThis.__releaseFile === "function");
+  await page.locator("#attach-tabs").click();
+  await page.getByRole("checkbox", { name: /Guide/ }).check();
+  await page.getByRole("checkbox", { name: /Notes/ }).check();
+  await page.evaluate(() => { globalThis.__contextGate = 2; globalThis.__reads = []; });
+  await page.locator("#add-selected-tabs").click();
+  await page.waitForFunction(() => typeof globalThis.__releaseContext === "function");
+  await page.evaluate(() => { globalThis.__account = "other-account"; window.dispatchEvent(new Event("focus")); });
+  await page.getByText("Other account", { exact: true }).waitFor();
+  await page.locator("#tabs-dialog").waitFor({ state: "hidden" });
+  await page.locator("#attach-tabs").click();
+  await page.getByRole("checkbox", { name: /A useful page/ }).check();
+  await page.evaluate(() => { globalThis.__releaseContext(); globalThis.__releaseFile(); });
+  await page.waitForTimeout(100);
+  assert.deepEqual(await page.evaluate(() => globalThis.__reads), [2], "an obsolete batch cannot continue under a new account");
+  assert.equal(await page.locator("#attachments .attachment").count(), 0);
+  assert.ok(!(await page.locator("#notice").textContent()).includes("pending.txt"), "an old file's delayed failure stays out of the new account");
+  assert.equal(await page.locator("#tabs-dialog").isVisible(), true);
+  assert.equal(await page.getByRole("checkbox", { name: /A useful page/ }).isChecked(), true);
+  assert.deepEqual(errors, []);
+  await page.close();
+}

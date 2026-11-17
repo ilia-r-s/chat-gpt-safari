@@ -37,7 +37,7 @@ extension_sources = ["native/Extension/SafariWebExtensionHandler.swift"]
 refs = {path: file(path, "sourcecode.swift") for path in shared + app_sources + extension_sources}
 resources = ["extension/manifest.json", "extension/background.bundle.js", "extension/core", "extension/content", "extension/panel", "extension/icons"]
 for path in resources: refs[path] = file(path, "folder" if (ROOT / path).is_dir() else "text.json" if path.endswith("json") else "sourcecode.javascript")
-icon = file("native/App/AppIcon.icns", "image.icns")
+icon = file("native/App/SafariChatIcon.icns", "image.icns")
 app_product = obj("app-product", "PBXFileReference", explicitFileType="wrapper.application", path="Safari Chat.app", sourceTree="BUILT_PRODUCTS_DIR", includeInIndex="0")
 ext_product = obj("ext-product", "PBXFileReference", explicitFileType="wrapper.app-extension", path="Safari Chat Extension.appex", sourceTree="BUILT_PRODUCTS_DIR", includeInIndex="0")
 products = obj("products", "PBXGroup", children=[app_product, ext_product], name="Products", sourceTree="<group>")
@@ -46,8 +46,8 @@ root_group = obj("root-group", "PBXGroup", children=list(refs.values()) + [icon,
 common = {"SDKROOT": "macosx", "MACOSX_DEPLOYMENT_TARGET": "14.0", "SWIFT_VERSION": "5.0",
           "SAFARI_CHAT_BUNDLE_ID": "org.safarichat.app", "SAFARI_CHAT_GROUP_ID": "org.safarichat.shared",
           "CLANG_ENABLE_MODULES": "YES", "SWIFT_STRICT_CONCURRENCY": "complete", "ENABLE_HARDENED_RUNTIME": "YES",
-          "CODE_SIGN_STYLE": "Automatic", "GENERATE_INFOPLIST_FILE": "NO", "CURRENT_PROJECT_VERSION": "1",
-          "MARKETING_VERSION": "0.1.0", "COMBINE_HIDPI_IMAGES": "YES", "ENABLE_USER_SCRIPT_SANDBOXING": "YES"}
+          "CODE_SIGN_STYLE": "Automatic", "GENERATE_INFOPLIST_FILE": "NO", "CURRENT_PROJECT_VERSION": "3",
+          "MARKETING_VERSION": "0.1.2", "COMBINE_HIDPI_IMAGES": "YES", "ENABLE_USER_SCRIPT_SANDBOXING": "YES"}
 app_settings = {**common, "PRODUCT_BUNDLE_IDENTIFIER": "$(SAFARI_CHAT_BUNDLE_ID)", "PRODUCT_NAME": "Safari Chat",
                 "INFOPLIST_FILE": "native/App/Info.plist", "CODE_SIGN_ENTITLEMENTS": "native/App/App.entitlements",
                 "LD_RUNPATH_SEARCH_PATHS": ["$(inherited)", "@executable_path/../Frameworks"]}

@@ -53,11 +53,18 @@ final class AppModel: ObservableObject {
                 }
                 message = connected.canInfer ? "Connected. Return to Safari and open Safari Chat." : "Signed in. ChatGPT plan usage was not granted; enable it by signing in again, or use an API key."
                 refresh()
-            } catch { message = error.localizedDescription }
+                notifyPanel()
+            } catch { message = error.localizedDescription; notifyPanel(error: message) }
         }
     }
 
     func cancel() { signInTask?.cancel(); listener?.cancel() }
+
+    private func notifyPanel(error: String? = nil) {
+        var info: [String: Any] = ["type": "auth.changed"]
+        if let error { info["error"] = error }
+        SFSafariApplication.dispatchMessage(withName: "auth.changed", toExtensionWithIdentifier: Configuration.extensionID, userInfo: info) { _ in }
+    }
 
     func select(_ account: Account) {
         guard !busy, !preparingRemoval else { return }

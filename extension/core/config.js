@@ -1,11 +1,15 @@
+import { normalizeEffort } from "./models.js";
+
 export const DEFAULTS = Object.freeze({
   theme: "system",
   model: "",
+  reasoningEffort: "auto",
   pageChars: 12000,
   inputChars: 48000,
   historyTurns: 8,
   maxToolRounds: 6,
-  browserTools: false,
+  webSearch: false,
+  desktopControl: false,
 });
 
 const integer = (value, fallback, min, max) => Number.isFinite(value)
@@ -15,11 +19,13 @@ export function normalizeSettings(value = {}) {
   return {
     theme: ["system", "light", "dark"].includes(value.theme) ? value.theme : DEFAULTS.theme,
     model: typeof value.model === "string" ? value.model.slice(0, 120) : "",
+    reasoningEffort: normalizeEffort(value.reasoningEffort),
     pageChars: integer(value.pageChars, DEFAULTS.pageChars, 2000, 24000),
     inputChars: integer(value.inputChars, DEFAULTS.inputChars, 12000, 96000),
     historyTurns: integer(value.historyTurns, DEFAULTS.historyTurns, 1, 20),
     maxToolRounds: integer(value.maxToolRounds, DEFAULTS.maxToolRounds, 1, 10),
-    browserTools: value.browserTools === true,
+    webSearch: value.webSearch === true,
+    desktopControl: value.desktopControl === true,
   };
 }
 

@@ -37,6 +37,8 @@ struct Vault: Codable {
     var hostID = "urn:uuid:\(UUID().uuidString.lowercased())"
     var activeID: String?
     var accounts: [Account] = []
+    var desktopBridges: [DesktopLease]?
+    var desktopProfileID: String?
     var active: Account? { accounts.first { $0.id == activeID } }
 }
 

@@ -12,7 +12,7 @@ for (const file of files.filter(f => f.endsWith(".js"))) {
   if (result.status !== 0) { process.stderr.write(result.stderr); process.exit(1); }
 }
 const manifest = JSON.parse(await readFile("extension/manifest.json", "utf8"));
-for (const file of ["panel/panel.html", ...Object.values(manifest.icons), ...manifest.background.scripts]) {
+for (const file of ["panel/panel.html", "icons/openai-blossom.svg", ...Object.values(manifest.icons), ...Object.values(manifest.action.default_icon), ...manifest.background.scripts]) {
   if (!files.includes(`extension/${file}`)) throw new Error(`Missing manifest resource: ${file}`);
 }
 if (manifest.permissions.includes("<all_urls>") || manifest.host_permissions.includes("<all_urls>")) throw new Error("Broad website access must remain optional.");

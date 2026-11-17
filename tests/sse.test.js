@@ -39,6 +39,29 @@ test("refusal text is displayed rather than silently yielding an empty answer", 
   await readResponse(response([{ type: "response.refusal.delta", delta: "I cannot help with that request." }, { type: "response.completed", response: { output: [] } }]), { onDelta: delta => { text += delta; } });
   assert.equal(text, "I cannot help with that request.");
 });
+test("completion-only text and refusals are recovered without leaking reasoning or duplicating deltas", async () => {
+  const completed = { type: "response.completed", response: { output: [
+    { type: "reasoning", summary: [{ type: "output_text", text: "INTERNAL" }] },
+    { type: "message", content: [{ type: "output_text", text: "Answer." }, { type: "refusal", refusal: " Refusal." }] },
+  ] } };
+  let text = "";
+  await readResponse(response([completed]), { onDelta: delta => { text += delta; } });
+  assert.equal(text, "Answer. Refusal.");
+  text = "";
+  await readResponse(response([{ type: "response.output_text.delta", delta: "Already streamed." }, completed]), { onDelta: delta => { text += delta; } });
+  assert.equal(text, "Already streamed.");
+});
+test("finished streamed output items survive metadata-only completion in output order", async () => {
+  const reasoning = { type: "reasoning", encrypted_content: "opaque" };
+  const call = { type: "function_call", namespace: "safari", name: "browser", call_id: "scroll", arguments: '{"operation":"scroll"}' };
+  const events = [{ type: "response.output_item.done", output_index: 1, item: call }, { type: "response.output_item.done", output_index: 0, item: reasoning }];
+  await assert.rejects(readResponse(response(events)), /before the response completed/);
+  await assert.rejects(readResponse(response([...events, { type: "response.failed", response: { error: { message: "Failed after tool output" } } }])), /Failed after/);
+  assert.deepEqual((await readResponse(response([...events, { type: "response.completed", response: { output: [] } }]))).output, [reasoning, call]);
+  const result = await readResponse(response([...events, { type: "response.completed", response: { output: [reasoning, call] } }]));
+  assert.equal(result.output.length, 2, "terminal output must not duplicate streamed tool calls");
+  await assert.rejects(readResponse(response([{ type: "response.output_item.done", output_index: 64, item: call }])), /output item limit/);
+});
 test("a terminal event completes without waiting for the connection to close", async () => {
   let cancelled = false;
   const body = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('data: {"type":"response.completed","response":{"id":"done"}}\n\n')); }, cancel() { cancelled = true; } });

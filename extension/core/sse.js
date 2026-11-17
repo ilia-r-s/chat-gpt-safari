@@ -38,7 +38,7 @@ export async function* readSSE(body, signal) {
   }
 }
 
-export async function readResponse(response, { signal, onDelta = () => {} } = {}) {
+export async function readResponse(response, { signal, onDelta = () => {}, onActivity = () => {} } = {}) {
   if (!response.ok) {
     const body = await response.text();
     let message = `OpenAI returned HTTP ${response.status}.`;
@@ -49,16 +49,45 @@ export async function readResponse(response, { signal, onDelta = () => {} } = {}
     const requestID = response.headers.get("x-request-id");
     throw new Error(`${String(message).slice(0, 700)}${requestID ? ` (Request ${requestID})` : ""}`);
   }
+  let receivedText = false;
+  const finishedItems = new Map();
+  let itemChars = 0;
   for await (const data of readSSE(response.body, signal)) {
     if (data === "[DONE]") continue;
     let event;
     try { event = JSON.parse(data); } catch { throw new Error("The server returned an invalid stream event."); }
-    if (event.type === "response.output_text.delta" || event.type === "response.refusal.delta") onDelta(event.delta ?? "");
+    if (event.type === "response.web_search_call.in_progress") onActivity({ type: "activity", operation: "web_search", state: "working" });
+    if (event.type === "response.web_search_call.completed") onActivity({ type: "activity", operation: "web_search", state: "done" });
+    if (event.type === "response.output_text.delta" || event.type === "response.refusal.delta") {
+      if (event.delta) receivedText = true;
+      onDelta(event.delta ?? "");
+    }
+    if (event.type === "response.output_item.done" && event.item) {
+      const index = event.output_index;
+      if (!Number.isInteger(index) || index < 0 || index >= 64) throw new Error("The response exceeded the output item limit.");
+      itemChars += JSON.stringify(event.item).length - (finishedItems.has(index) ? JSON.stringify(finishedItems.get(index)).length : 0);
+      if (itemChars > 1_000_000) throw new Error("The response exceeded the output item size limit.");
+      finishedItems.set(index, event.item);
+    }
     if (event.type === "error" || event.type === "response.failed") {
       throw new Error(event.response?.error?.message || event.message || "The response failed. Please try again.");
     }
     if (event.type === "response.incomplete") throw new Error(`The response was incomplete (${event.response?.incomplete_details?.reason ?? "unknown reason"}).`);
-    if (event.type === "response.completed" && event.response) return event.response;
+    if (event.type === "response.completed" && event.response) {
+      // Retain completed streamed items when the terminal event contains only
+      // metadata. Tools must still wait for this successful terminal event.
+      const output = event.response.output?.length ? event.response.output : [...finishedItems.entries()].sort(([a], [b]) => a - b).map(([, item]) => item);
+      // Some responses deliver text only in the completed message. Never show
+      // internal reasoning, and never duplicate text already streamed.
+      if (!receivedText) for (const item of output) {
+        if (item.type !== "message") continue;
+        for (const part of item.content ?? []) {
+          if (part.type === "output_text") onDelta(part.text ?? "");
+          else if (part.type === "refusal") onDelta(part.refusal ?? "");
+        }
+      }
+      return { ...event.response, output };
+    }
   }
   throw new Error("The connection ended before the response completed. Your partial answer is preserved.");
 }
