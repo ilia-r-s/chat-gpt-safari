@@ -56,24 +56,15 @@ enum CredentialStore {
 
     @discardableResult
     static func update(_ mutation: (inout Vault) throws -> Void) throws -> Vault {
-        try locked {
-            var vault = try readUnlocked()
-            try mutation(&vault)
-            try writeUnlocked(vault)
-            return vault
-        }
+        try modify { vault in try mutation(&vault); return vault }
     }
 
-    static func signOut() throws {
-        try update { vault in
-            guard vault.activeID != nil else { throw ChatError.message("No account is signed in.") }
-            if let index = vault.accounts.firstIndex(where: { $0.id == vault.activeID }) {
-                vault.accounts[index].accessToken = nil
-                vault.accounts[index].refreshToken = nil
-                vault.accounts[index].idToken = nil
-                vault.accounts[index].scopes = []
-            }
-            vault.activeID = nil
+    static func modify<T>(_ mutation: (inout Vault) throws -> T) throws -> T {
+        try locked {
+            var vault = try readUnlocked()
+            let result = try mutation(&vault)
+            try writeUnlocked(vault)
+            return result
         }
     }
 

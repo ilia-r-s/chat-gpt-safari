@@ -230,7 +230,7 @@
       window.addEventListener("blur", stopDragging);
       window.addEventListener("pagehide", close);
     }
-    frame.focus({ preventScroll: true });
+    if (!message.restore) frame.focus({ preventScroll: true });
     return Promise.resolve({ ok: true });
   });
 })();

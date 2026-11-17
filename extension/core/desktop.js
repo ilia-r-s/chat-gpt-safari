@@ -40,7 +40,7 @@ export class DesktopController {
       const identity = await this.verify(sessionId);
       for (const [id, item] of this.sessions) if (item.expires < Date.now() && !item.busy) this.sessions.delete(id);
       let session = this.sessions.get(sessionId);
-      if (session && (session.account !== identity.account || session.hostID !== identity.hostID)) {
+      if (session && (session.account !== identity.account || session.hostID !== identity.hostID || session.generation !== identity.generation)) {
         this.sessions.delete(sessionId); throw new Error("The Safari Chat account changed. Read the page again in a new desktop request.");
       }
       if (session?.busy) throw new Error("Another action is already running in this desktop session.");
@@ -59,10 +59,12 @@ export class DesktopController {
             active.send({ type: "approval", approvalId, ...details }).catch(error => { this.approvals.get(active.key)?.reject(error); this.approvals.delete(active.key); });
           });
           signal.throwIfAborted();
-          const now = await this.verify(sessionId);
-          if (this.isClosed() || now.hostID !== session.hostID || now.account !== session.account || !(await this.preferences()).desktopControl) throw new Error("Desktop access or the account changed while awaiting approval.");
         };
-        session.execute = createBrowserTools({ api: this.api, pageChars: prefs.pageChars, approve });
+        const verifySession = async () => {
+          const now = await this.verify(sessionId);
+          if (this.isClosed() || now.hostID !== session.hostID || now.account !== session.account || now.generation !== session.generation || !(await this.preferences()).desktopControl) throw new Error("Desktop access or the account changed while awaiting approval.");
+        };
+        session.execute = createBrowserTools({ api: this.api, pageChars: prefs.pageChars, approve, verifySession });
         this.sessions.set(sessionId, session);
       }
       session.busy = true; session.current = { key, send };

@@ -1,3 +1,5 @@
+import { textPrefix } from "../core/context.js";
+
 const $ = id => document.getElementById(id);
 
 export async function readTextFiles(files, limit) {
@@ -8,9 +10,11 @@ export async function readTextFiles(files, limit) {
   }
   const result = [];
   for (const file of files) {
-    const text = await file.text();
-    if (/[\u0000\uFFFD]/.test(text)) throw new Error(`${file.name}: use a UTF-8 text file.`);
-    result.push({ kind: "file", key: `file:${file.name}`, title: file.name, text: text.slice(0, limit), truncated: text.length > limit });
+    let text;
+    try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(await file.arrayBuffer()); }
+    catch { throw new Error(`${file.name}: could not read this file as UTF-8 text.`); }
+    if (text.includes("\u0000")) throw new Error(`${file.name}: use a UTF-8 text file.`);
+    result.push({ kind: "file", key: `file:${crypto.randomUUID()}`, title: file.name, text: textPrefix(text, limit), truncated: text.length > limit });
   }
   return result;
 }
@@ -32,6 +36,72 @@ export function setupAttachments({ state, add, readPage, listTabs, report }) {
     closeMenu();
     try { await callback(); } catch (error) { if (owner === state().owner && !state().blocked) report(error.message); }
   };
+  const prompt = $("prompt"), suggestions = $("tab-mentions");
+  let mention = null;
+  function closeMentions() {
+    mention = null; suggestions.hidden = true; suggestions.replaceChildren();
+    prompt.removeAttribute("aria-activedescendant");
+  }
+  function highlight(index) {
+    if (!mention) return;
+    mention.index = index;
+    [...suggestions.children].forEach((button, i) => button.setAttribute("aria-selected", String(i === index)));
+    const active = suggestions.children[index];
+    if (active) { prompt.setAttribute("aria-activedescendant", active.id); active.scrollIntoView({ block: "nearest" }); }
+  }
+  async function chooseMention(item, tab) {
+    if (mention !== item || state().blocked) return;
+    closeMentions();
+    const end = prompt.selectionEnd, before = prompt.value;
+    try {
+      if (state().contexts.length >= 6 && !state().contexts.some(source => source.tabId === tab.id)) throw new Error("Remove a source before adding another tab.");
+      await readPage(tab.id);
+      if (state().owner !== item.owner || prompt.value !== before) return;
+      prompt.setRangeText("", item.start, end, "end");
+      prompt.dispatchEvent(new Event("input")); prompt.focus();
+    } catch (error) { if (state().owner === item.owner) report(error.message); }
+  }
+  function renderMentions(item, query) {
+    suggestions.replaceChildren();
+    const matches = item.tabs.filter(tab => `${tab.title} ${tab.url}`.toLowerCase().includes(query.toLowerCase())).slice(0, 8);
+    for (const [i, tab] of matches.entries()) {
+      const row = document.createElement("button");
+      row.type = "button"; row.id = `mention-tab-${i}`; row.tabIndex = -1; row.setAttribute("role", "option");
+      const title = document.createElement("strong"), url = document.createElement("small");
+      title.textContent = tab.title; url.textContent = tab.url; row.append(title, url);
+      row.onmousedown = event => event.preventDefault();
+      row.onclick = () => chooseMention(item, tab); suggestions.append(row);
+    }
+    if (!matches.length) { closeMentions(); return; }
+    suggestions.hidden = false; highlight(0);
+  }
+  async function updateMentions(event) {
+    const owner = state().owner, end = prompt.selectionStart;
+    const match = /(?:^|\s)@([^@\s]*)$/u.exec(prompt.value.slice(0, end));
+    if (event.isComposing || !match || state().blocked || prompt.selectionEnd !== end) { closeMentions(); return; }
+    const query = match[1], start = end - query.length - 1;
+    if (!mention || mention.start !== start || mention.owner !== owner) {
+      const item = { start, owner, query, index: 0, tabs: null }; mention = item;
+      try { item.tabs = await listTabs(); } catch (error) { if (mention === item) { closeMentions(); report(error.message); } return; }
+      if (mention !== item || state().owner !== owner || state().blocked) return;
+      renderMentions(item, item.query);
+    } else {
+      mention.query = query;
+      if (mention.tabs) renderMentions(mention, query);
+    }
+  }
+  prompt.addEventListener("input", updateMentions);
+  prompt.addEventListener("keydown", event => {
+    if (!mention || event.isComposing) return;
+    if (event.key === "Escape") { closeMentions(); event.preventDefault(); return; }
+    if (!mention.tabs && event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+    if (suggestions.hidden || !["ArrowDown", "ArrowUp", "Enter"].includes(event.key) || event.shiftKey) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (event.key === "Enter") suggestions.children[mention.index]?.click();
+    else highlight((mention.index + (event.key === "ArrowDown" ? 1 : -1) + suggestions.children.length) % suggestions.children.length);
+  }, true);
+  prompt.addEventListener("blur", closeMentions);
+  prompt.addEventListener("click", closeMentions);
   async function attachFiles(files) {
     const before = state();
     if (before.blocked || !files.length) return;
@@ -101,7 +171,7 @@ export function setupAttachments({ state, add, readPage, listTabs, report }) {
     $("tabs-search").value = ""; $("tabs-status").textContent = "Only the tabs you select will be read.";
     renderTabs(); $("tabs-dialog").showModal(); $("tabs-search").focus();
   });
-  $("attach-tabs").onclick = openTabs; $("menu-tabs").onclick = openTabs;
+  $("menu-tabs").onclick = openTabs;
   $("menu-page").onclick = run(() => readPage());
   $("tabs-search").oninput = renderTabs;
   $("add-selected-tabs").onclick = async () => {
@@ -120,7 +190,7 @@ export function setupAttachments({ state, add, readPage, listTabs, report }) {
     finally { if (request === revision) { loading = false; renderTabs(); } }
   };
   return { closeMenu, reset() {
-    revision++; closeMenu(); tabs = []; selected.clear(); owner = null; loading = false;
+    revision++; closeMenu(); closeMentions(); tabs = []; selected.clear(); owner = null; loading = false;
     $("tabs-dialog").close(); $("tabs-list").replaceChildren(); $("tabs-search").value = ""; $("tabs-status").textContent = "";
     delete document.body.dataset.fileDrag;
   } };

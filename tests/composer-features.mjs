@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 export async function testComposerFeatures(page, origin) {
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   await page.goto(`${origin}/panel/panel.html?tab=1`);
-  await page.getByText("Test account", { exact: true }).waitFor();
+  await page.waitForFunction(() => document.getElementById("account-label").textContent === "Test account");
   const add = page.locator("#add-button"), menu = page.locator("#add-menu");
   await add.focus(); await page.keyboard.press("Enter");
   await menu.waitFor({ state: "visible" });
@@ -21,14 +21,14 @@ export async function testComposerFeatures(page, origin) {
   assert.deepEqual(await page.evaluate(() => globalThis.__reads), [], "available browser tools do not read a page until requested");
   await add.click(); await page.locator("#web-search").click();
   await page.locator("#search-chip").waitFor({ state: "visible" });
-  await page.reload(); await page.getByText("Test account", { exact: true }).waitFor();
+  await page.reload(); await page.waitForFunction(() => document.getElementById("account-label").textContent === "Test account");
   assert.equal(await page.locator("#search-chip").isVisible(), true);
   await page.locator("#prompt").fill("Look up a fact."); await page.locator("#send-button").click();
   await page.locator("#stop-button").waitFor({ state: "hidden" });
   const run = await page.evaluate(() => globalThis.__runs.at(-1));
   assert.equal(run.webSearch, true); assert.equal("browserTools" in run, false, "ordinary messages do not carry a browser-mode gate");
   assert.equal(await page.locator("#messages .assistant a").getAttribute("href"), "https://example.com/source");
-  await page.reload(); await page.getByText("Test account", { exact: true }).waitFor();
+  await page.reload(); await page.waitForFunction(() => document.getElementById("account-label").textContent === "Test account");
   assert.equal(await page.locator("#messages .assistant a").getAttribute("href"), "https://example.com/source", "citations persist with the answer");
   await page.locator("#search-chip").click(); await page.locator("#search-chip").waitFor({ state: "hidden" });
   await page.locator("#new-button").click();
@@ -51,6 +51,21 @@ export async function testComposerFeatures(page, origin) {
   await page.locator("#tabs-dialog").waitFor({ state: "hidden" });
   assert.equal(await page.locator("#attachments .attachment").count(), 2);
   assert.deepEqual(await page.evaluate(() => globalThis.__reads), [2, 3, 3]);
+  await page.locator("#new-button").click();
+  const prompt = page.locator("#prompt"), mentions = page.locator("#tab-mentions");
+  await prompt.fill("Compare @"); await mentions.waitFor({ state: "visible" });
+  await page.keyboard.press("Escape"); await mentions.waitFor({ state: "hidden" });
+  await prompt.fill("Compare @gui"); await mentions.getByRole("option", { name: /Guide/ }).waitFor();
+  assert.deepEqual(await page.evaluate(() => globalThis.__reads), [2, 3, 3], "typing a mention reads only tab metadata");
+  await page.keyboard.press("Enter"); await mentions.waitFor({ state: "hidden" });
+  await page.waitForFunction(() => document.getElementById("prompt").value === "Compare ");
+  assert.equal(await page.locator("#attachments .attachment").count(), 1);
+  assert.deepEqual(await page.evaluate(() => globalThis.__reads), [2, 3, 3, 2]);
+  await page.evaluate(() => { globalThis.__answer = "The guide lists two deadlines.\n\n- **Thursday, 11 am** — Prototype review.\n- **Friday, 3 pm** — Final handoff."; });
+  await prompt.fill("Which deadlines should I put on my calendar?");
+  await page.keyboard.press("Enter");
+  await page.locator(".assistant li").filter({ hasText: "Final handoff" }).waitFor();
+  await page.screenshot({ path: "build/screenshots/panel-conversation.png" });
   await page.locator("#new-button").click();
 
   await page.locator("#file-input").setInputFiles([{ name: "notes.md", mimeType: "text/markdown", buffer: Buffer.from("Notes") }, { name: "data.json", mimeType: "application/json", buffer: Buffer.from('{"value":1}') }]);
@@ -75,21 +90,21 @@ export async function testComposerFeatures(page, origin) {
 
   // Finish an old account's read while a different account has reopened the picker.
   await page.evaluate(() => {
-    const text = File.prototype.text;
-    File.prototype.text = function () { return this.name === "pending.txt" ? new Promise(resolve => { globalThis.__releaseFile = () => resolve("invalid\0text"); }) : text.call(this); };
+    const bytes = File.prototype.arrayBuffer;
+    File.prototype.arrayBuffer = function () { return this.name === "pending.txt" ? new Promise(resolve => { globalThis.__releaseFile = () => resolve(new TextEncoder().encode("invalid\0text").buffer); }) : bytes.call(this); };
   });
   await page.locator("#file-input").setInputFiles([{ name: "pending.txt", mimeType: "text/plain", buffer: Buffer.from("Pending") }]);
   await page.waitForFunction(() => typeof globalThis.__releaseFile === "function");
-  await page.locator("#attach-tabs").click();
+  await page.locator("#add-button").click(); await page.locator("#menu-tabs").click();
   await page.getByRole("checkbox", { name: /Guide/ }).check();
   await page.getByRole("checkbox", { name: /Notes/ }).check();
   await page.evaluate(() => { globalThis.__contextGate = 2; globalThis.__reads = []; });
   await page.locator("#add-selected-tabs").click();
   await page.waitForFunction(() => typeof globalThis.__releaseContext === "function");
   await page.evaluate(() => { globalThis.__account = "other-account"; window.dispatchEvent(new Event("focus")); });
-  await page.getByText("Other account", { exact: true }).waitFor();
+  await page.waitForFunction(() => document.getElementById("account-label").textContent === "Other account");
   await page.locator("#tabs-dialog").waitFor({ state: "hidden" });
-  await page.locator("#attach-tabs").click();
+  await page.locator("#add-button").click(); await page.locator("#menu-tabs").click();
   await page.getByRole("checkbox", { name: /A useful page/ }).check();
   await page.evaluate(() => { globalThis.__releaseContext(); globalThis.__releaseFile(); });
   await page.waitForTimeout(100);
@@ -98,6 +113,29 @@ export async function testComposerFeatures(page, origin) {
   assert.ok(!(await page.locator("#notice").textContent()).includes("pending.txt"), "an old file's delayed failure stays out of the new account");
   assert.equal(await page.locator("#tabs-dialog").isVisible(), true);
   assert.equal(await page.getByRole("checkbox", { name: /A useful page/ }).isChecked(), true);
+  await page.locator('[data-close="tabs-dialog"]').first().click();
+  await page.evaluate(() => { globalThis.__responseDelay = 1500; });
+  await prompt.fill("First editor’s question"); await page.keyboard.press("Enter");
+  await page.locator("#stop-button").waitFor({ state: "visible" });
+  await page.waitForFunction(() => globalThis.__runs.at(-1)?.messages.at(-1)?.text === "First editor’s question");
+  await page.evaluate(() => { globalThis.__forkNextDraft = true; });
+  await prompt.fill("Keep my follow-up draft");
+  await page.locator("#notice").filter({ hasText: "Another panel edited this draft" }).waitFor();
+  await page.locator("#notice").filter({ hasText: "reply was saved" }).waitFor();
+  assert.equal(await prompt.inputValue(), "Keep my follow-up draft");
+  const copies = await page.evaluate(() => {
+    const run = globalThis.__runs.at(-1), fork = new URL(location.href).searchParams.get("chat");
+    return [globalThis.__data[run.chatId].messages.at(-1).role, globalThis.__drafts[fork].text, run.chatId !== fork];
+  });
+  assert.deepEqual(copies, ["assistant", "Keep my follow-up draft", true]);
+  await page.locator("#new-button").click();
+  await prompt.fill("Leave during a response"); await page.keyboard.press("Enter");
+  await page.waitForFunction(() => globalThis.__runs.at(-1)?.messages.at(-1)?.text === "Leave during a response");
+  await page.evaluate(() => { globalThis.__account = "new-connection"; window.dispatchEvent(new Event("focus")); });
+  await page.locator("#stop-button").waitFor({ state: "hidden" });
+  await page.locator("#welcome").waitFor({ state: "visible" });
+  assert.equal(await page.locator("#messages article").count(), 0);
+  assert.equal(await prompt.inputValue(), "");
   assert.deepEqual(errors, []);
   await page.close();
 }

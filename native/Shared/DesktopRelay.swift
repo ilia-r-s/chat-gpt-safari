@@ -19,6 +19,11 @@ struct DesktopLease: Codable, Equatable {
 
 /// Ephemeral local routing credentials share the existing app-specific Keychain vault.
 enum DesktopRelay {
+    static func enabledProfile(read: () throws -> Vault = CredentialStore.read) throws -> (Vault, String) {
+        let vault = try read()
+        guard let id = vault.desktopProfileID else { throw ChatError.message("Enable ChatGPT desktop control in the extension settings in your chosen Safari profile first.") }
+        return (vault, id)
+    }
     static func profileIdentifier(_ value: Any?) throws -> String {
         guard let value else { return "default" }
         if let id = value as? UUID { return id.uuidString.lowercased() }
@@ -45,7 +50,7 @@ enum DesktopRelay {
     static func verify(_ id: String, profileID: String) throws -> [String: Any] {
         let vault = try CredentialStore.read()
         _ = try authorizedLease(id, vault: vault, profileID: profileID)
-        return ["ok": true, "account": vault.activeID ?? "local", "hostID": vault.hostID]
+        return ["ok": true, "account": vault.activeID ?? "local", "hostID": vault.hostID, "generation": vault.generation]
     }
 
     static func authorizedLease(_ id: String, vault: Vault, profileID: String, requireEnabled: Bool = true) throws -> DesktopLease {

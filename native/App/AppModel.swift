@@ -7,6 +7,7 @@ import SwiftUI
 final class AppModel: ObservableObject {
     @Published var accounts: [Account] = []
     @Published var activeID: String?
+    private var generation = "local"
     @Published var busy = false
     @Published var message = ""
     @Published var extensionEnabled = false
@@ -20,7 +21,7 @@ final class AppModel: ObservableObject {
 
     func refresh() {
         guard !preparingRemoval else { return }
-        do { let vault = try CredentialStore.read(); accounts = vault.accounts; activeID = vault.activeID }
+        do { let vault = try CredentialStore.read(); accounts = vault.accounts; activeID = vault.activeID; generation = vault.generation }
         catch { message = error.localizedDescription }
         SFSafariExtensionManager.getStateOfSafariExtension(withIdentifier: Configuration.extensionID) { [weak self] state, _ in
             Task { @MainActor in self?.extensionEnabled = state?.isEnabled ?? false }
@@ -36,6 +37,7 @@ final class AppModel: ObservableObject {
             do {
                 // Persist host identity before first authorization, even if sign-in is cancelled.
                 let vault = try CredentialStore.update { _ in }
+                let startGeneration = vault.generation
                 let port = try await listener.start()
                 let attempt = try OAuthAttempt(port: port, hostID: vault.hostID, account: account)
                 let callback = try await listener.wait(state: attempt.state) {
@@ -49,42 +51,45 @@ final class AppModel: ObservableObject {
                     guard vault.hostID == attempt.hostID else { throw ChatError.message("Local data was erased during sign-in. Start sign-in again if you want to reconnect.") }
                     if let index = vault.accounts.firstIndex(where: { $0.id == connected.id }) { vault.accounts[index] = connected }
                     else { vault.accounts.append(connected) }
-                    vault.activeID = connected.id
+                    guard vault.generation == startGeneration else { throw ChatError.message("The selected account changed during sign-in. Please try again.") }
+                    vault.activate(connected.id)
                 }
                 message = connected.canInfer ? "Connected. Return to Safari and open Safari Chat." : "Signed in. ChatGPT plan usage was not granted; enable it by signing in again, or use an API key."
                 refresh()
-                notifyPanel()
-            } catch { message = error.localizedDescription; notifyPanel(error: message) }
+                AccountEvents.notify(Configuration.extensionID)
+            } catch { message = error.localizedDescription; AccountEvents.notify(Configuration.extensionID, error: message) }
         }
     }
 
     func cancel() { signInTask?.cancel(); listener?.cancel() }
 
-    private func notifyPanel(error: String? = nil) {
-        var info: [String: Any] = ["type": "auth.changed"]
-        if let error { info["error"] = error }
-        SFSafariApplication.dispatchMessage(withName: "auth.changed", toExtensionWithIdentifier: Configuration.extensionID, userInfo: info) { _ in }
-    }
-
     func select(_ account: Account) {
         guard !busy, !preparingRemoval else { return }
-        if account.accessToken == nil { signIn(account: account); return }
+        if account.accessToken == nil { if !account.isAPIKey { signIn(account: account) }; return }
+        if activeID == account.id { return }
         do {
             try CredentialStore.update { vault in
                 guard vault.accounts.contains(where: { $0.id == account.id && $0.accessToken != nil }) else { throw ChatError.message("This account was removed. Sign in again to reconnect.") }
-                vault.activeID = account.id
+                vault.activate(account.id)
             }
-            refresh(); message = "Account selected. Refresh the Safari panel."
+            refresh(); message = "Account selected."
+            AccountEvents.notify(Configuration.extensionID)
         }
         catch { message = error.localizedDescription }
     }
 
     func signOut() {
-        do { try CredentialStore.signOut(); refresh(); message = "Signed out on this Mac. Revoke app access in ChatGPT settings if you also want to disconnect it remotely." }
-        catch { message = error.localizedDescription }
+        guard !busy, !preparingRemoval else { return }
+        let expected = generation
+        busy = true; message = "Signing out…"
+        signInTask = Task {
+            defer { busy = false; refresh() }
+            do { message = try await AuthService.shared.signOut(expected: expected, extensionID: Configuration.extensionID) }
+            catch { message = error.localizedDescription }
+        }
     }
 
-    func connectAPIKey(_ input: String) {
+    func connectAPIKey(_ input: String, name: String, replacing id: String?) {
         let key = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard key.hasPrefix("sk-"), key.count >= 20, key.count < 512, !key.contains(where: \.isWhitespace) else { message = "Enter a valid OpenAI API key."; return }
         guard !busy, !preparingRemoval else { return }
@@ -98,12 +103,13 @@ final class AppModel: ObservableObject {
                 let (_, response) = try await SecureHTTP.session.data(for: request)
                 try Task.checkCancellation()
                 guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw ChatError.message("This API key could not access the model catalog. Check its permissions and try again.") }
-                let account = Account(id: "api-key", subject: "api-key", email: "", name: "OpenAI API key", accessToken: key, refreshToken: nil, idToken: nil, expiresAt: .distantFuture, scopes: [], isAPIKey: true)
                 try CredentialStore.update { vault in
                     guard vault.hostID == original.hostID else { throw ChatError.message("Local data was erased while connecting. Connect again if you want to keep using Safari Chat.") }
-                    vault.accounts.removeAll { $0.id == account.id }; vault.accounts.append(account); vault.activeID = account.id
+                    guard vault.generation == original.generation else { throw ChatError.message("The selected account changed while connecting. Please try again.") }
+                    try vault.connectKey(key, name: name, replacing: id)
                 }
-                refresh(); message = "API key saved in Keychain. API requests use your OpenAI API billing."
+                refresh(); message = id == nil ? "API key connected. This connection has its own chat history." : "Key replaced. This connection’s chat history is available."
+                AccountEvents.notify(Configuration.extensionID)
             } catch { message = error.localizedDescription }
         }
     }
@@ -134,6 +140,7 @@ final class AppModel: ObservableObject {
             do {
                 for window in NSApp.windows { window.isRestorable = false }
                 try await AuthService.shared.eraseLocalData()
+                AccountEvents.notify(Configuration.extensionID)
                 accounts = []; activeID = nil; apiKey = ""
                 NSApp.terminate(nil)
             } catch {

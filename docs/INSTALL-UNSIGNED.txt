@@ -29,8 +29,9 @@ To test the complete extension:
    for your local development configuration. This alone does not grant Keychain
    or App Groups entitlements.
 5. Open Safari > Settings > Extensions and enable Safari Chat.
-6. Open the Safari Chat app, select Continue with ChatGPT (or use an API key),
-   complete sign-in in your browser, then click the extension on a website.
+6. Open Safari Chat from the toolbar on a website. Choose Continue with ChatGPT
+   to sign in through your browser, or add an API-key connection in the Mac app.
+   Find your account, model and appearance in Settings in the panel header.
 
 If an older preview opens safarichat://connect and Safari says the address is
 invalid, reload the temporary extension after updating the repo. Current builds

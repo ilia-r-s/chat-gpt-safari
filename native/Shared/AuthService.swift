@@ -1,4 +1,13 @@
 import Foundation
+import SafariServices
+
+enum AccountEvents {
+    static func notify(_ extensionID: String, error: String? = nil) {
+        var info = ["type": "auth.changed"]
+        if let error { info["error"] = error }
+        SFSafariApplication.dispatchMessage(withName: "auth.changed", toExtensionWithIdentifier: extensionID, userInfo: info) { _ in }
+    }
+}
 
 actor AuthService {
     static let shared = AuthService()
@@ -11,8 +20,19 @@ actor AuthService {
         try LocalDataCleaner.eraseCurrentProcess()
     }
 
-    func credential() async throws -> Account {
+    func signOut(expected: String, extensionID: String) async throws -> String {
+        let account = try CredentialStore.modify { try $0.beginSignOut(expected: expected) }
+        AccountEvents.notify(extensionID)
+        refreshes[account.id]?.cancel()
+        guard !account.isAPIKey, let token = account.refreshToken else { return "Signed out on this Mac." }
+        // Only this call retains the retiring token. A delayed reply cannot alter a newer login.
+        let revoked = await OAuthClient.revoke(token: token, clientID: account.id)
+        return revoked ? "Signed out on this Mac. OpenAI accepted the revocation request." : "Signed out on this Mac. Remote revocation could not be confirmed. You can disconnect the app in ChatGPT settings."
+    }
+
+    func credential(generation: String) async throws -> Account {
         let vault = try CredentialStore.read()
+        guard vault.generation == generation else { throw ChatError.message("The selected account changed.") }
         guard let account = vault.active, account.canInfer else { throw ChatError.message("Enable ChatGPT plan usage or connect an API key in the companion app.") }
         if account.isAPIKey || account.expiresAt > Date().addingTimeInterval(60) { return account }
         if let task = refreshes[account.id] { return try await task.value }
@@ -33,8 +53,7 @@ actor AuthService {
             if let scope = response.scope { updated.scopes = scope.split(separator: " ").map(String.init) }
             // Retain the original validated ID token as a hint, not an authentication credential.
             try CredentialStore.update { vault in
-                guard vault.activeID == account.id,
-                      let index = vault.accounts.firstIndex(where: { $0.id == account.id }),
+                guard let index = vault.accounts.firstIndex(where: { $0.id == account.id && $0.accessToken != nil }),
                       vault.accounts[index].refreshToken == token else { throw ChatError.message("Your account changed while refreshing. Please retry.") }
                 vault.accounts[index] = updated
             }

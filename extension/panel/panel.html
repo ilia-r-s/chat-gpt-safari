@@ -10,27 +10,21 @@
 </head>
 <body>
   <header class="topbar">
-    <span class="chatgpt-mark brand-mark" aria-hidden="true"></span>
-    <div class="brand"><span>Safari Chat <span class="beta">Preview</span></span><small id="conversation-title">New chat</small></div>
+    <button class="brand" id="history-button" title="Recent chats" aria-label="Recent chats"><span class="chatgpt-mark" aria-hidden="true"></span><strong>Safari Chat</strong><svg viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button>
+    <span id="conversation-title">New chat</span>
+    <button class="icon-button" id="new-button" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24"><path d="M11 5H5v14h14v-6m-9 1 1-4 8-8 3 3-8 8z"/></svg></button>
     <button class="icon-button" id="open-tab-button" title="Open chat in a tab" aria-label="Open chat in a tab"><svg viewBox="0 0 24 24"><path d="M14 4h6v6m0-6L10 14M10 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/></svg></button>
+    <button class="icon-button" id="settings-button" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24"><path d="M3 7h4m6 0h8M3 17h10m6 0h2"/><circle cx="10" cy="7" r="3"/><circle cx="16" cy="17" r="3"/></svg></button>
     <button class="icon-button" id="close-button" title="Close panel" aria-label="Close panel"><svg viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
   </header>
 
-  <nav class="chat-controls" aria-label="Chat controls">
-    <button class="icon-button" id="history-button" title="Recent chats" aria-label="Recent chats"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 4v16"/></svg></button>
-    <span class="browser-hint">Chat & browse with Safari</span>
-    <button class="icon-button" id="new-button" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24"><path d="M11 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6M15 3l6 6M9 15l1-5L18 2l4 4-8 8z"/></svg></button>
-  </nav>
-
   <main id="conversation" aria-label="Conversation">
     <section id="welcome" class="welcome">
-      <div class="welcome-icon" aria-hidden="true"><span class="chatgpt-mark"></span></div>
       <h1>What can I help with?</h1>
-      <p class="intro">Ask a question, work through an idea,<br>or add a page for context.</p>
       <div class="suggestions">
-        <button data-prompt="summarize"><span class="suggestion-icon">≋</span><span><strong>Summarize this page</strong><small>Get the key points</small></span><span class="arrow">↗</span></button>
-        <button data-prompt="explain"><span class="suggestion-icon">❞</span><span><strong>Explain selected text</strong><small>Make sense of a passage</small></span><span class="arrow">↗</span></button>
-        <button data-prompt="write"><span class="suggestion-icon">✎</span><span><strong>Help me write</strong><small>Draft, rewrite, or brainstorm</small></span><span class="arrow">↗</span></button>
+        <button data-prompt="summarize">Summarize this page</button>
+        <button data-prompt="explain">Explain selected text</button>
+        <button data-prompt="write">Help me write</button>
       </div>
       <div class="connect-card" id="connect-card" hidden>
         <span class="connect-dot"></span><div><strong>Bring your ChatGPT account</strong><p>Sign in securely in your browser, then continue here.</p></div>
@@ -48,24 +42,20 @@
 
   <div id="notice" class="notice" role="status" hidden></div>
   <footer class="bottom">
-    <div class="context-bar"><button id="attach-page" class="pill"><span>⊕</span> Add current page</button><button id="attach-tabs" class="icon-button small" aria-label="Attach another tab" title="Attach another tab">@</button><button id="search-chip" class="pill" aria-label="Remove web search" hidden>Web search <span>×</span></button></div>
-    <p id="actions-guidance" class="muted">Ask to click, fill or scroll. You approve page changes.</p>
     <div id="activity" class="activity" role="status" hidden><span id="activity-label"></span><small id="activity-detail"></small></div>
-    <div class="attachments" id="attachments"></div>
+    <div id="tab-mentions" class="mentions" role="listbox" aria-label="Mention a Safari tab" hidden></div>
     <form id="composer" class="composer">
+      <div class="source-row"><div class="attachments" id="attachments"></div><button type="button" id="search-chip" class="pill" aria-label="Remove web search" hidden>Web search ×</button></div>
       <label class="sr-only" for="prompt">Message Safari Chat</label>
-      <textarea id="prompt" rows="2" maxlength="12000" placeholder="Message Safari Chat…" aria-describedby="composer-hint"></textarea>
+      <textarea id="prompt" rows="1" maxlength="12000" placeholder="Ask anything or @mention a tab" aria-controls="tab-mentions" aria-autocomplete="list" aria-describedby="composer-hint"></textarea>
       <div class="composer-toolbar">
         <button class="icon-button add-button" id="add-button" type="button" popovertarget="add-menu" aria-controls="add-menu" aria-expanded="false" title="Add context and tools" aria-label="Add context and tools"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button><input id="file-input" type="file" multiple accept=".txt,.md,.csv,.json,.log,.js,.ts,.py,.html,.css,.xml,.yaml,.yml" hidden>
-        <label class="model-label"><span class="sr-only">Model</span><select id="model" aria-label="Model"><option value="">Choose a model</option></select></label>
-        <label class="effort-label" id="effort-control" hidden><span class="sr-only">Reasoning effort</span><select id="effort" aria-label="Reasoning effort" title="Higher effort can take longer and use more tokens. Auto uses the model's default."><option value="auto">Effort: Auto</option></select></label>
+        <button class="permission-mode" type="button" id="actions-guidance" title="Browser permissions">Ask before acting <span aria-hidden="true">⌄</span></button>
         <button class="send-button" id="send-button" type="submit" aria-label="Send message"><svg viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
         <button class="send-button" id="stop-button" type="button" aria-label="Stop response" hidden><span class="stop-square"></span></button>
       </div>
     </form>
-    <div class="composer-help"><span id="draft-status" role="status"></span><span id="composer-hint">Enter to send · Shift + Enter for a new line</span></div>
-    <div class="status-row"><button id="account-button" class="account-button"><span class="account-avatar">S</span><span id="account-label">Connect account</span></button><span id="usage" title="Estimated context size; actual tokens appear after a response">Local context</span><button id="settings-button" class="icon-button small" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg></button></div>
-    <p class="disclaimer">Independent Safari companion. Check important information.</p>
+    <div class="composer-help"><span id="draft-status" role="status"></span><span class="sr-only" id="composer-hint">Type @ to mention a tab. Enter sends. Shift + Enter adds a line.</span></div>
   </footer>
 
   <div id="add-menu" class="add-menu" popover="auto" role="dialog" aria-label="Add context and tools">
@@ -76,8 +66,8 @@
     <button id="web-search" type="button" aria-pressed="false"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></svg><span><strong>Web search</strong><small>Answers with sources, when available</small></span><span class="menu-check" aria-hidden="true">✓</span></button>
   </div>
 
-  <dialog id="history-dialog"><div class="dialog-head"><h2>Recent chats</h2><button class="icon-button" data-close="history-dialog" aria-label="Close recent chats">×</button></div><input id="history-search" type="search" placeholder="Search chats" aria-label="Search chats"><div id="history-list" class="item-list"></div><p class="muted">Saved on this Mac, separately for each account.</p></dialog>
-  <dialog id="tabs-dialog"><div class="dialog-head"><h2>Add browser tabs</h2><button class="icon-button" data-close="tabs-dialog" aria-label="Close tabs">×</button></div><input id="tabs-search" type="search" aria-label="Search browser tabs" placeholder="Search tabs"><div id="tabs-list" class="item-list"></div><p id="tabs-status" class="muted" role="status"></p><p class="muted">Only tabs Safari allows this extension to access are shown.</p><div class="dialog-actions"><button id="add-selected-tabs" class="primary" disabled>Add tabs</button></div></dialog>
+  <dialog id="history-dialog" aria-labelledby="history-heading"><div class="dialog-head"><h2 id="history-heading">Recent chats</h2><button class="icon-button" data-close="history-dialog" aria-label="Close recent chats">×</button></div><input id="history-search" type="search" placeholder="Search chats" aria-label="Search chats"><div id="history-list" class="item-list"></div><p class="muted">Saved on this Mac, separately for each account.</p></dialog>
+  <dialog id="tabs-dialog" aria-labelledby="tabs-heading"><div class="dialog-head"><h2 id="tabs-heading">Add browser tabs</h2><button class="icon-button" data-close="tabs-dialog" aria-label="Close tabs">×</button></div><input id="tabs-search" type="search" aria-label="Search browser tabs" placeholder="Search tabs"><div id="tabs-list" class="item-list"></div><p id="tabs-status" class="muted" role="status"></p><p class="muted">Only tabs Safari allows this extension to access are shown.</p><div class="dialog-actions"><button id="add-selected-tabs" class="primary" disabled>Add tabs</button></div></dialog>
   <dialog id="edit-dialog" aria-labelledby="edit-title">
     <form id="edit-form">
       <div class="dialog-head"><h2 id="edit-title">Edit message</h2><button type="button" class="icon-button" data-close="edit-dialog" aria-label="Cancel editing">×</button></div>
@@ -94,11 +84,17 @@
     <p class="muted">If you added a temporary extension, it can preview the interface but cannot connect to the companion app. This development build needs to be run from <strong>SafariChat.xcodeproj</strong> in Xcode with signing configured for both targets.</p>
     <div class="dialog-actions"><button class="primary" id="retry-companion-button">Try opening app again</button><button class="secondary" data-close="companion-dialog">Close</button></div>
   </dialog>
-  <dialog id="settings-dialog">
-    <div class="dialog-head"><h2>Settings</h2><button class="icon-button" data-close="settings-dialog" aria-label="Close settings">×</button></div>
+  <dialog id="settings-dialog" aria-labelledby="settings-title">
+    <div class="dialog-head"><h2 id="settings-title">Settings</h2><button class="icon-button" data-close="settings-dialog" aria-label="Close settings">×</button></div>
+    <button id="account-button" class="settings-account"><span class="account-avatar" aria-hidden="true">S</span><span id="account-label">Connect account</span><span aria-hidden="true">↗</span></button>
+    <div class="model-settings">
+      <label class="model-label"><span>Model</span><select id="model" aria-label="Model"><option value="">Choose a model</option></select></label>
+      <label class="effort-label" id="effort-control" hidden><span>Reasoning effort</span><select id="effort" aria-label="Reasoning effort" title="Higher effort can take longer and use more tokens. Auto uses the model's default."><option value="auto">Auto</option></select></label>
+    </div>
+    <p class="setting-hint" id="usage">Local context</p>
     <label class="setting-row">Appearance<select id="theme-setting" aria-label="Appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
     <p id="theme-status" class="setting-hint" role="status">Appearance saves automatically.</p>
-    <div class="setting-section"><h3>Browsing in Safari</h3><p class="muted">Every chat can request page reads, clicks, filling, selection, scrolling and tab actions. You approve page access and changes; Safari website access is also required. Keep chat in its own tab for navigation tasks.</p><button class="secondary" id="popout-button">Open chat in a tab ↗</button></div>
+    <div class="setting-section"><h3 id="browser-permissions" tabindex="-1">Browser permissions</h3><p class="muted">You choose which pages to share and approve each browser change. Safari manages website access. A separate chat tab stays open during navigation.</p><button class="secondary" id="popout-button">Open chat in a tab ↗</button></div>
     <label class="setting-row">ChatGPT desktop control<input id="desktop-setting" type="checkbox" role="switch"></label><p class="muted">Requires the Safari Chat desktop plugin and the signed app. Requests from the plugin show their approvals in ChatGPT. This does not connect Safari to ChatGPT's built-in browser integration.</p>
     <div class="setting-section"><h3>Context & efficiency</h3><p class="muted">Smaller context uses fewer tokens. Older turns and long pages may be trimmed.</p>
       <label class="setting-row">Page size<select id="page-setting"><option value="6000">6,000 characters</option><option value="12000">12,000 characters</option><option value="24000">24,000 characters</option></select></label>
@@ -106,6 +102,7 @@
       <label class="setting-row">Recent turns<select id="turns-setting"><option value="4">4 turns</option><option value="8">8 turns</option><option value="16">16 turns</option></select></label>
     </div>
     <div class="dialog-actions"><button class="secondary" id="export-button">Export chat</button><button class="secondary" id="signout-button">Sign out</button><button class="primary" id="save-settings">Save settings</button></div>
+    <p class="muted">Safari Chat is an independent companion for ChatGPT.</p>
     <div class="setting-section"><h3>Remove your data</h3><p class="muted">Erase this Safari profile's chats, drafts and settings, plus all Safari Chat accounts saved on this Mac. Active tasks stop. Run this in each profile before uninstalling.</p><button class="secondary" id="erase-data-button">Erase local data…</button><button class="secondary" id="finish-removal-button" hidden>Open companion app to finish removal ↗</button><p id="cleanup-result" class="muted" role="status" hidden></p></div>
   </dialog>
 </body>

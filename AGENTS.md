@@ -1,29 +1,26 @@
-# Working in this repository
+# Working on Safari Chat
 
-This is an independent Safari companion for ChatGPT. Do not imply OpenAI affiliation or feature parity that has not been verified.
+Safari Chat is an independent macOS companion for ChatGPT. Use OpenAI’s published side-chat illustration and user flows as the design reference. Verify each comparison against the current guide and keep the product name, account model and Safari permission prompts accurate. Record supported behavior and platform limits in [feature coverage](docs/parity.md). [OpenAI browser extension guide](https://learn.chatgpt.com/docs/chrome-extension)
 
-## Read only what the task needs
-- `extension/background.js`: extension events, trusted UI messages, permissions.
-- `extension/core/`: bounded context, Responses streaming, browser tools, storage.
-- `extension/panel/`: chat UI. `extension/content/`: page extraction and panel mount.
-- `native/Shared/`: Keychain, OAuth contract and ID-token validation.
-- `native/App/`: macOS onboarding and loopback sign-in.
-- `native/Extension/`: Safari native messaging.
-- `docs/architecture.md` and `docs/parity.md`: boundaries and current coverage.
+## Where a change belongs
 
-## Constraints
-- Prefer small modules, native platform APIs, and no runtime dependencies.
-- Preserve opt-in page context, total input bounds, bounded tool loops, cancellation, and account isolation.
-- No cookies, private ChatGPT APIs, embedded secrets, remote code, or page-controlled native messages.
-- Use a dedicated extension origin for chat UI; render untrusted output as text/escaped Markdown.
-- Keep caches/builds/dependencies local: `.build/`, `build/`, `.cache/`, `.venv/`.
-- Keep runtime data in Safari storage and native sandbox containers; credentials belong in Keychain. No custom lock files, global caches/logs, daemons, or hidden home-directory folders. Explicit user exports are separate.
-- Preserve cleanup's write barrier, account-generation checks, failure reporting, and narrow deletion scope. Never claim forensic erasure or remove system/browser databases, unrelated Keychain items, or user exports.
-- Do not read generated builds or entire directories into LLM context. Use `rg`, then targeted reads.
-- `extension/background.bundle.js` is generated; never read or edit it. Regenerate with `python3 scripts/bundle-background.py` after background/core changes.
-- Keep background source modules ASCII; use JavaScript Unicode escapes for special characters so Safari's classic script encoding cannot corrupt them.
+| Responsibility | Source | Contract |
+| --- | --- | --- |
+| Accounts and credentials | `native/Shared/`, `native/App/`, `native/Extension/` | The shared Keychain vault owns the active connection and its session generation. New API-key connections get independent IDs. Explicit replacement keeps the selected connection’s history. Native setup and Safari use the same sign-out path. |
+| Inference, storage and approvals | `extension/background.js`, `extension/core/` | The background checks the panel’s extension origin, obtains credentials, executes approved tools, and commits completed or interrupted runs. Use the serialized storage write path and expected chat/draft revisions. Preserve both editors’ work on conflict. |
+| Dock and page access | `extension/content/` | An isolated helper mounts the extension-origin panel. Opening or restoring a dock grants no page context. Capture only an explicitly shared excerpt or the scope authorized for a tool read. |
+| Chat UI | `extension/panel/` | Keep conversation and composition together. Use the header for chat navigation and Settings, the composer for attachments, mentions and send/stop, and inline prompts for real approvals. Render untrusted text with text nodes or escaped Markdown. |
 
-## Checks
-- `./scripts/check.sh`: JavaScript syntax, unit/integration tests, native core tests, project validation.
-- `./scripts/build.sh`: unsigned macOS build. Signing/install instructions are in README.
-- Test meaningful failure cases. Never report live OAuth or Safari integration as tested unless exercised.
+## Boundaries to preserve
+
+- Keep modules small and use native platform APIs. The installed app and extension have no runtime package dependencies. Use public OpenAI services and local extension resources. Keep cookies, embedded secrets, remote code and page-controlled native messages out of the integration.
+- Recheck the native session generation after asynchronous credential work, before browser action dispatch (including after approval), and at account-owned writes. Cancel obsolete requests on transitions, including a return to the same connection.
+- Keep total prompt size, transcripts, tool rounds, deadlines and local history bounded. Preserve source file formatting within those bounds. Tab suggestions list metadata until the user chooses a tab.
+- Keep runtime records in Safari storage, the native sandbox and the app-specific Keychain item. Keep build inputs, caches and outputs local to `.build/`, `build/`, `.cache/` and `.venv/`. Avoid custom lock files, global logs or caches, daemons and hidden home-directory folders.
+- Preserve the cleanup write barrier, generation checks, narrow deletion scope, verification and failure reporting. Leave browser/system databases, unrelated Keychain items and explicit user exports alone. Describe the actual removal scope without promising forensic erasure.
+
+## Check the changed paths
+
+Read targeted source with `rg`. Keep generated builds out of review. Never read or edit `extension/background.bundle.js`. Keep its source modules ASCII and encode special characters with JavaScript Unicode escapes. Regenerate it with `python3 scripts/bundle-background.py` after background, core or imported content-helper changes.
+
+Run `./scripts/check.sh` for JavaScript, native core and project checks, and `./scripts/build.sh` for the unsigned macOS app. For panel/dock changes, exercise the isolated browser smoke test at normal and minimum widths. For native presentation changes, render `./scripts/preview-app.sh`. Use the signed integration checklist for live Safari, provisioning, OAuth and desktop handoff. State which environment was exercised. [Validation](docs/validation.md) · [Architecture](docs/architecture.md)

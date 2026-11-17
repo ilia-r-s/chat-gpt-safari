@@ -70,6 +70,40 @@ struct TokenResponse: Decodable {
 }
 
 enum OAuthClient {
+    static func revoke(token: String, clientID: String,
+                       send: (URLRequest) async throws -> (Data, URLResponse) = { try await SecureHTTP.session.data(for: $0) },
+                       backoff: Duration = .milliseconds(300)) async -> Bool {
+        var endpoint: URL?
+        for attempt in 0..<2 {
+            do {
+                try Task.checkCancellation()
+                if endpoint == nil {
+                    let discovery = URL(string: Configuration.issuer + "/.well-known/openid-configuration")!
+                    let (data, response) = try await send(URLRequest(url: discovery, timeoutInterval: 5))
+                    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    if (500...599).contains(status) { throw URLError(.badServerResponse) }
+                    guard status == 200, data.count < 100000,
+                          let metadata = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          metadata["issuer"] as? String == Configuration.issuer,
+                          let address = metadata["revocation_endpoint"] as? String, let url = URL(string: address),
+                          url.scheme == "https", url.host == discovery.host, url.port == nil, url.user == nil,
+                          url.password == nil, url.query == nil, url.fragment == nil else { return false }
+                    endpoint = url
+                }
+                guard let endpoint else { return false }
+                var request = URLRequest(url: endpoint, timeoutInterval: 5)
+                request.httpMethod = "POST"
+                request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                request.httpBody = form(["token": token, "token_type_hint": "refresh_token", "client_id": clientID])
+                let (_, response) = try await send(request)
+                guard let status = (response as? HTTPURLResponse)?.statusCode else { return false }
+                if status == 200 { return true }
+                if !(500...599).contains(status) { return false }
+            } catch { if Task.isCancelled { return false } }
+            if attempt == 0 { do { try await Task.sleep(for: backoff) } catch { return false } }
+        }
+        return false
+    }
     static func form(_ fields: [String: String]) -> Data {
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
         return Data(fields.sorted { $0.key < $1.key }.map { key, value in

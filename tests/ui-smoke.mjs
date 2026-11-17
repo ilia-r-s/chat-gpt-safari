@@ -1,6 +1,8 @@
 /** Optional browser checks. Uses an existing Playwright module and isolated Chrome profile. */
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { readFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -44,9 +46,10 @@ try {
       sendMessage: async message => {
         const account = globalThis.__account ?? "test-account";
         let value;
+        if (message.type === "auth.check") value = { generation: account };
         if (message.type === "bootstrap") value = globalThis.__companionError
           ? { prefs, auth: { connected: false, error: globalThis.__companionError }, models: [] }
-          : { prefs, auth: { connected: true, canInfer: true, account, label: account === "test-account" ? "Test account" : "Other account" }, models: [{ id: "test-model", name: "Test model", reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] }, { id: "basic-model", name: "Basic model", reasoningEfforts: [] }], activeChat: sessions[account] };
+          : { prefs, auth: { connected: true, canInfer: true, account, generation: account, label: account === "test-account" ? "Test account" : "Other account" }, models: [{ id: "test-model", name: "Test model", reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] }, { id: "basic-model", name: "Basic model", reasoningEfforts: [] }], activeChat: sessions[account] };
         if (message.type === "auth.open" || message.type === "auth.signin") {
           if (globalThis.__companionError) return { ok: false, error: globalThis.__companionError };
           globalThis.__companionOpened = true; globalThis.__signInStarted = message.type === "auth.signin"; value = { ok: true };
@@ -56,18 +59,25 @@ try {
           globalThis.__reads.push(message.tabId);
           if (globalThis.__contextErrorId === message.tabId) return { ok: false, error: "Safari website access was denied" };
           if (globalThis.__contextGate === message.tabId) await new Promise(resolve => { globalThis.__releaseContext = resolve; });
-          value = { kind: "page", key: `page:${message.tabId}`, title: ({ 1: "A useful page", 2: "Guide", 3: "Notes" })[message.tabId], url: `https://example.com/${message.tabId}`, text: "A short reference.", tabId: message.tabId };
+          value = { kind: "page", key: `page:${message.tabId}`, title: ({ 1: "A useful page", 2: "Guide", 3: "Notes" })[message.tabId], url: `https://example.com/${message.tabId}`, text: message.tabId === 2 ? "Prototype review: Thursday at 11 am. Final handoff: Friday at 3 pm." : "A short reference.", tabId: message.tabId };
         }
         if (message.type === "chat.save") {
           if (globalThis.__saveError) return { ok: false, error: "Storage unavailable" };
-          data[message.chat.id] = structuredClone(message.chat); value = message.chat;
+          value = { ...structuredClone(message.chat), revision: (data[message.chat.id]?.revision ?? 0) + 1 }; data[value.id] = value;
         }
         if (message.type === "chat.load") value = data[message.id]?.account === account ? data[message.id] : undefined;
         if (message.type === "draft.load") value = drafts[message.id]?.account === account ? drafts[message.id] : undefined;
         if (message.type === "draft.save") {
           if (globalThis.__saveError) return { ok: false, error: "Storage unavailable" };
           if (message.draft.account !== account) return { ok: false, error: "Your account changed" };
-          value = structuredClone(message.draft); sessions[account] = value.id;
+          value = structuredClone(message.draft);
+          if (globalThis.__forkNextDraft && value.text) {
+            globalThis.__forkNextDraft = false;
+            const base = data[value.id]; value.id = crypto.randomUUID();
+            value.title = base.title + " (draft copy)"; value.chatRevision = 1;
+            data[value.id] = { ...structuredClone(base), id: value.id, title: value.title, revision: 1 };
+          }
+          sessions[account] = value.id;
           if (value.text || value.contexts.length) drafts[value.id] = value; else delete drafts[value.id];
         }
         if (message.type === "chats.list") {
@@ -94,20 +104,26 @@ try {
         return { ok: true, value };
       },
       connect: () => {
-        let onMessage = () => {}; let onDisconnect = () => {}; let timer;
+        let onMessage = () => {}; let onDisconnect = () => {}; let timer, run, answer = "";
+        const finish = (type, message) => {
+          const saved = data[run.chatId];
+          saved.messages = [...run.messages, { role: "assistant", text: answer || "No response received.", ...(type === "done" ? {} : { error: true }) }];
+          saved.revision++; persist();
+          onMessage({ type, message, saved: { id: saved.id, revision: saved.revision, title: saved.title }, workMs: globalThis.__browserActivity ? 2000 : undefined });
+        };
         return {
           onMessage: { addListener: callback => { onMessage = callback; } }, onDisconnect: { addListener: callback => { onDisconnect = callback; } },
           postMessage: message => {
-            if (message.type === "cancel") { clearTimeout(timer); onMessage({ type: "cancelled" }); return; }
+            if (message.type === "cancel") { clearTimeout(timer); if (run) finish("cancelled", "Response stopped."); return; }
             if (message.type !== "run") return;
-            globalThis.__runs.push(message); count++;
+            run = message; globalThis.__runs.push(message); count++;
             if (globalThis.__browserActivity) onMessage({ type: "activity", operation: "fill", state: "working" });
-            if (globalThis.__responseError) { onMessage({ type: "error", message: "Connection interrupted" }); return; }
-            onMessage({ type: "delta", text: `Response ${count}: **Hello** <img src=x onerror=alert(1)>` });
+            if (globalThis.__responseError) { finish("error", "Connection interrupted"); return; }
+            answer = globalThis.__answer ?? `Response ${count}: **Hello** <img src=x onerror=alert(1)>`; onMessage({ type: "delta", text: answer });
             timer = setTimeout(() => {
               if (globalThis.__browserActivity) onMessage({ type: "activity", operation: "fill", state: "done", detail: "Text entered; the form was not submitted." });
-              if (message.webSearch) onMessage({ type: "replace", text: "A sourced answer. [Reference](https://example.com/source)" });
-              onMessage({ type: "usage", usage: { input: 100, cached: 25, output: 20, requests: 1 } }); onMessage({ type: "done" });
+              if (message.webSearch) { answer = "A sourced answer. [Reference](https://example.com/source)"; onMessage({ type: "replace", text: answer }); }
+              onMessage({ type: "usage", usage: { input: 100, cached: 25, output: 20, requests: 1 } }); finish("done");
             }, globalThis.__responseDelay ?? 100);
           }, disconnect: () => { clearTimeout(timer); setTimeout(onDisconnect, 0); },
         };
@@ -116,13 +132,15 @@ try {
   });
   const origin = `http://127.0.0.1:${server.address().port}`;
   await page.goto(`${origin}/panel/panel.html?tab=1`);
-  await page.getByText("Test account", { exact: true }).waitFor();
+  await page.waitForFunction(() => document.getElementById("account-label").textContent === "Test account");
+  await page.locator("#settings-button").click();
   const effort = page.getByRole("combobox", { name: "Reasoning effort" });
   assert.equal(await effort.inputValue(), "auto");
   assert.deepEqual(await effort.locator("option").evaluateAll(options => options.map(option => option.value)), ["auto", "low", "medium", "high", "xhigh", "max"]);
   await effort.selectOption("high");
   await page.reload();
-  await page.getByText("Test account", { exact: true }).waitFor();
+  await page.waitForFunction(() => document.getElementById("account-label").textContent === "Test account");
+  await page.locator("#settings-button").click();
   assert.equal(await effort.inputValue(), "high", "effort survives reopening the panel");
   await page.locator("#model").selectOption("basic-model");
   assert.equal(await page.locator("#effort-control").isVisible(), false);
@@ -130,7 +148,6 @@ try {
   await page.locator("#model").selectOption("test-model");
   assert.equal(await effort.inputValue(), "auto", "a model change cannot retain an unsupported effort");
   await effort.selectOption("high");
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
   const appearance = page.getByLabel("Appearance", { exact: true });
   await page.evaluate(() => { globalThis.__settingsDelay = 150; });
   for (const theme of ["dark", "light", "system"]) {
@@ -151,7 +168,7 @@ try {
   await page.locator("#theme-status").filter({ hasText: "could not be saved" }).waitFor();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light", "a save failure keeps the immediate preview and reports it");
   await page.reload();
-  await page.getByText("Test account", { exact: true }).waitFor();
+  await page.waitForFunction(() => document.getElementById("account-label").textContent === "Test account");
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark", "reopening restores the last successfully saved theme");
   await page.evaluate(() => browser.runtime.sendMessage({ type: "settings.save", settings: { theme: "light" } }));
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light", "another panel's storage change applies without a focus refresh");
@@ -160,7 +177,7 @@ try {
   await page.evaluate(() => { delete globalThis.__browserActivity; });
   assert.equal(await page.getByRole("button", { name: "Send message", exact: true }).isDisabled(), true);
   await page.emulateMedia({ colorScheme: "dark" });
-  assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), "rgb(16, 16, 16)", "system theme follows dark appearance");
+  assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), "rgb(27, 27, 27)", "system theme follows dark appearance");
   await page.emulateMedia({ colorScheme: "light" });
   await mkdir("build/screenshots", { recursive: true });
   await page.screenshot({ path: "build/screenshots/panel-light.png" });
@@ -171,14 +188,16 @@ try {
   });
   await page.locator("#connect-card").waitFor({ state: "visible" });
   for (const id of ["account-button", "connect-button", "api-key-button"]) {
+    if (id === "account-button") await page.locator("#settings-button").click();
     await page.locator(`#${id}`).click();
     await page.locator("#companion-dialog").waitFor({ state: "visible" });
     assert.match(await page.locator("#companion-error").textContent(), /companion app is unavailable/);
     assert.equal(page.url(), panelURL); assert.equal(page.context().pages().length, 1);
     await page.getByRole("button", { name: "Close app setup", exact: true }).click();
+    if (id === "account-button") await page.getByRole("button", { name: "Close settings" }).click();
   }
   await page.setViewportSize({ width: 320, height: 640 });
-  await page.locator("#account-button").click();
+  await page.locator("#connect-button").click();
   await page.locator("#companion-dialog").waitFor({ state: "visible" });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
   await page.screenshot({ path: "build/screenshots/panel-companion-setup.png" });
@@ -189,9 +208,9 @@ try {
   await page.locator("#connect-button").click();
   assert.equal(await page.evaluate(() => globalThis.__signInStarted), true, "sign-in starts from the panel without opening a separate account-picker step");
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-  await page.getByText("Test account", { exact: true }).waitFor();
+  await page.waitForFunction(() => document.getElementById("account-label").textContent === "Test account");
   await page.setViewportSize({ width: 440, height: 900 });
-  await page.getByRole("button", { name: "Add current page" }).click();
+  await page.locator("#add-button").click(); await page.locator("#menu-page").click();
   await page.evaluate(() => { globalThis.__browserActivity = true; });
   await page.getByRole("textbox", { name: "Message Safari Chat" }).fill("Summarize this page.");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
@@ -212,7 +231,7 @@ try {
   const originalId = (await page.evaluate(() => globalThis.__runs))[0].chatId;
   const prompt = page.getByRole("textbox", { name: "Message Safari Chat" });
   await prompt.fill("An unsent follow-up");
-  await page.getByRole("button", { name: "Add current page" }).click();
+  await page.locator("#add-button").click(); await page.locator("#menu-page").click();
   await page.waitForFunction(() => document.getElementById("draft-status").textContent === "Draft saved");
   await page.reload();
   await page.waitForFunction(() => document.getElementById("prompt").value === "An unsent follow-up");
@@ -249,8 +268,8 @@ try {
   await page.evaluate(() => { globalThis.__responseError = false; globalThis.__responseDelay = 1000; });
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await page.getByRole("button", { name: "Stop response" }).waitFor({ state: "visible" });
-  assert.equal(await effort.isDisabled(), true, "effort cannot change during a response");
   await page.getByRole("button", { name: "Settings", exact: true }).click();
+  assert.equal(await effort.isDisabled(), true, "effort cannot change during a response");
   assert.equal(await page.getByRole("button", { name: "Save settings" }).isDisabled(), true);
   await appearance.selectOption("dark");
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark", "appearance can change during a response");
@@ -263,7 +282,7 @@ try {
   await page.getByRole("button", { name: "Stop response" }).click();
   await page.getByRole("button", { name: "Stop response" }).waitFor({ state: "hidden" });
   assert.equal(await prompt.inputValue(), "Draft while streaming");
-  assert.equal(await effort.isDisabled(), false);
+  assert.equal(await page.locator("#effort").isDisabled(), false);
   assert.equal(await page.locator(".message-error").count(), 1);
   await page.evaluate(() => { globalThis.__responseDelay = 100; globalThis.__saveError = true; });
   const beforeFailure = await page.locator("#messages .message").count();
@@ -273,7 +292,7 @@ try {
   assert.equal(await page.locator("#messages .message").count(), beforeFailure);
   await page.evaluate(() => { globalThis.__saveError = false; });
   await prompt.fill("Draft for my account");
-  await page.getByRole("button", { name: "Add current page" }).click();
+  await page.locator("#add-button").click(); await page.locator("#menu-page").click();
   await page.waitForFunction(() => document.getElementById("draft-status").textContent === "Draft saved");
   await page.evaluate(() => { globalThis.__account = "other-account"; window.dispatchEvent(new Event("focus")); });
   await page.waitForFunction(() => document.getElementById("account-label").textContent === "Other account" && !document.getElementById("prompt").disabled);
@@ -309,7 +328,7 @@ try {
   await page.getByLabel("Appearance", { exact: true }).selectOption("dark");
   await page.getByRole("button", { name: "Save settings" }).click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
-  assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), "rgb(16, 16, 16)");
+  assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), "rgb(27, 27, 27)");
   await page.screenshot({ path: "build/screenshots/panel-dark-chat.png" });
   await page.getByRole("button", { name: "Recent chats", exact: true }).click();
   await page.locator("#history-list .list-row > button:first-child").first().waitFor();
@@ -340,7 +359,7 @@ try {
   await testComposerFeatures(await context.newPage(), origin);
   const dom = await browser.newPage();
   await dom.setContent('<main><h1>Readable title</h1><p>Useful text.</p><p hidden>HIDDEN SECRET</p><input type="password" value="SECRET"><input id="email" aria-label="Email"><button id="submit">Submit</button><script>evil()</script></main>');
-  const snapshot = await dom.evaluate(snapshotPage, 2000);
+  const snapshot = await dom.evaluate(source => eval(`(${source})`)(2000, true), snapshotPage.toString());
   assert.ok(snapshot.text.includes("Useful text")); assert.ok(!snapshot.text.includes("SECRET")); assert.ok(!snapshot.text.includes("evil"));
   const field = snapshot.elements.find(element => element.label === "Email");
   await dom.evaluate(({ fn, id }) => eval(`(${fn})`)("fill", id, "a@example.com", location.href), { fn: actOnPage.toString(), id: field.id });
@@ -351,6 +370,10 @@ try {
   await testGalleryInteractions(browser);
   await testBrowserAgent(browser, origin);
   await testPanelMount(browser, origin);
+  if (process.env.SAFARI_CHAT_WEBKIT === "1") {
+    const { stdout } = await promisify(execFile)("swift", ["-module-cache-path", path.resolve(".cache/swift"), "tests/webkit-panel.swift", `${origin}/panel/panel.html?tab=1`], { timeout: 90000 });
+    process.stdout.write(stdout);
+  }
   console.log("UI smoke passed: unified chat/browser tools, attachment menu, files, searchable tabs, web-search controls/citations, companion setup, streaming/cancellation, effort selection, escaped output, draft/account isolation, edit/retry, themes, narrow layout, cleanup barriers, page actions, transformed galleries, horizontal/RTL scroll areas, dock layout and panel resizing.");
 } finally {
   await browser?.close(); await new Promise(resolve => server.close(resolve));

@@ -4,27 +4,28 @@ import vm from "node:vm";
 import { readFile } from "node:fs/promises";
 import { webcrypto } from "node:crypto";
 
-async function fixture({ nativeFailure = false, nativeUnavailable = false, launchFailure = false, responseGate, scriptEncoding = "utf-8" } = {}) {
+async function fixture({ nativeFailure = false, nativeUnavailable = false, launchFailure = false, responseGate, toolRequest, scriptEncoding = "utf-8" } = {}) {
   const events = {};
   const data = {};
   const nativeRequests = [];
   const requests = [];
   const createdTabs = [];
-  let account = "account-a";
+  let account = "account-a", generation = "session-a";
   const listen = name => ({ addListener: callback => { events[name] = callback; } });
   const api = {
     runtime: { id: "test-extension", getURL: file => `safari-web-extension://test/${file}`,
       sendMessage: async () => {},
+      connectNative: () => ({ onMessage: listen("nativeEvent"), onDisconnect: listen("nativeDisconnect"), disconnect() {} }),
       onMessage: listen("message"), onConnect: listen("connect"), onInstalled: listen("installed"),
       sendNativeMessage: async (_, message) => {
         nativeRequests.push(message.type);
         if (nativeUnavailable) throw new Error("No native app for temporary extension");
         if (["app.open", "auth.signin"].includes(message.type)) return launchFailure ? { ok: false, error: "macOS could not open Safari Chat" } : { ok: true };
         if (message.type === "data.erase") return nativeFailure ? { ok: false, error: "Keychain is locked" } : { ok: true };
-        return message.type === "auth.credential" ? { ok: true, token: "mock-private-token", account: "account-a" }
-          : { ok: true, connected: true, canInfer: true, account, label: "Account A" };
+        return message.type === "auth.credential" ? { ok: true, token: "mock-private-token", account, generation }
+          : { ok: true, connected: true, canInfer: true, account, generation, label: "Account A" };
       },
-    }, action: { onClicked: listen("action") }, tabs: { onRemoved: listen("removed"), query: async () => [], create: async options => { createdTabs.push(options); return { id: 2 }; } },
+    }, action: { onClicked: listen("action") }, tabs: { onRemoved: listen("removed"), onUpdated: listen("updated"), query: async () => [], create: async options => { createdTabs.push(options); return { id: 2 }; } },
     contextMenus: { onClicked: listen("menu"), removeAll: async () => {}, create() {} },
     storage: { local: { get: async key => key === null ? data : { [key]: data[key] }, set: async value => Object.assign(data, value), remove: async keys => { for (const key of Array.isArray(keys) ? keys : [keys]) delete data[key]; }, clear: async () => { for (const key of Object.keys(data)) delete data[key]; } } },
   };
@@ -33,13 +34,82 @@ async function fixture({ nativeFailure = false, nativeUnavailable = false, launc
       if (url.endsWith("/models")) return new Response(JSON.stringify({ models: [{ visibility: "list", slug: "model-a", display_name: "Model A", supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }] }));
       requests.push(JSON.parse(options.body));
       if (responseGate) { responseGate.started(); await responseGate.promise; }
+      if (toolRequest && requests.length === 1) {
+        const call = { type: "function_call", name: "browser", call_id: "1", arguments: JSON.stringify(toolRequest) };
+        return new Response(`data: ${JSON.stringify({ type: "response.completed", response: { output: [call] } })}\n\n`);
+      }
       return new Response('data: {"type":"response.output_text.delta","delta":"Hello"}\n\ndata: {"type":"response.completed","response":{"output":[],"usage":{"input_tokens":10,"output_tokens":1}}}\n\n');
     },
   });
   vm.runInContext(new TextDecoder(scriptEncoding).decode(await readFile("extension/background.bundle.js")), context);
   const sender = { id: "test-extension", url: "safari-web-extension://test/panel/panel.html?tab=1" };
-  return { api, events, data, nativeRequests, requests, createdTabs, sender, setAccount: value => { account = value; } };
+  return { api, events, data, nativeRequests, requests, createdTabs, sender, setAccount: (value, session = value === "account-a" ? "session-a" : "session-b") => { account = value; generation = session; } };
 }
+function chatPort(f, emit) {
+  let receive;
+  f.events.connect({ name: "chat", sender: f.sender, onMessage: { addListener: fn => { receive = fn; } },
+    onDisconnect: { addListener() {} }, postMessage: emit, disconnect() {} });
+  return receive;
+}
+const turn = { type: "run", generation: "session-a", chatId: "00000000-0000-4000-8000-000000000011", title: "First", account: "account-a", model: "model-a", messages: [{ role: "user", text: "First" }] };
+for (const notify of [true, false]) test(`a pending approval cannot cross a same-account reconnection, native event ${notify}`, { timeout: 3000 }, async () => {
+  const f = await fixture({ toolRequest: { operation: "open_tab", url: "https://example.com/" } });
+  const terminal = [], pending = Promise.withResolvers();
+  const receive = chatPort(f, event => { terminal.push(event); if (event.type === "approval") pending.resolve(event); });
+  const run = receive(turn);
+  const approval = await pending.promise;
+  f.setAccount("account-b"); f.setAccount("account-a", "new-session");
+  if (notify) f.events.nativeEvent({ type: "auth.changed" });
+  else await receive({ type: "approval", id: approval.id, allow: true });
+  await run;
+  if (notify) await receive({ type: "approval", id: approval.id, allow: true });
+  assert.deepEqual(f.createdTabs, []); assert.equal(f.requests.length, 1);
+  assert.equal(terminal.at(-1).type, "cancelled"); assert.equal(f.data[`chat:${turn.chatId}`], undefined);
+  const stale = await f.events.message({ type: "chat.delete", generation: turn.generation, id: turn.chatId }, f.sender);
+  assert.equal(stale.ok, false);
+});
+test("a delayed response forks when a second editor changes its starting revision", async () => {
+  const pending = Promise.withResolvers(), gate = Promise.withResolvers();
+  const f = await fixture({ responseGate: { promise: gate.promise, started: pending.resolve } });
+  const initial = { id: turn.chatId, title: turn.title, account: turn.account, messages: turn.messages };
+  const save = chat => f.events.message({ type: "chat.save", chat, generation: turn.generation }, f.sender);
+  const first = (await save(initial)).value;
+  const events = [], run = chatPort(f, event => events.push(event))({ ...turn, revision: first.revision });
+  await pending.promise;
+  const edited = await save({ ...first, messages: [{ role: "user", text: "Second editor" }] });
+  assert.equal(edited.value.id, turn.chatId);
+  gate.resolve(); await run;
+  const receipt = events.at(-1).saved;
+  assert.notEqual(receipt.id, turn.chatId);
+  assert.equal(f.data[`chat:${receipt.id}`].messages.at(-1).text, "Hello");
+  assert.equal(f.data[`chat:${turn.chatId}`].messages[0].text, "Second editor");
+});
+test("the dock resumes after navigation without reading and context-menu excerpts are session-bound and consumed once", async () => {
+  const f = await fixture(), mounts = [], reads = [];
+  const tab = { id: 7, title: "Example", url: "https://example.com/?private=1" };
+  f.api.tabs.get = async () => tab;
+  f.api.scripting = { executeScript: async spec => {
+    if (spec.files) return [];
+    reads.push(spec); return [{ result: { text: "Shared page body", url: tab.url, title: tab.title } }];
+  } };
+  f.api.tabs.sendMessage = async (id, message) => { mounts.push(message); return { ok: true }; };
+  await f.events.action(tab); await f.events.updated(7, { status: "complete" }, tab);
+  assert.equal(mounts.at(-1).restore, true); assert.equal(reads.length, 0);
+  const take = (generation = "session-a") => f.events.message({ type: "context.take", generation, account: "account-a", tabId: 7 }, f.sender);
+  await f.events.menu({ menuItemId: "ask", selectionText: "Only this passage" }, tab);
+  assert.equal(reads.length, 0);
+  assert.equal((await f.events.message({ type: "bootstrap", tabId: 7 }, f.sender)).value.hasContext, true);
+  const passage = (await take()).value;
+  assert.equal(passage.kind, "selection"); assert.equal(passage.text, "Only this passage"); assert.equal(passage.url, "https://example.com/");
+  assert.equal((await take()).value, null);
+  await f.events.menu({ menuItemId: "ask" }, tab);
+  assert.equal(reads.length, 1);
+  f.setAccount("account-a", "replacement");
+  assert.equal((await take()).ok, false); assert.equal((await take("replacement")).value, null);
+  await f.events.message({ type: "panel.close" }, { ...f.sender, tab });
+  await f.events.updated(7, { status: "complete" }, tab);
+  assert.equal(mounts.at(-1).type, "panel.close");
+});
 test("classic Safari background registers listeners synchronously", async () => {
   const f = await fixture();
   for (const name of ["message", "connect", "installed", "action", "menu", "removed"]) assert.equal(typeof f.events[name], "function");
@@ -98,7 +168,7 @@ for (const scriptEncoding of ["utf-8", "windows-1252"]) test(`background preserv
   const port = { name: "chat", sender: f.sender, onMessage: { addListener: fn => { listener = fn; } }, onDisconnect: { addListener() {} }, postMessage: message => messages.push(message), disconnect() {} };
   f.events.connect(port);
   const id = "00000000-0000-4000-8000-000000000001";
-  await listener({ type: "run", chatId: id, title: "Hello", account: "account-a", model: "model-a", messages: [{ role: "user", text: "Hello", contexts: [] }] });
+  await listener({ type: "run", generation: "session-a", chatId: id, title: "Hello", account: "account-a", model: "model-a", messages: [{ role: "user", text: "Hello", contexts: [] }] });
   assert.equal(messages.find(message => message.type === "status").text, "Thinking\u2026");
   assert.ok(messages.some(m => m.type === "delta" && m.text === "Hello"));
   assert.equal(messages.at(-1).type, "done");
@@ -109,7 +179,7 @@ test("every chat receives browser tools even with an obsolete disabled mode save
   const f = await fixture(); let listener;
   f.data.settings = { browserTools: false, webSearch: true };
   f.events.connect({ name: "chat", sender: f.sender, onMessage: { addListener: fn => { listener = fn; } }, onDisconnect: { addListener() {} }, postMessage() {}, disconnect() {} });
-  const run = { type: "run", chatId: "00000000-0000-4000-8000-000000000001", account: "account-a", model: "model-a", messages: [{ role: "user", text: "Hello" }] };
+  const run = { type: "run", generation: "session-a", chatId: "00000000-0000-4000-8000-000000000001", account: "account-a", model: "model-a", messages: [{ role: "user", text: "Hello" }] };
   await listener(run);
   assert.deepEqual(f.requests[0].tools.map(tool => tool.type), ["namespace"]);
   await listener({ ...run, webSearch: true });
@@ -118,7 +188,7 @@ test("every chat receives browser tools even with an obsolete disabled mode save
 test("a changed account fails before inference and cannot overwrite another account's chat", async () => {
   const f = await fixture(); const messages = []; let listener;
   f.events.connect({ name: "chat", sender: f.sender, onMessage: { addListener: fn => { listener = fn; } }, onDisconnect: { addListener() {} }, postMessage: message => messages.push(message), disconnect() {} });
-  await listener({ type: "run", account: "account-b", messages: [{ role: "user", text: "Hello" }] });
+  await listener({ type: "run", generation: "session-a", account: "account-b", messages: [{ role: "user", text: "Hello" }] });
   assert.equal(messages.at(-1).type, "error"); assert.match(messages.at(-1).message, /account changed/);
   assert.ok(!f.nativeRequests.includes("auth.credential"));
 });
@@ -127,7 +197,7 @@ test("effort uses the sending panel's choice and rejects unavailable levels befo
   const f = await fixture(); const messages = []; let listener;
   f.data.settings = { reasoningEffort: "low" };
   f.events.connect({ name: "chat", sender: f.sender, onMessage: { addListener: fn => { listener = fn; } }, onDisconnect: { addListener() {} }, postMessage: message => messages.push(message), disconnect() {} });
-  const run = { type: "run", chatId: "00000000-0000-4000-8000-000000000001", account: "account-a", model: "model-a", messages: [{ role: "user", text: "Hello" }] };
+  const run = { type: "run", generation: "session-a", chatId: "00000000-0000-4000-8000-000000000001", account: "account-a", model: "model-a", messages: [{ role: "user", text: "Hello" }] };
   await listener({ ...run, effort: "high" });
   assert.deepEqual(f.requests[0].reasoning, { effort: "high" });
   await listener({ ...run, effort: "auto" });
@@ -173,7 +243,7 @@ test("an aborted response cannot recreate a chat after cleanup", async () => {
   const f = await fixture({ responseGate: { promise, started } });
   let listener;
   f.events.connect({ name: "chat", sender: f.sender, onMessage: { addListener: fn => { listener = fn; } }, onDisconnect: { addListener() {} }, postMessage() {}, disconnect() {} });
-  const run = listener({ type: "run", chatId: "00000000-0000-4000-8000-000000000001", title: "Private", account: "account-a", model: "model-a", messages: [{ role: "user", text: "Private" }] });
+  const run = listener({ type: "run", generation: "session-a", chatId: "00000000-0000-4000-8000-000000000001", title: "Private", account: "account-a", model: "model-a", messages: [{ role: "user", text: "Private" }] });
   await beginning;
   const result = await f.events.message({ type: "data.erase" }, f.sender);
   assert.equal(result.value.browserCleared, true);
@@ -184,7 +254,7 @@ test("an aborted response cannot recreate a chat after cleanup", async () => {
 test("draft RPCs restore the active chat, reject account changes, and remove drafts with chats", async () => {
   const f = await fixture();
   const id = "00000000-0000-4000-8000-000000000002";
-  const send = message => f.events.message(message, f.sender);
+  const send = message => f.events.message({ generation: "session-a", ...message }, f.sender);
   const draft = { id, account: "account-a", text: "Unsent message", contexts: [{ kind: "file", key: "file:a", title: "Notes", text: "Private notes" }] };
   assert.equal((await send({ type: "draft.save", draft, tabId: 1 })).ok, true);
   assert.equal((await send({ type: "bootstrap", tabId: 1 })).value.activeChat, id);
@@ -203,7 +273,7 @@ test("draft RPCs restore the active chat, reject account changes, and remove dra
 test("cleanup blocks queued and late composer writes and removes active-chat pointers", async () => {
   const f = await fixture();
   const draft = { id: "00000000-0000-4000-8000-000000000003", account: "account-a", text: "Private draft" };
-  const send = message => f.events.message(message, f.sender);
+  const send = message => f.events.message({ generation: "session-a", ...message }, f.sender);
   await send({ type: "draft.save", draft, tabId: 1 });
   const queued = send({ type: "draft.save", draft: { ...draft, text: "Late draft" }, tabId: 1 });
   await send({ type: "data.erase" }); await queued;

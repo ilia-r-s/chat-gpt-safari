@@ -12,11 +12,11 @@ function scriptResult(results, fallback) {
   return injection.result;
 }
 
-export async function readTab(api, tabId, limit, viewportOnly = false) {
+export async function readTab(api, tabId, limit, { viewportOnly = false, selectionOnly = false, expectedURL } = {}) {
   if (!Number.isInteger(tabId) || tabId < 0) throw new Error("Select a Safari tab first.");
-  const tab = await api.tabs.get(tabId);
-  if (tab.url && !safeWebURL(tab.url)) throw new Error("Safari protects this page. Open an ordinary website to attach it.");
-  const results = await api.scripting.executeScript({ target: { tabId }, func: snapshotPage, args: [limit, viewportOnly] });
+  const url = expectedURL ?? (await api.tabs.get(tabId)).url;
+  if (url && !safeWebURL(url)) throw new Error("Safari protects this page. Open an ordinary website to attach it.");
+  const results = await api.scripting.executeScript({ target: { tabId }, func: snapshotPage, args: [limit, viewportOnly, selectionOnly, url ?? null] });
   return scriptResult(results, "Could not read this page. Allow the extension on this website in Safari.");
 }
 
@@ -41,7 +41,7 @@ export async function readyTab(api, tabId, signal) {
   });
 }
 
-export function createBrowserTools({ api, pageChars, approve, initialTabs = [], defaultTabId = null, protectedTabId = null }) {
+export function createBrowserTools({ api, pageChars, approve, verifySession, initialTabs = [], defaultTabId = null, protectedTabId = null }) {
   const readableTabs = new Map(initialTabs.filter(tab => Number.isInteger(tab.id) && safeWebURL(tab.url)).map(tab => [tab.id, new URL(tab.url).origin]));
   const snapshots = new Map();
   return async function execute(args, signal) {
@@ -51,6 +51,7 @@ export function createBrowserTools({ api, pageChars, approve, initialTabs = [], 
     signal.throwIfAborted();
     if (operation === "list_tabs") {
       await approve({ operation, title: "Share your open tabs?", detail: "This shares titles and website addresses of accessible tabs for this request." }, signal);
+      if (verifySession) await verifySession();
       signal.throwIfAborted();
       const tabs = await api.tabs.query({ currentWindow: true });
       return tabs.filter(tab => safeWebURL(tab.url)).slice(0, 40).map(tab => ({ tabId: tab.id, title: (tab.title ?? "Untitled").slice(0, 160), url: publicURL(tab.url) }));
@@ -59,6 +60,7 @@ export function createBrowserTools({ api, pageChars, approve, initialTabs = [], 
       const target = safeWebURL(url);
       if (!target) throw new Error("Only HTTP and HTTPS URLs without credentials are allowed.");
       await approve({ operation, title: "Open a new tab?", detail: target }, signal);
+      if (verifySession) await verifySession();
       signal.throwIfAborted();
       const tab = await api.tabs.create({ url: target, active: false });
       return { ok: true, tabId: tab.id, url: publicURL(target), message: "Tab opened. Read it to continue; Safari may require website access first." };
@@ -74,8 +76,9 @@ export function createBrowserTools({ api, pageChars, approve, initialTabs = [], 
         await approve({ operation, title: "Read this page?", detail: publicURL(currentURL) }, signal);
         readableTabs.set(tabId, origin);
       }
+      if (verifySession) await verifySession();
       signal.throwIfAborted();
-      const page = await readTab(api, tabId, pageChars, true);
+      const page = await readTab(api, tabId, pageChars, { viewportOnly: true, expectedURL: currentURL });
       signal.throwIfAborted();
       if (new URL(page.url).origin !== origin) throw new Error("The tab changed websites while reading. Request permission for the new page.");
       snapshots.set(tabId, { url: page.url, elements: page.elements });
@@ -106,6 +109,7 @@ export function createBrowserTools({ api, pageChars, approve, initialTabs = [], 
     signal.throwIfAborted();
     // The user may navigate while an approval is visible; reject stale permission.
     const now = await api.tabs.get(tabId);
+    if (verifySession) await verifySession();
     signal.throwIfAborted();
     if (now.url !== currentURL) throw new Error("The tab navigated while awaiting approval. Read it again.");
     snapshots.delete(tabId);

@@ -128,8 +128,7 @@ final class DesktopMCP {
             guard connection.profileID == vault.desktopProfileID else { throw ChatError.message("Desktop control was disabled or moved to another Safari profile. Reconnect the plugin.") }
             return
         }
-        let original = try CredentialStore.update { _ in }
-        guard let profileID = original.desktopProfileID else { throw ChatError.message("Enable ChatGPT desktop control in the extension settings in your chosen Safari profile first.") }
+        let (original, profileID) = try DesktopRelay.enabledProfile()
         let token = (UUID().uuidString + UUID().uuidString).replacingOccurrences(of: "-", with: "").lowercased()
         let port = try await inbox.start(token: token)
         let lease = DesktopLease(id: UUID().uuidString.lowercased(), token: token, port: port, expires: Date().addingTimeInterval(3600), profileID: profileID)

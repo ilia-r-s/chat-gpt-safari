@@ -40,7 +40,7 @@ export async function testPanelMount(browser, origin) {
   assert.equal(await page.evaluate(() => globalThis.__mountMessage({ type: 'panel.show', url: browser.runtime.getURL('panel/panel.html') }, { id: 'another-extension' })), undefined);
   assert.equal((await message('panel.show')).ok, true);
   const panel = page.frames().find(frame => frame.url().includes('/panel/panel.html')) ?? await page.waitForEvent('framenavigated', { predicate: frame => frame.url().includes('/panel/panel.html') });
-  await panel.getByText('Test account', { exact: true }).waitFor();
+  await panel.waitForFunction(() => document.getElementById('account-label')?.textContent === 'Test account');
   const bounds = () => page.evaluate(() => {
     const rect = element => { const box = element.getBoundingClientRect(); return { left: box.left, right: box.right, top: box.top, width: box.width }; };
     return { panel: rect(document.getElementById('safari-chat-host')), site: rect(document.getElementById('site')), header: rect(document.querySelector('header')), floating: rect(document.getElementById('floating')) };
@@ -86,7 +86,7 @@ export async function testPanelMount(browser, origin) {
   await dragBy(80); await waitWidth(520);
   await message('panel.close'); await message('panel.show'); await waitWidth(520);
   const reopenedPanel = page.frames().find(frame => frame.url().includes('/panel/panel.html')) ?? await page.waitForEvent('framenavigated', { predicate: frame => frame.url().includes('/panel/panel.html') });
-  await reopenedPanel.getByText('Test account', { exact: true }).waitFor();
+  await reopenedPanel.waitForFunction(() => document.getElementById('account-label')?.textContent === 'Test account');
   await page.mouse.dblclick(923, 450); await waitWidth(440);
   assert.equal(await page.locator('#draft').inputValue(), 'Keep this text');
   await page.locator('#draft').fill('Typed beside chat');

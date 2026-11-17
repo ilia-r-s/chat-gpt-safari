@@ -1,23 +1,18 @@
-import { publicURL } from "./context.js";
+import { boundedContexts, textPrefix } from "./context.js";
+import { chatKey, prepareChat } from "./storage.js";
 
 const bytes = value => new TextEncoder().encode(JSON.stringify(value)).length;
 export const draftKey = id => `composer:${id}`;
 export const sessionKey = (account, tabId) => `panel:${JSON.stringify([account, Number.isInteger(tabId) && tabId >= 0 ? tabId : null])}`;
 
 export function boundedDraft(draft) {
-  const contexts = (draft.contexts ?? []).slice(0, 6).map(context => ({
-    kind: ["page", "selection", "file"].includes(context.kind) ? context.kind : "file",
-    key: String(context.key ?? "").slice(0, 2000), title: String(context.title ?? "Source").slice(0, 300),
-    text: String(context.text ?? "").slice(0, 24000), url: publicURL(context.url).slice(0, 2000),
-    ...(Number.isInteger(context.tabId) ? { tabId: context.tabId } : {}),
-    truncated: !!context.truncated || String(context.text ?? "").length > 24000,
-  }));
+  const contexts = boundedContexts(draft.contexts);
   const value = { id: draft.id, account: draft.account, text: String(draft.text ?? "").slice(0, 12000), contexts, updated: Date.now() };
   // Leave room for the bounded chat history and extension settings within Safari's quota.
   while (bytes(value) > 200000) {
     const largest = [...contexts].sort((a, b) => b.text.length - a.text.length)[0];
     if (!largest?.text.length) throw new Error("This draft is too large to save.");
-    largest.text = largest.text.slice(0, Math.floor(largest.text.length / 2));
+    largest.text = textPrefix(largest.text, Math.floor(largest.text.length / 2));
     largest.truncated = true;
   }
   return value;
@@ -25,16 +20,29 @@ export function boundedDraft(draft) {
 
 export async function saveDraft(storage, draft, tabId) {
   const value = boundedDraft(draft);
-  const key = draftKey(value.id);
+  let key = draftKey(value.id);
   const pointer = sessionKey(value.account, tabId);
   const all = await storage.get(null);
-  for (const old of [all[key], all[`chat:${value.id}`]]) {
+  const prior = all[key];
+  const chat = all[chatKey(value.id)];
+  for (const old of [prior, chat]) {
     if (old && old.account !== value.account) throw new Error("This chat belongs to a different account.");
   }
+  if (!chat && (draft.chatRevision > 0 || (!prior && draft.revision))) throw new Error("This chat was removed. Start a new chat to keep this draft.");
+  const hasDraft = !!value.text || value.contexts.length > 0;
+  const revision = prior ? prior.revision ?? 1 : 0;
+  let copy;
+  if (draft.revision !== undefined && draft.revision !== revision) {
+    if (!hasDraft) return { ...value, revision: 0 }; // Another editor owns the stored text.
+    if (prior?.text === value.text && JSON.stringify(prior.contexts) === JSON.stringify(value.contexts)) return { ...prior, revision };
+    value.id = crypto.randomUUID(); key = draftKey(value.id);
+    if (chat) copy = prepareChat(all, { ...chat, id: value.id, revision: 0, title: chat.title.slice(0, 106) + " (draft copy)" }, chat.id);
+  }
+  value.revision = hasDraft ? crypto.randomUUID() : 0;
   const entries = Object.entries(all);
   const drafts = entries.filter(([name]) => name.startsWith("composer:") && name !== key).sort((a, b) => b[1].updated - a[1].updated);
+  if (value.id !== draft.id) drafts.sort(([a], [b]) => Number(b === draftKey(draft.id)) - Number(a === draftKey(draft.id)));
   const sessions = entries.filter(([name]) => name.startsWith("panel:") && name !== pointer).sort((a, b) => b[1].updated - a[1].updated);
-  const hasDraft = !!value.text || value.contexts.length > 0;
   let used = hasDraft ? bytes(value) : 0;
   const remove = hasDraft ? [] : [key];
   drafts.forEach(([name, item], index) => {
@@ -42,10 +50,12 @@ export async function saveDraft(storage, draft, tabId) {
     if (index >= (hasDraft ? 19 : 20) || used > 600000) remove.push(name);
   });
   remove.push(...sessions.slice(49).map(([name]) => name));
+  if (copy) remove.push(...copy.remove);
   if (remove.length) await storage.remove(remove);
   await storage.set({
+    ...(copy ? { [chatKey(value.id)]: copy.value } : {}),
     ...(hasDraft ? { [key]: value } : {}),
     [pointer]: { id: value.id, account: value.account, updated: value.updated },
   });
-  return value;
+  return copy ? { ...value, chatRevision: copy.value.revision, title: copy.value.title } : value;
 }

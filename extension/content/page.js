@@ -1,5 +1,11 @@
 /** Self-contained functions: Safari serializes these into its isolated content-script world. */
-export function snapshotPage(limit = 12000, viewportOnly = false) {
+export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false, expectedURL = null) {
+  if (expectedURL && location.href !== expectedURL) throw new Error("The tab navigated before it could be read. Choose the page again.");
+  const selection = getSelection();
+  const editable = node => node?.parentElement?.closest("input,textarea,[contenteditable]");
+  const selected = !editable(selection?.anchorNode) && !editable(selection?.focusNode) ? selection?.toString() ?? "" : "";
+  const metadata = { title: document.title.slice(0, 180), url: location.href, selection: selected.slice(0, limit) };
+  if (selectionOnly) return { ...metadata, truncated: selected.length > limit };
   const viewportWidth = Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth);
   const labelFor = element => {
     const labelled = (element.getAttribute("aria-labelledby") || "").split(/\s+/).slice(0, 8).map(id => document.getElementById(id)?.textContent?.slice(0, 120) || "").join(" ").trim();
@@ -51,16 +57,38 @@ export function snapshotPage(limit = 12000, viewportOnly = false) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const chunks = [];
   let length = 0;
+  let captionsTrimmed = false;
+  // Include one already-displayed caption track when explicitly sharing a video page.
+  if (!viewportOnly) {
+    const video = Array.prototype.slice.call(root.getElementsByTagName("video"), 0, 8).find(visible);
+    const track = video && Array.prototype.slice.call(video.textTracks, 0, 20).find(t => t.mode === "showing" && ["captions", "subtitles"].includes(t.kind) && t.cues?.length);
+    if (track) {
+      const budget = Math.floor(limit / 2), cues = track.cues;
+      chunks.push("Video captions"); length = chunks[0].length + 1;
+      for (let i = 0; i < cues.length; i++) {
+        if (i >= 500 || length >= budget) { captionsTrimmed = true; break; }
+        const cue = cues[i];
+        if (typeof cue.text !== "string" || !Number.isFinite(cue.startTime)) continue;
+        const seconds = Math.max(0, Math.floor(cue.startTime));
+        const line = Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0") + " " + cue.text.slice(0, budget).replace(/\s+/g, " ").trim();
+        const part = line.slice(0, budget - length);
+        captionsTrimmed ||= part !== line || cue.text.length > budget;
+        chunks.push(part); length += part.length + 1;
+      }
+    }
+  }
   let visited = 0;
   let node;
   while ((node = walker.nextNode()) && length < limit && ++visited <= 20000) {
     const parent = node.parentElement;
     const excluded = viewportOnly ? "script,style,noscript,textarea,input,select,[contenteditable],svg" : "script,style,noscript,nav,footer,textarea,input,select,[contenteditable],svg";
     if (!parent || parent.closest(excluded) || !visible(parent)) continue;
-    trackScrollAreas(parent);
+    if (viewportOnly) trackScrollAreas(parent);
     const text = node.textContent.slice(0, limit - length + 1).replace(/\s+/g, " ").trim();
     if (text) { chunks.push(text.slice(0, limit - length)); length += text.length + 1; }
   }
+  const excerpt = { ...metadata, text: chunks.join("\n"), truncated: captionsTrimmed || length >= limit || visited > 20000 };
+  if (!viewportOnly) return excerpt;
   // getRandomValues also works on ordinary HTTP pages; randomUUID requires a secure context.
   const prefix = [...crypto.getRandomValues(new Uint8Array(8))].map(byte => byte.toString(16).padStart(2, "0")).join("");
   const refs = new Map();
@@ -148,13 +176,9 @@ export function snapshotPage(limit = 12000, viewportOnly = false) {
     add(area, labelFor(area), { actions: ["scroll"], directions: scrollDirections(area), scrollTop: Math.round(area.scrollTop), scrollLeft: Math.round(area.scrollLeft) }, 5000);
   }
   globalThis.__safariChatRefs = { url: location.href, refs };
-  let selection = getSelection()?.toString() ?? "";
-  const anchor = getSelection()?.anchorNode?.parentElement;
-  if (anchor?.closest("input,textarea,[contenteditable]")) selection = "";
   const page = document.scrollingElement ?? document.documentElement;
   return {
-    title: document.title.slice(0, 180), url: location.href, text: chunks.join("\n"), selection: selection.slice(0, limit),
-    truncated: length >= limit || visited > 20000, elements, elementsTruncated,
+    ...excerpt, elements, elementsTruncated,
     viewport: { width: viewportWidth, height: innerHeight, scrollX: Math.round(page.scrollLeft), scrollY: Math.round(page.scrollTop), pageWidth: page.scrollWidth, pageHeight: page.scrollHeight },
     viewportOnly,
   };

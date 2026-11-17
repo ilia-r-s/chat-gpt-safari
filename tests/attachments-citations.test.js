@@ -1,10 +1,32 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readTextFiles } from "../extension/panel/attachments.js";
+import { buildInput } from "../extension/core/context.js";
+import { boundedDraft } from "../extension/core/drafts.js";
 import { citedOutput } from "../extension/core/citations.js";
 import { markdown } from "../extension/panel/markdown.js";
 
 const file = (name, text, type = "") => new File([text], name, { type });
+test("same-name files retain distinct identities and exact UTF-8 source formatting through storage and inference", async () => {
+  const texts = ["  def f():\r\n\treturn  '�'\r\n\r\n\r\n", "a\tb\t \n  last row   "];
+  const sources = await readTextFiles(texts.map(text => file("source.txt", text)), 12000);
+  assert.notEqual(sources[0].key, sources[1].key);
+  const { contexts } = boundedDraft({ id: "draft", account: "test", contexts: sources });
+  const question = { role: "user", text: "Compare the files", contexts };
+  const built = buildInput([question], {});
+  assert.deepEqual(built.input.slice(0, -1).map(item => JSON.parse(item.content.split("\n")[1]).text), texts);
+  assert.equal(built.trimmed, false);
+  await assert.rejects(readTextFiles([file("bad.txt", Uint8Array.of(0xc3, 0x28))], 12000), /UTF-8/);
+  const [excerpt] = await readTextFiles([file("unicode.txt", "a🌿b")], 2);
+  assert.equal(excerpt.text, "a"); assert.equal(excerpt.truncated, true);
+  const noisy = '\t"\\'.repeat(4000);
+  const trimmed = buildInput([{ ...question, contexts: [{ ...contexts[0], text: noisy }] }], { inputChars: 16000, pageChars: 12000 });
+  const reference = JSON.parse(trimmed.input[0].content.split("\n")[1]);
+  assert.equal(reference.truncated, true);
+  const retained = reference.text;
+  assert.ok(trimmed.trimmed && retained.length > 0 && retained.length < noisy.length && noisy.startsWith(retained));
+  assert.ok(trimmed.chars <= 16000);
+});
 test("text attachments accept a bounded batch and disclose trimming", async () => {
   const result = await readTextFiles([file("note.md", "abcdef"), file("data.json", "{}")], 4);
   assert.deepEqual(result.map(({ title, text, truncated }) => ({ title, text, truncated })), [

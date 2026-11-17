@@ -6,12 +6,12 @@ const sessionId = '00000000-0000-4000-8000-000000000010';
 const requestId = '00000000-0000-4000-8000-000000000011';
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function fixture() {
-  const replies = [], writes = []; let enabled = true, closed = false, account = 'a';
+  const replies = [], writes = []; let enabled = true, closed = false, account = 'a', generation = 1;
   const api = { tabs: { get: async id => ({ id, url: 'https://example.com/' }), query: async () => [], create: async args => { writes.push(args); return { id: 2 }; } }, scripting: { executeScript: async ({ func, args }) => func.name === 'snapshotPage' ? [{ result: { url: 'https://example.com/', text: 'Page', elements: [{ id: 'ref', label: 'Field', actions: ['fill'] }] } }] : (writes.push(args), [{ result: { ok: true } }]) } };
-  const controller = new DesktopController({ api, preferences: async () => ({ desktopControl: enabled, pageChars: 6000 }), isClosed: () => closed, verify: async () => ({ account, hostID: 'host' }), reply: async payload => replies.push(payload) });
+  const controller = new DesktopController({ api, preferences: async () => ({ desktopControl: enabled, pageChars: 6000 }), isClosed: () => closed, verify: async () => ({ account, generation, hostID: 'host' }), reply: async payload => replies.push(payload) });
   const request = args => controller.handle({ sessionId, requestId, kind: 'request', args });
   const approve = allow => { const item = replies.findLast(item => item.type === 'approval'); return controller.handle({ sessionId, requestId, kind: 'approval', approvalId: item.approvalId, allow }); };
-  return { controller, replies, writes, request, approve, setAccount: value => { account = value; }, disable: () => { enabled = false; }, close: () => { closed = true; } };
+  return { controller, replies, writes, request, approve, setAccount: value => { account = value; generation++; }, disable: () => { enabled = false; }, close: () => { closed = true; } };
 }
 test('desktop approvals are returned to the calling session and exact request before writes', async () => {
   const f = fixture();
@@ -24,9 +24,10 @@ test('desktop approvals are returned to the calling session and exact request be
   assert.equal(f.replies.at(-1).result.tabId, 2);
 });
 test('desktop refusal, account changes, and revocation never perform the pending action', async () => {
-  for (const change of ['decline', 'account', 'disable', 'cleanup']) {
+  for (const change of ['decline', 'account', 'reconnect', 'disable', 'cleanup']) {
     const f = fixture(); const run = f.request({ operation: 'open_tab', url: 'https://example.com/' }); await tick();
     if (change === 'account') f.setAccount('b');
+    if (change === 'reconnect') { f.setAccount('b'); f.setAccount('a'); }
     if (change === 'disable') f.disable();
     if (change === 'cleanup') f.close();
     await f.approve(change !== 'decline'); await run;

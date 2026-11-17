@@ -14,6 +14,8 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         catch { reply.send(["ok": false, "error": error.localizedDescription]); return }
         let sessionID = message["sessionId"] as? String ?? ""
         let desktopEnabled = message["enabled"] as? Bool
+        let generation = message["generation"] as? String ?? ""
+        let extensionID = Bundle(for: SafariWebExtensionHandler.self).bundleIdentifier ?? Configuration.extensionID
         let desktopPayload = (message["payload"] as? [String: Any]).flatMap { try? JSONSerialization.data(withJSONObject: $0) }
         Task {
             do {
@@ -33,17 +35,22 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                           let payload = try JSONSerialization.jsonObject(with: desktopPayload) as? [String: Any] else { throw ChatError.message("Invalid desktop response.") }
                     try await DesktopRelay.reply(payload, profileID: profileID); result = ["ok": true]
                 case "auth.status":
-                    let account = try CredentialStore.read().active
+                    let vault = try CredentialStore.read()
+                    let account = vault.active
                     result = ["ok": true, "connected": account?.accessToken != nil,
-                              "canInfer": account?.canInfer ?? false, "account": account?.id ?? "local", "label": account?.label ?? "Connect account"]
+                              "canInfer": account?.canInfer ?? false, "account": account?.id ?? "local", "generation": vault.generation, "label": account?.label ?? "Connect account"]
                 case "auth.credential":
-                    let account = try await AuthService.shared.credential()
+                    let account = try await AuthService.shared.credential(generation: generation)
+                    let current = try CredentialStore.read()
+                    guard current.generation == generation, current.active?.id == account.id,
+                          current.active?.accessToken == account.accessToken else { throw ChatError.message("The selected account changed.") }
                     guard let token = account.accessToken else { throw ChatError.message("Sign in in the companion app first.") }
-                    result = ["ok": true, "token": token, "account": account.id]
+                    result = ["ok": true, "token": token, "account": account.id, "generation": generation]
                 case "auth.signout":
-                    try CredentialStore.signOut(); result = ["ok": true]
+                    let message = try await AuthService.shared.signOut(expected: generation, extensionID: extensionID)
+                    result = ["ok": true, "message": message]
                 case "data.erase":
-                    try await AuthService.shared.eraseLocalData(); result = ["ok": true]
+                    try await AuthService.shared.eraseLocalData(); AccountEvents.notify(extensionID); result = ["ok": true]
                 default: throw ChatError.message("Unsupported native request.")
                 }
                 reply.send(result)

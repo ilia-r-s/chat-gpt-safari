@@ -3,6 +3,24 @@ import assert from "node:assert/strict";
 import { markdown } from "../extension/panel/markdown.js";
 import { saveChat, listChats } from "../extension/core/storage.js";
 
+test("concurrent edits of legacy history preserve both versions and repeated delivery reuses the saved copy", async () => {
+  const legacy = { id: "shared", title: "Conversation", account: "one", messages: [], updated: 1 };
+  const data = { "chat:shared": legacy };
+  const storage = { get: async () => structuredClone(data), set: async values => Object.assign(data, values), remove: async keys => keys.forEach(key => delete data[key]) };
+  const update = text => ({ ...legacy, revision: 1, messages: [{ role: "user", text }] });
+  const first = await saveChat(storage, update("Dock"));
+  const second = await saveChat(storage, update("Pop-out"));
+  assert.equal(first.id, legacy.id); assert.equal(first.revision, 2);
+  assert.notEqual(second.id, first.id); assert.equal(second.revision, 1);
+  assert.match(second.title, /separate copy/);
+  assert.deepEqual(first, await saveChat(storage, update("Dock")));
+  assert.deepEqual(second, await saveChat(storage, update("Pop-out")));
+  assert.equal(data["chat:shared"].messages[0].text, "Dock"); assert.equal(data[`chat:${second.id}`].messages[0].text, "Pop-out");
+  await assert.rejects(saveChat(storage, { ...first, account: "two" }), /different account/);
+  delete data["chat:shared"];
+  await assert.rejects(saveChat(storage, first), /removed/);
+});
+
 test("assistant HTML and javascript URLs remain inert", () => {
   const result = markdown('<img src=x onerror=alert(1)>\n[Bad](javascript:alert(1))\n[Good](https://example.com)');
   assert.ok(!result.includes("<img")); assert.ok(!result.includes('href="javascript:'));

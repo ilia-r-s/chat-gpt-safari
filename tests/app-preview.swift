@@ -21,10 +21,13 @@ enum AppPreview {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         let saved = SetupAccount(id: "fixture", title: "alex.with.a.long.account.name@example.com",
                                  detail: "ChatGPT plan usage · 123456", isSelected: true, isAPIKey: false)
+        let work = SetupAccount(id: "work", title: "Work · 04cba2", detail: "API billing", isSelected: true, isAPIKey: true)
+        let legacy = SetupAccount(id: "api-key", title: "Original API key", detail: "Signed out", isSelected: false, isAPIKey: true, needsKey: true)
         let variants: [(String, AppAppearance, [SetupAccount], Bool, String, Bool, NSSize)] = [
             ("app-light", .light, [], false, "", false, NSSize(width: 600, height: 820)),
             ("app-dark", .dark, [], false, "", false, NSSize(width: 600, height: 820)),
             ("app-account", .light, [saved], false, "Account saved on this Mac.", false, NSSize(width: 600, height: 1000)),
+            ("app-keys", .dark, [work, legacy], false, "", true, NSSize(width: 600, height: 1050)),
             ("app-compact", .dark, [saved], true, "Continue in your browser.", false, NSSize(width: 520, height: 560)),
             ("app-api-key", .light, [], false, "Could not connect. Check your network and try again.", true, NSSize(width: 600, height: 1000)),
         ]

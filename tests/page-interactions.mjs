@@ -29,6 +29,8 @@ export async function testPageInteractions(browser) {
   assert.ok(!snapshot.elements.some(element => element.label === 'Invisible action'));
   assert.ok(!snapshot.text.includes('Bottom of the page'));
   const find = label => snapshot.elements.find(element => element.label === label);
+  const attachment = await page.evaluate(() => window.snapshotPage(6000, false));
+  assert.equal(attachment.elements, undefined, 'attaching a page leaves existing action references intact');
   assert.deepEqual(find('Full name').actions, ['click', 'fill']);
   assert.equal(find('Country').options[1].value, 'ca');
   assert.ok(!find('Read-only field').actions.includes('fill'));
@@ -80,8 +82,28 @@ export async function testPageInteractions(browser) {
   await read(); await action('scroll', null, null, { direction: 'top' });
   assert.equal(await page.evaluate(() => scrollY), 0);
   await page.setContent(`<main><h1>Many controls</h1>${Array.from({ length: 80 }, (_, i) => `<button>${i}: ${'Label '.repeat(30)}</button>`).join('')}<select aria-label="Many choices">${Array.from({ length: 100 }, (_, i) => `<option>${i}: ${'Choice '.repeat(30)}</option>`).join('')}</select></main>`);
-  const bounded = await page.evaluate(() => window.snapshotPage(12000, false));
+  await page.setViewportSize({ width: 1200, height: 3000 });
+  const bounded = await read();
   assert.ok(JSON.stringify(bounded).length <= 18000, 'control descriptions must fit within the tool result budget');
   assert.ok(bounded.elementsTruncated);
+  await page.setContent('<main><video width="320" height="180"></video><p>Introduction to the lesson</p></main>');
+  await page.evaluate(() => {
+    const video = document.querySelector('video');
+    const captions = video.addTextTrack('captions', 'English', 'en'); captions.mode = 'showing';
+    captions.addCue(new VTTCue(65, 70, 'The experiment starts here.'));
+    captions.addCue(new VTTCue(71, 80, 'More detail '.repeat(300)));
+    const hidden = video.addTextTrack('subtitles', 'Other'); hidden.mode = 'hidden'; hidden.addCue(new VTTCue(0, 1, 'Unused track'));
+  });
+  const shared = await page.evaluate(() => window.snapshotPage(200, false));
+  assert.match(shared.text, /1:05 The experiment starts here/);
+  assert.ok(shared.text.includes('Introduction') && shared.text.length <= 200 && shared.truncated);
+  assert.ok(!shared.text.includes('Unused track'));
+  assert.ok(!(await read()).text.includes('The experiment starts here'), 'viewport reads do not collect a video transcript');
+  const selected = await page.evaluate(() => {
+    const range = document.createRange(); range.selectNodeContents(document.querySelector('p'));
+    getSelection().removeAllRanges(); getSelection().addRange(range);
+    return window.snapshotPage(12, false, true);
+  });
+  assert.equal(selected.selection, 'Introduction'); assert.equal(selected.text, undefined); assert.ok(selected.truncated);
   await page.close();
 }

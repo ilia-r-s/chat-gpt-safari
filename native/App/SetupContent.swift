@@ -30,10 +30,11 @@ struct SetupAccount: Identifiable {
     let detail: String
     let isSelected: Bool
     let isAPIKey: Bool
+    var needsKey = false
 }
 
 enum SetupAction {
-    case signIn, select(String), reconnect(String), signOut, cancel, connectAPIKey, safariSettings, eraseData
+    case signIn, select(String), reconnect(String), signOut, cancel, connectAPIKey(String, replacing: String?), safariSettings, eraseData
 }
 
 struct SetupContent: View {
@@ -46,6 +47,8 @@ struct SetupContent: View {
     @Binding var showAPIKey: Bool
     @Binding var appearance: AppAppearance
     let perform: (SetupAction) -> Void
+    @State private var keyName = ""
+    @State private var replacing: String?
     @Environment(\.colorScheme) private var colorScheme
     private var palette: SetupPalette { SetupPalette(dark: colorScheme == .dark) }
     private var hasSelection: Bool { accounts.contains(where: \.isSelected) }
@@ -57,9 +60,9 @@ struct SetupContent: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("ChatGPT, alongside\nyour browsing.")
-                            .font(.system(size: 30, weight: .semibold)).tracking(-0.8)
-                        Text("Connect an account, then open Safari Chat from the Safari toolbar.")
+                        Text(hasSelection ? "Accounts and Safari" : "Set up Safari Chat")
+                            .font(.system(size: 27, weight: .semibold)).tracking(-0.6)
+                        Text(hasSelection && extensionEnabled ? "Open side chat from the Safari toolbar or press ⌘⇧. on a website." : "Connect an account and enable the extension to chat beside a webpage.")
                             .font(.system(size: 13)).foregroundStyle(palette.muted).lineSpacing(4)
                     }.padding(.vertical, 4)
                     accountCard
@@ -113,7 +116,7 @@ struct SetupContent: View {
                 VStack(spacing: 8) {
                     ForEach(accounts) { account in
                         HStack(spacing: 12) {
-                            Button { perform(.select(account.id)) } label: {
+                            Button { if account.needsKey { editKey(account.id) } else { perform(.select(account.id)) } } label: {
                                 HStack(spacing: 10) {
                                     Image(systemName: account.isSelected ? "checkmark.circle.fill" : "circle")
                                         .font(.system(size: 17))
@@ -127,7 +130,9 @@ struct SetupContent: View {
                                     .background(account.isSelected ? palette.soft : palette.surface, in: RoundedRectangle(cornerRadius: 9))
                             }.buttonStyle(.plain).disabled(busy)
                                 .accessibilityLabel("\(account.title), \(account.isSelected ? "selected" : "select account")")
-                            if !account.isAPIKey {
+                            if account.isAPIKey {
+                                Button("Replace key") { editKey(account.id) }.buttonStyle(SetupButtonStyle()).disabled(busy)
+                            } else {
                                 Button("Reconnect") { perform(.reconnect(account.id)) }
                                     .buttonStyle(SetupButtonStyle()).disabled(busy)
                             }
@@ -148,22 +153,36 @@ struct SetupContent: View {
             Text("Sign in through your browser. Eligible accounts can authorize ChatGPT plan usage. Existing ChatGPT chats stay in ChatGPT.")
                 .font(.system(size: 12)).foregroundStyle(palette.muted).lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
-            DisclosureGroup("Use an OpenAI API key", isExpanded: $showAPIKey) {
+            DisclosureGroup("API key connections", isExpanded: $showAPIKey) {
                 VStack(alignment: .leading, spacing: 9) {
+                    if let account = accounts.first(where: { $0.id == replacing }) {
+                        Text("Replace the key for \(account.title) to keep its chats and drafts.")
+                        Button("Add a separate connection") { editKey(nil) }.buttonStyle(.link).disabled(busy)
+                    } else {
+                        TextField("Connection name (optional)", text: $keyName).textFieldStyle(.roundedBorder).disabled(busy)
+                    }
                     HStack(spacing: 10) {
                         SecureField("OpenAI API key", text: $apiKey).textFieldStyle(.plain)
                             .padding(10).background(palette.soft, in: RoundedRectangle(cornerRadius: 8))
                             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(palette.line))
-                            .disabled(busy).onSubmit { if !busy && !apiKey.isEmpty { perform(.connectAPIKey) } }
-                        Button("Connect") { perform(.connectAPIKey) }
+                            .disabled(busy).onSubmit { if !busy && !apiKey.isEmpty { submitKey() } }
+                        Button(replacing == nil ? "Connect" : "Replace key") { submitKey() }
                             .buttonStyle(SetupButtonStyle()).disabled(busy || apiKey.isEmpty)
                     }
-                    Text("Stored in macOS Keychain. API billing is separate.")
+                    Text("New connections keep separate chat histories. Keys are stored in macOS Keychain and use API billing.")
                         .font(.system(size: 11)).foregroundStyle(palette.muted)
                 }.padding(.top, 10)
             }.font(.system(size: 12))
 
         }
+    }
+
+    private func editKey(_ id: String?) {
+        replacing = id; keyName = ""; apiKey = ""; showAPIKey = true
+    }
+
+    private func submitKey() {
+        perform(.connectAPIKey(keyName, replacing: replacing))
     }
 
     private var safariCard: some View {

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { boundedDraft, draftKey, sessionKey, saveDraft } from "../extension/core/drafts.js";
-import { listChats } from "../extension/core/storage.js";
+import { listChats, saveChat } from "../extension/core/storage.js";
 
 function fixture() {
   const data = {};
@@ -12,6 +12,27 @@ function fixture() {
   return { data, storage };
 }
 const source = { kind: "page", key: "page:example", title: "Example", text: "Reference", url: "https://example.com/?secret=value#private", tabId: 7 };
+
+test("a draft conflict saves the conversation and draft copy together and a stale clear cannot discard either editor", async () => {
+  const { data, storage } = fixture();
+  const chat = await saveChat(storage, { id: "chat", account: "one", title: "Original", messages: [{ role: "user", text: "Hello" }] });
+  const initial = { id: chat.id, account: chat.account, chatRevision: chat.revision, revision: 0 };
+  const first = await saveDraft(storage, { ...initial, text: "Dock draft" }, 1);
+  await saveDraft(storage, { ...initial, text: "" }, 2);
+  assert.equal(data[draftKey(chat.id)].text, first.text);
+  const update = { ...initial, text: "Pop-out draft" };
+  await assert.rejects(saveDraft({ ...storage, set: async () => { throw Error("quota"); } }, update, 2), /quota/);
+  assert.deepEqual(Object.keys(data).filter(key => key.startsWith("chat:")), ["chat:chat"]);
+  const second = await saveDraft(storage, update, 2);
+  assert.notEqual(second.id, chat.id);
+  assert.deepEqual(data[`chat:${second.id}`].messages, chat.messages);
+  assert.equal(data[draftKey(chat.id)].text, first.text); assert.equal(data[draftKey(second.id)].text, second.text);
+  assert.equal(data[sessionKey("one", 2)].id, second.id);
+  delete data["chat:chat"];
+  await assert.rejects(saveDraft(storage, { ...initial, revision: first.revision, text: "Late" }, 1), /removed/);
+  delete data[draftKey(chat.id)];
+  await assert.rejects(saveDraft(storage, { ...initial, chatRevision: 0, revision: first.revision, text: "Deleted draft" }, 1), /removed/);
+});
 
 test("drafts preserve text and explicit attachments, with independent account/tab pointers", async () => {
   const { data, storage } = fixture();

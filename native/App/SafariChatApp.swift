@@ -33,9 +33,9 @@ struct SetupView: View {
 
     var body: some View {
         SetupContent(appIcon: NSImage(named: "SafariChatIcon") ?? NSImage(), accounts: model.accounts.map { account in
-            SetupAccount(id: account.id, title: account.isAPIKey ? "OpenAI API key" : account.email.isEmpty ? account.name : account.email,
-                         detail: account.accessToken == nil ? "Sign in to reconnect" : account.isAPIKey ? "API billing · Key saved" : "\(account.canInfer ? "ChatGPT plan usage" : "Plan usage not enabled") · \(account.id.suffix(6))",
-                         isSelected: model.activeID == account.id, isAPIKey: account.isAPIKey)
+            SetupAccount(id: account.id, title: account.isAPIKey ? account.label : account.email.isEmpty ? account.name : account.email,
+                         detail: account.accessToken == nil ? "Signed out" : account.isAPIKey ? "API billing" : "\(account.canInfer ? "ChatGPT plan usage" : "Plan usage not enabled") · \(account.id.suffix(6))",
+                         isSelected: model.activeID == account.id, isAPIKey: account.isAPIKey, needsKey: account.isAPIKey && account.accessToken == nil)
         }, busy: model.busy, message: model.message, extensionEnabled: model.extensionEnabled,
                      apiKey: $model.apiKey, showAPIKey: $model.showAPIKey, appearance: $appearance) { action in
             switch action {
@@ -44,7 +44,7 @@ struct SetupView: View {
             case .reconnect(let id): if let account = model.accounts.first(where: { $0.id == id }) { model.signIn(account: account) }
             case .signOut: model.signOut()
             case .cancel: model.cancel()
-            case .connectAPIKey: model.connectAPIKey(model.apiKey); model.apiKey = ""
+            case .connectAPIKey(let name, let id): model.connectAPIKey(model.apiKey, name: name, replacing: id); model.apiKey = ""
             case .safariSettings: model.openSafariSettings()
             case .eraseData: model.eraseNativeDataAndQuit()
             }
