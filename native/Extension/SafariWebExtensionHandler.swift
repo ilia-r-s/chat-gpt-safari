@@ -1,3 +1,4 @@
+import AppKit
 import SafariServices
 import Foundation
 
@@ -12,6 +13,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         let profileID: String
         do { profileID = try DesktopRelay.profileIdentifier(item.userInfo?[SFExtensionProfileKey]) }
         catch { reply.send(["ok": false, "error": error.localizedDescription]); return }
+        let clipboardText = message["text"] as? String
         let sessionID = message["sessionId"] as? String ?? ""
         let desktopEnabled = message["enabled"] as? Bool
         let generation = message["generation"] as? String ?? ""
@@ -48,6 +50,19 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                           current.active?.accessToken == account.accessToken else { throw ChatError.message("The selected account changed.") }
                     guard let token = account.accessToken else { throw ChatError.message("Sign in in the companion app first.") }
                     result = ["ok": true, "token": token, "account": account.id, "generation": generation]
+                case "clipboard.read", "clipboard.write":
+                    let text = try await MainActor.run { () throws -> String? in
+                        func verify() throws {
+                            let vault = try CredentialStore.read()
+                            guard vault.generation == generation, let account = vault.active,
+                                  account.accessToken != nil, account.canInfer else { throw ChatError.message("The selected account changed.") }
+                        }
+                        if type == "clipboard.read" { return try PlainTextClipboard.read(from: .general, verify: verify) }
+                        guard let clipboardText else { throw ChatError.message("Choose text to copy first.") }
+                        try PlainTextClipboard.write(clipboardText, to: .general, verify: verify)
+                        return nil
+                    }
+                    if let text { result = ["ok": true, "text": text] } else { result = ["ok": true] }
                 case "auth.signout":
                     let message = try await AuthService.shared.signOut(expected: generation, extensionID: extensionID)
                     result = ["ok": true, "message": message]

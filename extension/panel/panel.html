@@ -45,6 +45,7 @@
       <div id="activity" class="activity" role="status" hidden><span id="activity-label"></span><small id="activity-detail"></small></div>
       <section id="approval" class="approval" hidden aria-labelledby="approval-title">
         <strong id="approval-title" role="status"></strong><pre id="approval-detail"></pre>
+        <div id="approval-path" hidden><svg role="img" aria-label="Proposed pointer path with a dot at the start and a ring at the end"><polyline/><circle/><circle/></svg></div>
         <div class="approval-actions">
           <button id="decline-button" class="secondary">Decline</button>
           <div class="split-button">
@@ -58,6 +59,11 @@
 
   <div id="notice" class="notice" role="status" hidden></div>
   <footer class="bottom">
+    <div id="motion-controls" hidden>
+      <span id="motion-status" role="status"></span>
+      <label class="motion-speed"><input id="motion-speed" type="number" min="0" step="any" required aria-label="Motion speed in pixels per second" title="Pixels per second. Set to zero to pause."> px/s</label>
+      <button type="button" class="text-button" id="stop-motion">Stop scrolling</button>
+    </div>
     <div class="run-options" id="run-options" role="group" aria-label="Response settings" hidden>
       <label class="compact-select"><span>Model</span><strong aria-hidden="true" id="model-name">Choose a model</strong><select id="model" aria-label="Model"><option value="">Choose a model</option></select></label>
       <label class="compact-select" id="effort-control" hidden><span>Effort</span><strong aria-hidden="true" id="effort-name">Model default</strong><select id="effort" aria-label="Reasoning effort" title="Model default leaves the effort choice to the selected model."><option value="auto">Model default</option></select></label>
@@ -76,7 +82,10 @@
         <button class="send-button" id="stop-button" type="button" aria-label="Stop response" hidden><span class="stop-square"></span></button>
       </div>
     </form>
-    <div class="composer-help"><span id="draft-status" role="status"></span><span class="sr-only" id="composer-hint">Type @ to mention a tab. Enter sends. Shift + Enter adds a line.</span></div>
+    <div class="composer-help">
+      <div id="action-budget" hidden><span id="actions-left"></span> <span id="action-limit-note" role="status"></span> <button type="button" id="continue-actions" hidden>Continue</button></div>
+      <span id="draft-status" role="status"></span><span class="sr-only" id="composer-hint">Type @ to mention a tab. Enter sends. Shift + Enter adds a line.</span>
+    </div>
   </footer>
 
   <div id="access-menu" class="add-menu" popover="auto" role="dialog" aria-label="Browser approvals">
@@ -146,6 +155,8 @@
       <label class="setting-row">Page size<select id="page-setting"><option value="6000">6,000 characters</option><option value="12000">12,000 characters</option><option value="24000">24,000 characters</option></select></label>
       <label class="setting-row">Total input budget<select id="budget-setting"><option value="24000">24,000 characters</option><option value="48000">48,000 characters</option><option value="96000">96,000 characters</option></select></label>
       <label class="setting-row">Recent turns<select id="turns-setting"><option value="4">4 turns</option><option value="8">8 turns</option><option value="16">16 turns</option></select></label>
+      <label class="setting-row">Browser actions per message<input id="actions-setting" type="number" min="1" max="100" step="1" required aria-describedby="actions-setting-hint"></label>
+      <p id="actions-setting-hint" class="muted">Choose 1–100. Each page read or other browser attempt uses one action. Changes apply to the next message.</p>
     </details>
     <div class="setting-section settings-links"><button id="export-button">Export chat as Markdown</button><button id="signout-button">Sign out</button></div>
     <details class="setting-section" id="data-section"><summary>Remove your data</summary>

@@ -37,7 +37,13 @@ test("restricted schemes, embedded credentials and malformed URLs are rejected",
 test("settings clamp resource limits and reject non-boolean tools", () => {
   assert.equal(normalizeSettings({ inputChars: Infinity }).inputChars, 48000);
   assert.equal(normalizeSettings({ pageChars: -1 }).pageChars, 2000);
-  assert.equal(normalizeSettings({ maxToolRounds: 1000 }).maxToolRounds, 10);
+  assert.equal(normalizeSettings({}).maxBrowserActions, 100);
+  assert.equal(normalizeSettings({ maxToolRounds: 6 }).maxBrowserActions, 100);
+  assert.equal(normalizeSettings({ maxBrowserActions: 6, maxToolRounds: 6 }).maxBrowserActions, 6);
+  assert.equal(normalizeSettings({ maxToolRounds: 3 }).maxBrowserActions, 3);
+  assert.equal(normalizeSettings({ maxBrowserActions: -2 }).maxBrowserActions, 1);
+  assert.equal(normalizeSettings({ maxBrowserActions: 101 }).maxBrowserActions, 100);
+  assert.equal(normalizeSettings({ maxBrowserActions: 8.9 }).maxBrowserActions, 8);
   assert.equal(normalizeSettings({ desktopControl: "true" }).desktopControl, false);
 });
 test("text compaction and token estimate handle Unicode and whitespace", () => {

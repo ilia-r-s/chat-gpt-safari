@@ -1,4 +1,4 @@
-import { normalizeSettings } from "./config.js";
+import { MAX_BROWSER_ACTIONS, normalizeSettings } from "./config.js";
 import { boundedContexts, textPrefix } from "./context.js";
 
 const MAX_CHATS = 50;
@@ -13,6 +13,13 @@ export async function settings(storage) {
   return normalizeSettings(data.settings);
 }
 
+function actionCount(message) {
+  const count = message.browserActions;
+  if (message.role !== "assistant" || !Number.isInteger(count?.limit) || count.limit < 1 || count.limit > MAX_BROWSER_ACTIONS ||
+      !Number.isInteger(count.used) || count.used < 0 || count.used > count.limit) return {};
+  return { browserActions: { used: count.used, limit: count.limit } };
+}
+
 export function prepareChat(all, chat, retainID) {
   const previous = all[chatKey(chat.id)];
   if ([previous, all[`composer:${chat.id}`]].some(item => item && item.account !== chat.account)) throw new Error("This chat belongs to a different account.");
@@ -23,6 +30,7 @@ export function prepareChat(all, chat, retainID) {
     contexts: boundedContexts(m.contexts),
     ...(m.error ? { error: true } : {}),
     ...(m.role === "assistant" && Number.isFinite(m.workMs) ? { workMs: Math.max(0, Math.min(300000, m.workMs)) } : {}),
+    ...actionCount(m),
   }));
   while (messages.length && messages[0].role !== "user") messages.shift();
   while (bytes(messages) > MAX_CHAT_BYTES) {

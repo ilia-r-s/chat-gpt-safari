@@ -50,6 +50,8 @@ return {EFFORTS, EFFORT_LABELS, normalizeEffort, modelCatalog, resolveEffort};
 // core/config.js
 modules["core/config.js"] = (() => {
 const { normalizeEffort } = modules["core/models.js"];
+const MAX_BROWSER_ACTIONS = 100;
+
 const DEFAULTS = Object.freeze({
   theme: "system",
   model: "",
@@ -57,7 +59,7 @@ const DEFAULTS = Object.freeze({
   pageChars: 12000,
   inputChars: 48000,
   historyTurns: 8,
-  maxToolRounds: 6,
+  maxBrowserActions: MAX_BROWSER_ACTIONS,
   webSearch: false,
   desktopControl: false,
 });
@@ -66,6 +68,8 @@ const integer = (value, fallback, min, max) => Number.isFinite(value)
   ? Math.min(max, Math.max(min, Math.trunc(value))) : fallback;
 
 function normalizeSettings(value = {}) {
+  // Earlier builds wrote the hidden default of six whenever any preference was saved.
+  const legacyRounds = integer(value.maxToolRounds, 6, 1, 10);
   return {
     theme: ["system", "light", "dark"].includes(value.theme) ? value.theme : DEFAULTS.theme,
     model: typeof value.model === "string" ? value.model.slice(0, 120) : "",
@@ -73,7 +77,7 @@ function normalizeSettings(value = {}) {
     pageChars: integer(value.pageChars, DEFAULTS.pageChars, 2000, 24000),
     inputChars: integer(value.inputChars, DEFAULTS.inputChars, 12000, 96000),
     historyTurns: integer(value.historyTurns, DEFAULTS.historyTurns, 1, 20),
-    maxToolRounds: integer(value.maxToolRounds, DEFAULTS.maxToolRounds, 1, 10),
+    maxBrowserActions: integer(value.maxBrowserActions, legacyRounds === 6 ? DEFAULTS.maxBrowserActions : legacyRounds, 1, MAX_BROWSER_ACTIONS),
     webSearch: value.webSearch === true,
     desktopControl: value.desktopControl === true,
   };
@@ -86,7 +90,7 @@ const INSTRUCTIONS = [
   "An excerpt marked truncated is incomplete. Explain a missing detail when it affects the answer.",
 ].join(" ");
 
-return {DEFAULTS, normalizeSettings, INSTRUCTIONS};
+return {MAX_BROWSER_ACTIONS, DEFAULTS, normalizeSettings, INSTRUCTIONS};
 })();
 
 // core/context.js
@@ -213,7 +217,7 @@ return {textPrefix, compactText, safeWebURL, publicURL, boundedContexts, buildIn
 
 // core/storage.js
 modules["core/storage.js"] = (() => {
-const { normalizeSettings } = modules["core/config.js"];
+const { MAX_BROWSER_ACTIONS, normalizeSettings } = modules["core/config.js"];
 const { boundedContexts, textPrefix } = modules["core/context.js"];
 const MAX_CHATS = 50;
 const MAX_MESSAGES = 80;
@@ -227,6 +231,13 @@ async function settings(storage) {
   return normalizeSettings(data.settings);
 }
 
+function actionCount(message) {
+  const count = message.browserActions;
+  if (message.role !== "assistant" || !Number.isInteger(count?.limit) || count.limit < 1 || count.limit > MAX_BROWSER_ACTIONS ||
+      !Number.isInteger(count.used) || count.used < 0 || count.used > count.limit) return {};
+  return { browserActions: { used: count.used, limit: count.limit } };
+}
+
 function prepareChat(all, chat, retainID) {
   const previous = all[chatKey(chat.id)];
   if ([previous, all[`composer:${chat.id}`]].some(item => item && item.account !== chat.account)) throw new Error("This chat belongs to a different account.");
@@ -237,6 +248,7 @@ function prepareChat(all, chat, retainID) {
     contexts: boundedContexts(m.contexts),
     ...(m.error ? { error: true } : {}),
     ...(m.role === "assistant" && Number.isFinite(m.workMs) ? { workMs: Math.max(0, Math.min(300000, m.workMs)) } : {}),
+    ...actionCount(m),
   }));
   while (messages.length && messages[0].role !== "user") messages.shift();
   while (bytes(messages) > MAX_CHAT_BYTES) {
@@ -307,14 +319,31 @@ return {chatKey, settings, prepareChat, saveChat, listChats};
 // content/page.js
 modules["content/page.js"] = (() => {
 /** Self-contained functions: Safari serializes these into its isolated content-script world. */
-function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false, expectedURL = null) {
+function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false, expectedURL = null, indicateCopy = false, pointerPaths = false) {
   if (expectedURL && location.href !== expectedURL) throw new Error("The tab navigated before it could be read. Choose the page again.");
   const selection = getSelection();
   const editable = node => node?.parentElement?.closest("input,textarea,[contenteditable]");
   const selected = !editable(selection?.anchorNode) && !editable(selection?.focusNode) ? selection?.toString() ?? "" : "";
   const metadata = { title: document.title.slice(0, 180), url: location.href, selection: selected.slice(0, limit) };
-  if (selectionOnly) return { ...metadata, truncated: selected.length > limit };
   const viewportWidth = Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth);
+  // Return only the visible fragment of text included in this capture.
+  let pointerRect;
+  function markCopiedText(range) {
+    const container = range.commonAncestorContainer;
+    const parent = container.nodeType === Node.ELEMENT_NODE ? container : container.parentElement;
+    const rects = range.getClientRects();
+    for (let i = 0; i < Math.min(rects.length, 256); i++) {
+      const rect = rects[i], left = Math.max(0, rect.left), right = Math.min(viewportWidth, rect.right);
+      const top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
+      if (left >= right || top >= bottom) continue;
+      const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+      if (hit && parent?.contains(hit) && range.intersectsNode(hit)) { pointerRect = { left, right, top, bottom }; return; }
+    }
+  }
+  if (selectionOnly) {
+    if (indicateCopy && !document.hidden && selected && selection.rangeCount) markCopiedText(selection.getRangeAt(0));
+    return { ...metadata, truncated: selected.length > limit, ...(pointerRect && { pointerRect }) };
+  }
   const labelFor = element => {
     const labelled = (element.getAttribute("aria-labelledby") || "").split(/\s+/).slice(0, 8).map(id => document.getElementById(id)?.textContent?.slice(0, 120) || "").join(" ").trim();
     const field = element.matches("input,textarea,select") || element.isContentEditable;
@@ -386,16 +415,30 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
     }
   }
   let visited = 0;
+  let pointerCandidates = indicateCopy && !document.hidden ? 32 : 0;
   let node;
   while ((node = walker.nextNode()) && length < limit && ++visited <= 20000) {
     const parent = node.parentElement;
     const excluded = viewportOnly ? "script,style,noscript,textarea,input,select,[contenteditable],svg" : "script,style,noscript,nav,footer,textarea,input,select,[contenteditable],svg";
     if (!parent || parent.closest(excluded) || !visible(parent)) continue;
     if (viewportOnly) trackScrollAreas(parent);
-    const text = node.textContent.slice(0, limit - length + 1).replace(/\s+/g, " ").trim();
-    if (text) { chunks.push(text.slice(0, limit - length)); length += text.length + 1; }
+    const source = node.data.slice(0, limit - length + 1);
+    const text = source.replace(/\s+/g, " ").trim();
+    if (text) {
+      if (pointerCandidates && !pointerRect) {
+        const box = parent.getBoundingClientRect();
+        if (box.right > 0 && box.left < viewportWidth && box.bottom > 0 && box.top < innerHeight) {
+          pointerCandidates--;
+          const range = document.createRange(), start = source.search(/\S/);
+          range.setStart(node, start);
+          range.setEnd(node, start + Math.min(text.length, limit - length, 80));
+          markCopiedText(range);
+        }
+      }
+      chunks.push(text.slice(0, limit - length)); length += text.length + 1;
+    }
   }
-  const excerpt = { ...metadata, text: chunks.join("\n"), truncated: captionsTrimmed || length >= limit || visited > 20000 };
+  const excerpt = { ...metadata, text: chunks.join("\n"), truncated: captionsTrimmed || length >= limit || visited > 20000, ...(pointerRect && { pointerRect }) };
   if (!viewportOnly) return excerpt;
   // getRandomValues also works on ordinary HTTP pages; randomUUID requires a secure context.
   const prefix = [...crypto.getRandomValues(new Uint8Array(8))].map(byte => byte.toString(16).padStart(2, "0")).join("");
@@ -406,6 +449,10 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
   const add = (element, label, properties, budget = 4300, extra = {}) => {
     const id = `${prefix}-${elements.length + 1}`;
     const entry = { id, tag: element.tagName.toLowerCase(), label, ...properties };
+    if (pointerPaths) {
+      const rect = element.getBoundingClientRect();
+      entry.bounds = [Math.max(0, rect.left), Math.max(0, rect.top), Math.min(viewportWidth, rect.right), Math.min(innerHeight, rect.bottom)].map(Math.round);
+    }
     const size = JSON.stringify(entry).length;
     if (elementChars + size > budget) { elementsTruncated = true; return; }
     elementChars += size;
@@ -452,16 +499,28 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
     add(list, `${label} navigation`, { actions: ["scroll"], kind: "carousel", directions: orientation === "vertical" ? ["up", "down"] : ["left", "right"], currentItem: selected + 1, itemCount: tabs.length }, 1500, { gallery });
   }
   let examined = 0;
-  for (const element of document.querySelectorAll("a[href],button,input,textarea,select,[role='button'],[role='tab'],[role='checkbox'],[role='radio'],[role='combobox'],[role='option'],[contenteditable='true'],[contenteditable='plaintext-only']")) {
+  const controls = "a[href],button,input,textarea,select,[role='button'],[role='tab'],[role='checkbox'],[role='radio'],[role='combobox'],[role='option'],[contenteditable='true'],[contenteditable='plaintext-only']";
+  const dragTargets = "canvas,[draggable='true'],[role='slider'],[role='application'],[data-drag-handle]";
+  const doubleTargets = "[ondblclick],[role=row],[role=gridcell],[role=treeitem],[role=listitem]";
+  const candidates = pointerPaths ? controls + "," + dragTargets + "," + doubleTargets + ",[style*='cursor' i],[class*='handle' i],[class*='dragg' i]" : controls;
+  for (const element of document.querySelectorAll(candidates)) {
     if (elements.length >= 50 || ++examined > 5000) { elementsTruncated = true; break; }
     if (!visible(element) || element.matches(":disabled,[aria-disabled='true'],input[type='hidden'],input[type='password'],input[type='file']")) continue;
     const label = labelFor(element);
     if (sensitive.test([label, element.name, element.id, element.autocomplete, element.getAttribute("placeholder")].join(" "))) continue;
     trackScrollAreas(element);
-    let actions = ["click"];
+    const actions = element.matches(controls) ? ["click"] : [];
+    if (pointerPaths && (element.matches(dragTargets + ",input[type='range']") || /^(grab|grabbing|move|crosshair|[nesw]+-resize)$/.test(getComputedStyle(element).cursor))) actions.push("drag");
+    if (pointerPaths && (actions.length || element.matches(doubleTargets))) actions.push("double_click");
+    if (!actions.length) continue;
     if (element.matches("input[type='checkbox'],input[type='radio']")) actions.push("set_checked");
     else if (element instanceof HTMLSelectElement) { if (!element.multiple) actions.push("select"); }
     else if (!element.readOnly && (element.matches("input:not([type='button']):not([type='submit']):not([type='reset']):not([type='image']),textarea") || element.isContentEditable)) actions.push("fill");
+    const edit = element.matches("textarea,input:not([type]),input:is([type=text],[type=search],[type=url],[type=tel],[type=email])") || element.isContentEditable;
+    if (pointerPaths && edit) {
+      actions.push("select_text");
+      if (!element.readOnly) actions.push("type_text", "press_key");
+    }
     let options;
     if (element instanceof HTMLSelectElement) {
       options = [];
@@ -478,7 +537,16 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
       const target = new URL(destination);
       if (target.hostname && target.hostname !== location.hostname) destinationHost = target.hostname;
     }
-    add(element, label, { actions, ...(destinationHost ? { destinationHost } : {}), ...(element.getAttribute("role") === "tab" ? { role: "tab", selected: element.getAttribute("aria-selected") === "true" } : {}), ...(element.type ? { type: element.type } : {}), ...(element.required ? { required: true } : {}), ...(options ? { options, optionsTruncated: element.options.length > options.length } : {}) });
+    const fieldInfo = {};
+    if (pointerPaths && edit) {
+      fieldInfo.focused = document.activeElement === element;
+      if (element.form) {
+        const submit = Array.from(element.form.elements).find(node => ["submit", "image"].includes(node.type) && !node.disabled);
+        const action = submit?.hasAttribute("formaction") ? submit.formAction : element.form.action;
+        if (URL.canParse(action)) fieldInfo.submitHost = new URL(action).hostname;
+      }
+    }
+    add(element, label, { actions, ...fieldInfo, ...(destinationHost ? { destinationHost } : {}), ...(element.getAttribute("role") === "tab" ? { role: "tab", selected: element.getAttribute("aria-selected") === "true" } : {}), ...(element.type ? { type: element.type } : {}), ...(element.required ? { required: true } : {}), ...(options ? { options, optionsTruncated: element.options.length > options.length } : {}) });
   }
   // Image-only strips have no text or clickable descendants to discover them.
   let media = 0;
@@ -490,7 +558,7 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
     if (!visible(area) || galleries.some(gallery => gallery.scope.contains(area) && getComputedStyle(area).overflowX === "hidden")) continue;
     add(area, labelFor(area), { actions: ["scroll"], directions: scrollDirections(area), scrollTop: Math.round(area.scrollTop), scrollLeft: Math.round(area.scrollLeft) }, 5000);
   }
-  globalThis.__safariChatRefs = { url: location.href, refs };
+  globalThis.__safariChatRefs = { url: location.href, refs, viewport: { width: viewportWidth, height: innerHeight, x: scrollX, y: scrollY } };
   const page = document.scrollingElement ?? document.documentElement;
   return {
     ...excerpt, elements, elementsTruncated,
@@ -499,7 +567,7 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
   };
 }
 
-function actOnPage(operation, elementId, text, expectedURL, { direction, checked } = {}) {
+function actOnPage(operation, elementId, text, expectedURL, { direction, checked, preview = false, motionId, speed, path, speedChanges, inputOwner } = {}) {
   const state = globalThis.__safariChatRefs;
   if (!state || state.url !== location.href || location.href !== expectedURL) throw new Error("The page changed. Read it again before acting.");
   const labelFor = element => {
@@ -509,10 +577,14 @@ function actOnPage(operation, elementId, text, expectedURL, { direction, checked
   };
   const signature = (element, ignoreSelection = false) => JSON.stringify([element.tagName, element.type, element.name, element.getAttribute("role"), element.getAttribute("href"), element.closest("a[href]")?.href, element.getAttribute("target"), element.getAttribute("download"), element.form?.action, element.form?.method, element.getAttribute("formaction"), element.formAction, element.getAttribute("aria-controls"), ignoreSelection ? null : element.getAttribute("aria-selected"), element.getAttribute("aria-orientation")]);
   const reference = state.refs.get(elementId);
-  const element = reference?.element;
+  const freePointer = operation === "move_pointer" && !elementId;
+  const element = freePointer ? document.documentElement : reference?.element;
   const pageScroll = operation === "scroll" && !elementId;
   let label = "Page";
-  if (!pageScroll) {
+  const pageInput = operation === "bind_input" && !elementId;
+  function validate() {
+    if (location.href !== expectedURL) throw new Error("The page changed. Read it again.");
+    if (pageScroll || pageInput || freePointer) return;
     if (!element?.isConnected || element.matches(":disabled,[aria-disabled='true']") || !element.getClientRects().length || element.closest("[hidden],[inert],[aria-hidden='true'],#safari-chat-host")) throw new Error("This element changed or is no longer available. Read the page again.");
     const style = getComputedStyle(element);
     if (style.visibility !== "visible" || style.opacity === "0") throw new Error("This element is no longer visible. Read the page again.");
@@ -524,8 +596,41 @@ function actOnPage(operation, elementId, text, expectedURL, { direction, checked
     if (label !== reference.label || signature(element) !== reference.signature) throw new Error("The element changed since approval. Read the page again.");
     if (element.matches("input[type='password'],input[type='file'],input[type='hidden']") || /password|passcode|credit.?card|debit.?card|card.?number|\bcc[-_](number|csc|exp|name)|\bcvc\b|\bcvv\b|security.?code|verification.?code|one.?time|\botp\b|secret|token/i.test([label, element.name, element.id, element.autocomplete, element.getAttribute("placeholder")].join(" "))) throw new Error("Enter sensitive information directly in the website.");
   }
-  // Invalidate even if a page handler rejects or changes the requested value.
-  globalThis.__safariChatRefs = null;
+  validate();
+  function bindInput() {
+    const prior = globalThis.__safariChatInput;
+    prior?.dispose();
+    const node = pageInput ? document.body : element;
+    const binding = { owner: inputOwner, element: node, url: expectedURL, validate, page: pageInput,
+      dispose() {
+        clearTimeout(binding.timer);
+        binding.typing?.abort();
+        if (globalThis.__safariChatInput === binding) delete globalThis.__safariChatInput;
+      },
+    };
+    binding.timer = setTimeout(binding.dispose, 300000);
+    globalThis.__safariChatInput = binding;
+  }
+  if (operation === "bind_input") {
+    bindInput();
+    globalThis.__safariChatRefs = null;
+    return { ok: true, label };
+  }
+  // A preview resolves the same validated target, but leaves the real action single-use.
+  if (preview && (document.hidden || !(operation === "click" || operation === "set_checked" || reference?.gallery && operation === "scroll"))) return {};
+  if (!preview) globalThis.__safariChatRefs = null;
+  if (operation === "drag" || operation === "move_pointer") {
+    const motion = globalThis.__safariChatStartPath(motionId, element, operation, path, speed, state.viewport);
+    return { ok: true, operation, label, motion };
+  }
+  function click(target) {
+    if (preview) {
+      state.pointerTarget = { id: elementId, element: target };
+      return;
+    }
+    state.showPointer?.(expectedURL, target, "press");
+    target.click();
+  }
   if (operation === "scroll") {
     if (!["up", "down", "left", "right", "top", "bottom"].includes(direction)) throw new Error("Choose a valid scroll direction.");
     const gallery = reference?.gallery;
@@ -553,12 +658,17 @@ function actOnPage(operation, elementId, text, expectedURL, { direction, checked
         const style = getComputedStyle(parent), clip = parent.getBoundingClientRect();
         if (++depth > 64 || style.opacity === "0" || (/auto|scroll|hidden|clip/.test(style.overflowX) && (rect.right <= clip.left || rect.left >= clip.right)) || (/auto|scroll|hidden|clip/.test(style.overflowY) && (rect.bottom <= clip.top || rect.top >= clip.bottom))) throw new Error("The next gallery control is not visible. Read the page again.");
       }
-      control.click();
+      click(control);
+      if (preview) return { pointer: true };
       return { ok: true, operation, dispatched: true, fromItem: selected + 1, requestedItem: next + 1, message: "Gallery navigation activated. Read the page again to verify the newly visible cards." };
     }
     const target = pageScroll ? document.scrollingElement ?? document.documentElement : element;
     const axis = ["left", "right"].includes(direction) ? "overflowX" : "overflowY";
     if (!pageScroll && !/^(auto|scroll|hidden)$/.test(getComputedStyle(target)[axis])) throw new Error("This area cannot scroll in that direction. Use its listed directions or gallery controls.");
+    if (motionId) {
+      const motion = globalThis.__safariChatStartScroll(target, motionId, direction, speed, speedChanges ?? []);
+      return { ok: true, operation, label, motion };
+    }
     const before = { x: target.scrollLeft, y: target.scrollTop };
     let top = before.y, left = before.x;
     const height = pageScroll ? innerHeight : target.clientHeight;
@@ -581,13 +691,21 @@ function actOnPage(operation, elementId, text, expectedURL, { direction, checked
       const url = new URL(destination);
       if (!/^https?:$/.test(url.protocol) || url.username || url.password) throw new Error("Only ordinary web links can be opened.");
     }
-    element.click();
-    return { ok: true, operation, label, message: "Click dispatched. Read the page again to verify the outcome." };
+    const editable = element.matches("textarea,input:not([type]),input:is([type=text],[type=search],[type=url],[type=tel],[type=email])") || element.isContentEditable;
+    if (!preview && editable) element.focus({ preventScroll: true });
+    click(element);
+    if (preview) return { pointer: true };
+    const focused = editable && document.activeElement === element;
+    if (inputOwner && focused) bindInput();
+    return { ok: true, operation, label, focused, message: "Click dispatched. Read the page again to verify the outcome." };
   }
   if (operation === "set_checked") {
     if (!element.matches("input[type='checkbox'],input[type='radio']") || typeof checked !== "boolean") throw new Error("Choose a checkbox or radio button and a boolean checked state.");
     if (element.type === "radio" && !checked) throw new Error("Select another radio option instead of unchecking this one.");
-    if (element.checked !== checked) element.click();
+    if (element.checked !== checked) {
+      click(element);
+      if (preview) return { pointer: true };
+    }
     if (element.checked !== checked) throw new Error("The page did not keep the requested checked state. Read it again.");
     return { ok: true, operation, label, checked: element.checked };
   }
@@ -624,6 +742,222 @@ function actOnPage(operation, elementId, text, expectedURL, { direction, checked
 }
 
 return {snapshotPage, actOnPage};
+})();
+
+// content/pointer-path.js
+modules["content/pointer-path.js"] = (() => {
+// Installed in the same isolated world as the validated element references.
+function installPointerPath() {
+  globalThis.__safariChatStartPath = (owner, element, kind, points, speed, viewport) => {
+    const drag = kind === "drag", url = location.href;
+    const width = () => Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth);
+    function hit(x, y) {
+      if (location.href !== url || width() !== viewport.width || innerHeight !== viewport.height || scrollX !== viewport.x || scrollY !== viewport.y) throw new Error("The viewport changed. Read the page again.");
+      if (x < 0 || x >= width() || y < 0 || y >= innerHeight) throw new Error("The path leaves the visible website.");
+      const node = document.elementFromPoint(x, y);
+      if (!node || node.closest("#safari-chat-host,iframe,frame,object,embed,[inert],[hidden],input[type=password],input[type=file]")) throw new Error("The path crosses an unavailable area.");
+      const field = node.closest("input,textarea,[contenteditable],select");
+      if (field && /password|passcode|credit.?card|debit.?card|card.?number|\bcc[-_]|\bcvc\b|\bcvv\b|security.?code|verification.?code|one.?time|\botp\b|secret|token/i.test([field.name, field.id, field.autocomplete, field.getAttribute("aria-label"), field.getAttribute("placeholder"), field.labels?.[0]?.innerText].join(" "))) throw new Error("The path crosses a sensitive field.");
+      return node;
+    }
+    for (const point of points) hit(point.x, point.y);
+    const first = points[0];
+    const start = hit(first.x, first.y);
+    if (!element.contains(start)) throw new Error("The starting point no longer hits the selected target. Read it again.");
+    const pointerId = crypto.getRandomValues(new Uint32Array(1))[0] % 1073741824 + 32;
+    const state = { kind, active: true, speed: first.speed ?? speed, waypoint: 0, x: first.x, y: first.y };
+    let target, pressed = false, mouse = true, paint;
+    function send(node, name, relatedTarget = null) {
+      const isPointer = name.startsWith("pointer"), edge = /enter$|leave$/.test(name);
+      const moving = name === "pointermove" || name === "pointerover" || name === "pointerout" || edge;
+      const common = { bubbles: !edge, composed: !edge, cancelable: !edge && name !== "pointercancel", view: window,
+        clientX: state.x, clientY: state.y, button: isPointer && moving ? -1 : 0, buttons: pressed ? 1 : 0, relatedTarget };
+      const event = isPointer ? new PointerEvent(name, { ...common, pointerId, pointerType: "mouse", isPrimary: true, pressure: pressed ? 0.5 : 0 }) : new MouseEvent(name, common);
+      return node.dispatchEvent(event);
+    }
+    function hover(next) {
+      if (target === next) return;
+      if (target) {
+        send(target, "pointerout", next); if (mouse) send(target, "mouseout", next);
+        for (let node = target; node && !node.contains(next); node = node.parentElement) {
+          send(node, "pointerleave", next); if (mouse) send(node, "mouseleave", next);
+        }
+      }
+      send(next, "pointerover", target); if (mouse) send(next, "mouseover", target);
+      const entered = [];
+      for (let node = next; node && !node.contains(target); node = node.parentElement) entered.push(node);
+      for (const node of entered.reverse()) { send(node, "pointerenter", target); if (mouse) send(node, "mouseenter", target); }
+      target = next;
+    }
+    function move(x, y) {
+      const next = hit(x, y);
+      state.x = x; state.y = y;
+      paint?.(x, y); hover(next);
+      send(target, "pointermove"); if (mouse) send(target, "mousemove");
+    }
+    function begin() {
+      const marker = globalThis.__safariChatActionPointer;
+      paint = marker?.track;
+      move(first.x, first.y);
+      if (drag) {
+        if (!element.contains(hit(state.x, state.y))) throw new Error("The drag target changed before the press.");
+        pressed = true;
+        mouse = send(target, "pointerdown");
+        if (mouse) send(target, "mousedown");
+      }
+    }
+    function advance(dt) {
+      // Visit every corner even if several short segments fit in one display frame.
+      while (state.waypoint < points.length - 1) {
+        const next = points[state.waypoint + 1], dx = next.x - state.x, dy = next.y - state.y;
+        const distance = Math.hypot(dx, dy);
+        if (distance && (!dt || !state.speed)) return;
+        const travel = state.speed * dt;
+        if (distance > travel) {
+          move(state.x + dx * (travel / distance), state.y + dy * (travel / distance));
+          return;
+        }
+        move(next.x, next.y);
+        if (distance) dt = Math.max(0, dt - distance / state.speed);
+        state.waypoint++;
+        if (next.speed != null) state.speed = next.speed;
+      }
+      return "path finished";
+    }
+    function end(reason) {
+      if (pressed) {
+        pressed = false;
+        const release = reason === "path finished" || reason === "stopped by model";
+        const receiver = target?.isConnected ? target : document;
+        send(receiver, release ? "pointerup" : "pointercancel");
+        if (mouse) send(receiver, "mouseup");
+        state.released = release;
+      }
+      globalThis.__safariChatActionPointer?.finishTrack?.();
+    }
+    return globalThis.__safariChatStartMotion(owner, state, element, advance, begin, end);
+  };
+  return true;
+}
+
+return {installPointerPath};
+})();
+
+// content/action-pointer.js
+modules["content/action-pointer.js"] = (() => {
+// Also serialized by Safari into the isolated world. Keep all drawing code local.
+function showActionPointer(expectedURL, target, effect = "copy") {
+  try {
+    if (location.href !== expectedURL || document.hidden || !document.documentElement) return false;
+    const width = Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth);
+    let anchor = target;
+    if (target === "selection") {
+      const selection = getSelection();
+      if (!selection?.rangeCount || selection.isCollapsed) return false;
+      anchor = selection.getRangeAt(0);
+    } else if (target?.ref) {
+      const state = globalThis.__safariChatRefs;
+      if (state?.url !== expectedURL || state.pointerTarget?.id !== target.ref) return false;
+      anchor = state.pointerTarget.element;
+      state.showPointer = showActionPointer;
+      delete state.pointerTarget;
+    }
+    if (!anchor) return false;
+
+    // Clip the hotspot to the visible fragment, including nested scroll areas.
+    let left = 0, top = 0, right = width, bottom = innerHeight;
+    const container = anchor instanceof Range ? anchor.commonAncestorContainer : null;
+    const ancestor = container?.nodeType === Node.ELEMENT_NODE ? container : (container ?? anchor).parentElement;
+    for (let parent = ancestor, depth = 0; parent && depth++ < 64; parent = parent.parentElement) {
+      const style = getComputedStyle(parent), box = parent.getBoundingClientRect();
+      if (/auto|scroll|hidden|clip/.test(style.overflowX)) { left = Math.max(left, box.left); right = Math.min(right, box.right); }
+      if (/auto|scroll|hidden|clip/.test(style.overflowY)) { top = Math.max(top, box.top); bottom = Math.min(bottom, box.bottom); }
+    }
+    const rects = anchor.getClientRects ? anchor.getClientRects() : [anchor];
+    let point;
+    for (let i = 0; i < Math.min(rects.length, 256); i++) {
+      const rect = rects[i], x1 = Math.max(left, rect.left), y1 = Math.max(top, rect.top);
+      const x2 = Math.min(right, rect.right), y2 = Math.min(bottom, rect.bottom);
+      if (!(x2 > x1 && y2 > y1)) continue;
+      point = { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
+      break;
+    }
+    if (!point) return false;
+
+    let pointer = globalThis.__safariChatActionPointer;
+    if (!pointer?.host.isConnected || !pointer.track) {
+      pointer?.clear();
+      const host = document.createElement("div");
+      host.id = "safari-chat-action-pointer";
+      host.setAttribute("aria-hidden", "true");
+      host.inert = true;
+      host.popover = "manual";
+      host.style.cssText = "all:initial!important;position:fixed!important;inset:0 auto auto 0!important;height:100dvh!important;max-width:none!important;max-height:none!important;margin:0!important;padding:0!important;border:0!important;background:transparent!important;overflow:clip!important;pointer-events:none!important;user-select:none!important;contain:strict!important;z-index:2147483647!important;display:block!important";
+      const shadow = host.attachShadow({ mode: "closed" });
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(":host::backdrop{display:none!important}");
+      shadow.adoptedStyleSheets = [sheet];
+      const position = document.createElement("div");
+      position.style.cssText = "position:absolute;top:0;left:0;width:24px;height:25px;pointer-events:none";
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 24 25");
+      svg.setAttribute("focusable", "false");
+      svg.style.cssText = "display:block;width:24px;height:25px;overflow:visible;transform-origin:3px 3px;filter:drop-shadow(0 1px 1px #0009) drop-shadow(0 0 4px #339cff) drop-shadow(0 0 9px #339cffa8)";
+      const arrow = document.createElementNS(svg.namespaceURI, "path");
+      arrow.setAttribute("d", "M3 2.5 Q2 2.1 2.4 3.8 L8.1 21.5 Q8.8 23.4 10 21.6 L13.5 15.3 Q13.9 14.6 14.8 14.4 L21 13 Q23.2 12.4 21.1 11.2 Z");
+      arrow.setAttribute("fill", "#101010"); arrow.setAttribute("stroke", "#fff");
+      arrow.setAttribute("stroke-width", "1.8"); arrow.setAttribute("stroke-linejoin", "round");
+      svg.append(arrow); position.append(svg); shadow.append(position);
+      const clear = () => {
+        clearTimeout(pointer.timer);
+        host.remove();
+        window.removeEventListener("pagehide", clear);
+        window.removeEventListener("resize", resized);
+        document.removeEventListener("visibilitychange", clear);
+        if (globalThis.__safariChatActionPointer === pointer) delete globalThis.__safariChatActionPointer;
+      };
+      const resized = () => {
+        if (innerWidth !== pointer.viewportWidth || innerHeight !== pointer.viewportHeight) clear();
+      };
+      pointer = { host, position, svg, clear, tracking: false,
+        track(x, y) {
+          if (!pointer.tracking) {
+            pointer.tracking = true;
+            clearTimeout(pointer.timer);
+            position.getAnimations().forEach(animation => animation.cancel());
+            svg.getAnimations().forEach(animation => animation.cancel());
+          }
+          position.style.transform = "translate(" + (x - 3) + "px," + (y - 3) + "px)";
+        },
+        finishTrack() { pointer.tracking = false; clearTimeout(pointer.timer); pointer.timer = setTimeout(clear, 700); },
+      };
+      globalThis.__safariChatActionPointer = pointer;
+      window.addEventListener("pagehide", clear);
+      window.addEventListener("resize", resized);
+      document.addEventListener("visibilitychange", clear);
+      document.documentElement.append(host);
+      try { host.showPopover?.(); } catch { /* A fixed layer also works in documents without popovers. */ }
+    }
+    const { host, position, svg } = pointer;
+    if (pointer.tracking) return true;
+    pointer.viewportWidth = innerWidth; pointer.viewportHeight = innerHeight;
+    clearTimeout(pointer.timer);
+    pointer.timer = setTimeout(pointer.clear, 930);
+    host.style.setProperty("width", width + "px", "important");
+    const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const from = getComputedStyle(position).transform;
+    const to = "translate(" + (point.x - 3) + "px," + (point.y - 3) + "px)";
+    position.getAnimations().forEach(animation => animation.cancel());
+    svg.getAnimations().forEach(animation => animation.cancel());
+    position.style.transform = to;
+    if (!reduced && effect !== "press" && from !== "none") position.animate([{ transform: from }, { transform: to }], { duration: 120, easing: "ease-out" });
+    if (!reduced && effect === "press") svg.animate([{ transform: "scale(1)" }, { transform: "scale(.83)", offset: .35 }, { transform: "scale(1)" }], { duration: 220 });
+    if (!reduced) svg.animate([{ opacity: 1 }, { opacity: 0 }], { delay: 740, duration: 170, fill: "forwards" });
+    return effect === "aim" ? (reduced ? 45 : 125) : true;
+  } catch { return false; } // Visual feedback must never block the underlying action.
+}
+
+return {showActionPointer};
 })();
 
 // core/tab-navigation.js
@@ -697,6 +1031,717 @@ async function watchNavigation(api, tabId, previousURL, signal, dispatch, naviga
 return {readyTab, watchNavigation};
 })();
 
+// content/direct-input.js
+modules["content/direct-input.js"] = (() => {
+// One injection per click, key command, or small batch of typed characters.
+function performPageInput(owner, step, args = {}) {
+  const b = globalThis.__safariChatInput;
+  if (!b || b.owner !== owner || b.url !== location.href) throw new Error("The document or input target changed. Read it again.");
+  if (step === "end_typing") { b.typing?.abort(); return { ok: true }; }
+  b.validate();
+  const el = b.element, tools = b.text;
+  function verifyDestination(address) {
+    if (!address) return;
+    const url = new URL(address, location.href);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || !args.hosts?.includes(url.hostname)) throw new Error("The destination is unavailable or changed since approval. Read the page again.");
+  }
+  if (step === "select_text") {
+    const count = tools.select(args.text, args.range, args.occurrence);
+    return { ok: true, characters: count, message: count ? "Selected the requested text." : "Placed the caret." };
+  }
+  if (step === "copy") {
+    const text = tools.selected();
+    if (!text) throw new Error("Select a nonempty passage to copy.");
+    const box = tools.field ? el.getBoundingClientRect() : getSelection().getRangeAt(0).getClientRects()[0];
+    return { text, ...(box && { rect: { top: box.top, left: box.left, right: box.right, bottom: box.bottom } }) };
+  }
+  if (step === "paste_check") {
+    if (b.selection) tools.selected();
+    else {
+      tools.caret();
+      if (!tools.field || el.selectionStart != null) tools.capture();
+    }
+    return { ok: true };
+  }
+  if (step === "paste" || step === "replace_selection" || step === "delete_selection") {
+    const value = step === "delete_selection" ? "" : args.text;
+    if (step === "paste") {
+      if (b.selection) tools.selected(); else tools.caret();
+      const transfer = new DataTransfer(); transfer.setData("text/plain", value);
+      const target = !tools.editor && b.selection ? b.selection.parts[0].node.parentElement : el;
+      if (!target.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, composed: true, clipboardData: transfer }))) return { ok: true, message: "The website handled the paste event. Verify the result." };
+    }
+    const changed = tools.change(value, step === "paste" ? "insertFromPaste" : step === "delete_selection" ? "deleteContentBackward" : "insertReplacementText", step !== "paste");
+    return { ok: changed, message: changed ? (tools.editor ? "Edited the field." : "Changed the text displayed in this document.") : "The website declined the edit." };
+  }
+  function hit(point) {
+    const node = document.elementFromPoint(point.x, point.y);
+    if (!node || !el.contains(node) || node.closest("#safari-chat-host,iframe,object,embed,[inert],[hidden],:disabled,[aria-disabled=true],input[type=password],input[type=file]")) return null;
+    const field = node.closest("input,textarea,select,[contenteditable]");
+    if (field && /password|passcode|credit.?card|debit.?card|card.?number|\bcc[-_]|\bcvc\b|\bcvv\b|security.?code|verification.?code|one.?time|\botp\b|secret|token/i.test([field.name,field.id,field.autocomplete,field.getAttribute("aria-label"),field.getAttribute("placeholder"),field.labels?.[0]?.innerText].join(" "))) return null;
+    return node;
+  }
+  if (step === "aim_click") {
+    const rect = el.getBoundingClientRect();
+    const right = Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth, rect.right), bottom = Math.min(innerHeight, rect.bottom);
+    const point = args.point ?? { x: (Math.max(0, rect.left) + right)/2, y: (Math.max(0, rect.top) + bottom)/2 };
+    const target = hit(point);
+    if (!target) throw new Error("The double-click point is covered or outside the target. Read it again.");
+    b.double = { point, target, count: 0, pointerId: crypto.getRandomValues(new Uint32Array(1))[0] % 1073741824 + 32 };
+    return { point };
+  }
+  if (step === "click") {
+    const d = b.double;
+    if (!d || args.count !== d.count+1 || hit(d.point) !== d.target) throw new Error("The double-click target changed.");
+    verifyDestination(d.target.closest("a[href]")?.href);
+    const control = d.target.closest("button,input,textarea,select,[contenteditable],[tabindex]");
+    if (control?.form && ["submit","image"].includes(control.type)) verifyDestination(control.hasAttribute("formaction") ? control.formAction : control.form.action);
+    const send = (name, held) => {
+      const init = { view: window, bubbles: true, cancelable: true, composed: true, button: 0, buttons: held ? 1 : 0, detail: args.count, clientX: d.point.x, clientY: d.point.y };
+      return d.target.dispatchEvent(name.startsWith("pointer") ? new PointerEvent(name, { ...init, pointerId: d.pointerId, pointerType: "mouse", isPrimary: true, pressure: held ? 0.5 : 0 }) : new MouseEvent(name, init));
+    };
+    const mouse = send("pointerdown", true);
+    if (mouse && send("mousedown", true) && control) {
+      control.focus({ preventScroll: true });
+      if (control.isContentEditable) {
+        const pos = document.caretPositionFromPoint?.(d.point.x, d.point.y);
+        const range = pos ? document.createRange() : document.caretRangeFromPoint?.(d.point.x, d.point.y);
+        if (pos) { range.setStart(pos.offsetNode,pos.offset); range.collapse(true); }
+        if (range && control.contains(range.startContainer)) { const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range); }
+      }
+    }
+    send("pointerup", false); if (mouse) send("mouseup", false);
+    if (hit(d.point) !== d.target) throw new Error("The target changed before the click.");
+    d.count++; send("click", false);
+    const doubled = d.count === 2 && hit(d.point) === d.target && b.url === location.href;
+    if (doubled) send("dblclick", false);
+    return { ok: true, clicks: d.count, doubleClicked: doubled };
+  }
+  tools.caret();
+  if (step === "begin_typing") {
+    if (el.tagName === "INPUT" && /[\r\n]/.test(args.text)) throw new Error("Type one line in a single-line field. Press Enter separately to submit.");
+    b.typing?.abort();
+    b.typing = new AbortController(); b.takenOver = false;
+    for (const type of ["pointerdown","keydown","beforeinput"]) document.addEventListener(type, e => { if (e.isTrusted) b.takenOver = true; }, { capture: true, signal: b.typing.signal });
+    return { ok: true };
+  }
+  function keyStroke(key, shift, selectAll = false) {
+    if (b.takenOver && step === "type_text") throw new Error("Typing stopped after manual input.");
+    tools.caret();
+    const printable = Array.from(key).length === 1 && !selectAll;
+    const code = /^[a-z]$/i.test(key) ? "Key" + key.toUpperCase() : /^\d$/.test(key) ? "Digit" + key : printable ? "" : key;
+    const ctrlKey = selectAll && /^Control\+/i.test(args.text);
+    const mods = { key, code, shiftKey: shift, metaKey: selectAll && !ctrlKey, ctrlKey, bubbles: true, composed: true, cancelable: true };
+    const send = name => el.dispatchEvent(new KeyboardEvent(name, mods));
+    let submitted = false;
+    const onSubmit = () => { submitted = true; };
+    const submitControl = () => {
+      const form = el.form;
+      const submit = [...form.elements].find(n => ["submit","image"].includes(n.type) && !n.disabled);
+      verifyDestination(submit?.hasAttribute("formaction") ? submit.formAction : form.action);
+      return submit;
+    };
+    if (key === "Enter" && el.tagName === "INPUT" && el.form) submitControl();
+    if (key === "Enter") document.addEventListener("submit", onSubmit, true);
+    try {
+      if (!send("keydown") || (printable || key === "Enter") && !send("keypress")) return false;
+      if (submitted || !el.isConnected || b.url !== location.href) return true;
+      tools.caret();
+      if (printable) return tools.change(key, "insertText");
+      if (selectAll) {
+        if (tools.field) el.select(); else getSelection().selectAllChildren(el);
+      } else if (key === "Enter") {
+        if (el.tagName === "INPUT") {
+          const form = el.form;
+          if (form) {
+            const submitter = submitControl();
+            if (submitter) submitter.click();
+            else if ([...form.elements].filter(node => node.matches("input:not([type]),input:is([type=text],[type=email],[type=url],[type=search],[type=tel],[type=password],[type=number])")).length === 1) form.requestSubmit();
+          }
+        } else return tools.change("\n", "insertLineBreak");
+      } else if (key === "Tab") {
+        const items = [...document.querySelectorAll("a[href],button,input,select,textarea,[tabindex],[contenteditable=true],[contenteditable=plaintext-only]")].filter(n => n.tabIndex >= 0 && !n.disabled && !n.closest("[inert],[hidden],#safari-chat-host") && n.getClientRects().length);
+        items.sort((a,c) => (a.tabIndex || Infinity) - (c.tabIndex || Infinity));
+        const next = items[items.indexOf(el) + (shift ? -1 : 1)];
+        if (next) next.focus();
+      } else if (key !== "Escape") {
+        const deleting = key === "Backspace" || key === "Delete", backward = ["Backspace","ArrowLeft","Home","ArrowUp"].includes(key);
+        if (tools.field) {
+          let a = el.selectionStart, z = el.selectionEnd;
+          if (a == null) throw new Error("This input type does not expose caret positions.");
+          if (!deleting || a === z) {
+            const anchor = el.selectionDirection === "backward" ? z : a;
+            const pos = shift && !deleting ? (anchor === a ? z : a) : backward ? a : z;
+            let next = pos;
+            const value = el.value, lineStart = pos ? value.lastIndexOf("\n", pos-1)+1 : 0;
+            const newline = value.indexOf("\n",pos), lineEnd = newline < 0 ? value.length : newline;
+            if (key === "Home") next = lineStart;
+            else if (key === "End") next = lineEnd;
+            else if (key === "ArrowUp") {
+              const previous = lineStart > 1 ? value.lastIndexOf("\n",lineStart-2)+1 : 0;
+              next = lineStart ? Math.min(lineStart-1, previous+pos-lineStart) : 0;
+            } else if (key === "ArrowDown") {
+              const following = value.indexOf("\n",lineEnd+1);
+              next = Math.min(following < 0 ? value.length : following, lineEnd+1+pos-lineStart);
+            }
+            else if (a === z || shift || deleting) next += backward ? -(Array.from(el.value.slice(0,pos)).at(-1)?.length ?? 0) : (Array.from(el.value.slice(pos))[0]?.length ?? 0);
+            if (shift || deleting) { a = Math.min(deleting ? pos : anchor, next); z = Math.max(deleting ? pos : anchor, next); }
+            else a = z = next;
+            el.setSelectionRange(a,z, backward ? "backward" : "forward");
+          }
+        } else {
+          const sel = getSelection(), unit = ["Home","End"].includes(key) ? "lineboundary" : ["ArrowUp","ArrowDown"].includes(key) ? "line" : "character";
+          if (!deleting || sel.isCollapsed) sel.modify(deleting || shift ? "extend" : "move", backward ? "backward" : "forward", unit);
+          if (!el.contains(sel.anchorNode) || !el.contains(sel.focusNode)) throw new Error("The key would move outside this editor.");
+        }
+        if (deleting) return tools.change("", backward ? "deleteContentBackward" : "deleteContentForward");
+      }
+      b.selection = null;
+      return true;
+    } finally {
+      if (key === "Enter") document.removeEventListener("submit", onSubmit, true);
+      if (el.isConnected) send("keyup");
+    }
+  }
+  if (step === "type_text") {
+    let typed = 0;
+    for (const key of args.text) {
+      try {
+        if (!keyStroke(key === "\n" ? "Enter" : key, false)) return { ok: false, typed, message: "The website declined this key. Check the field before continuing." };
+      } catch (error) { return { ok: false, typed, error: error.message }; }
+      typed++;
+    }
+    return { ok: true, typed };
+  }
+  const selectAll = /^(Meta|Control|Cmd)\+A$/i.test(args.text);
+  const shift = args.text.startsWith("Shift+");
+  const key = selectAll ? "a" : shift ? args.text.slice(6) : args.text;
+  if (!selectAll && !["Enter","Tab","Backspace","Delete","ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Home","End","Escape"].includes(key) && Array.from(key).length !== 1) throw new Error("Choose a printable key, editing key or supported shortcut.");
+  const ok = keyStroke(key, shift, selectAll);
+  const selected = ok && (selectAll || shift && key.startsWith("Arrow")) ? tools.capture() : 0;
+  return { ok, selected, message: "Key dispatched. Read the page to verify the result." };
+}
+
+return {performPageInput};
+})();
+
+// content/text-selection.js
+modules["content/text-selection.js"] = (() => {
+// Installs text operations on a previously validated binding in the isolated world.
+// Selected form text and the clipboard payload never enter a model tool result.
+function installTextSelection(owner) {
+  const b = globalThis.__safariChatInput;
+  if (!b || b.owner !== owner || b.url !== location.href) throw new Error("Read the page and select the target again.");
+  const el = b.element, field = el.matches("input,textarea");
+  const editor = field || el.isContentEditable;
+  const protectedNodes = "script,style,noscript,textarea,input,select,iframe,object,embed,[inert],[hidden],[aria-hidden=true],#safari-chat-host,#safari-chat-action-pointer";
+  const fail = () => { throw new Error("The selection or target changed. Select the intended text again."); };
+  const focused = () => document.activeElement === el && el.isConnected;
+  const inViewport = r => r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth);
+  function restoreFieldFocus() {
+    if (!editor || focused() || !document.activeElement?.closest("#safari-chat-host")) return;
+    const start = field ? el.selectionStart : null, end = field ? el.selectionEnd : null;
+    el.focus({ preventScroll: true });
+    if (start != null) el.setSelectionRange(start, end);
+  }
+  function visible(node) {
+    const parent = node.parentElement;
+    if (!parent || parent.closest(protectedNodes) || (!el.isContentEditable && parent.isContentEditable)) return false;
+    if (parent.checkVisibility && !parent.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+    if (getComputedStyle(parent).visibility !== "visible" || !parent.getClientRects().length) return false;
+    const rect = document.createRange(); rect.selectNodeContents(node);
+    return Array.from(rect.getClientRects()).some(inViewport);
+  }
+  function indices(value, quote, range, occurrence) {
+    if (range) {
+      if (!Number.isInteger(range.start) || !Number.isInteger(range.end) || range.start < 0 || range.end < range.start || range.end > value.length) throw new Error("Choose valid start and end offsets inside the target.");
+      return [range.start, range.end];
+    }
+    if (typeof quote !== "string" || !quote) throw new Error("Provide an exact text quote or a start and end offset.");
+    let index = value.indexOf(quote);
+    if (index >= 0 && occurrence == null && value.indexOf(quote, index + quote.length) >= 0) throw new Error("That text appears more than once. Specify a one-based occurrence.");
+    for (let i = 1; i < (occurrence ?? 1) && index >= 0; i++) index = value.indexOf(quote, index + quote.length);
+    if (index < 0) throw new Error("The requested text was not found in the target.");
+    return [index, index + quote.length];
+  }
+  function select(quote, offsets, occurrence) {
+    if (occurrence != null && (!Number.isInteger(occurrence) || occurrence < 1)) throw new Error("The occurrence must be a positive integer.");
+    b.validate();
+    if (editor) el.focus({ preventScroll: true });
+    if (!quote && !offsets) return capture();
+    if (field) {
+      if (el.selectionStart == null) throw new Error("This input type does not expose a selectable text range.");
+      const [start, end] = indices(el.value, quote, offsets, occurrence);
+      if (end - start > 24000) throw new Error("Select at most 24,000 characters at a time.");
+      el.setSelectionRange(start, end);
+      b.selection = { start, end, value: el.value.slice(start, end) };
+      return end - start;
+    }
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), nodes = [];
+    let text = "", visited = 0, node;
+    while ((node = walker.nextNode()) && ++visited <= 20000 && text.length < 120000) {
+      if (!node.length || !visible(node)) continue;
+      nodes.push({ node, offset: text.length });
+      text += node.data.slice(0, 120000 - text.length);
+    }
+    const [start, end] = indices(text, quote, offsets, occurrence);
+    if (end - start > 24000) throw new Error("Select at most 24,000 characters at a time.");
+    const parts = [];
+    for (const item of nodes) {
+      const a = Math.max(0, start - item.offset), z = Math.min(item.node.length, end - item.offset);
+      if (a < z || (start === end && !parts.length && a === z && start >= item.offset)) parts.push({ node: item.node, start: a, end: z, value: item.node.substringData(a, z-a) });
+    }
+    if (!parts.length) throw new Error("There is no visible text at that position.");
+    const range = document.createRange(), first = parts[0], last = parts.at(-1);
+    range.setStart(first.node, first.start); range.setEnd(last.node, last.end);
+    if (!editor && !Array.from(range.getClientRects()).some(inViewport)) throw new Error("Scroll the intended passage into view first.");
+    if (!range.collapsed && range.toString() !== parts.map(p => p.value).join("")) throw new Error("The selection crosses hidden or excluded content. Choose a narrower passage.");
+    const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    b.selection = { parts };
+    return end - start;
+  }
+  function selected() {
+    b.validate();
+    const sel = b.selection;
+    if (!sel) throw new Error("Select the intended text first.");
+    if (field) {
+      restoreFieldFocus();
+      if (!focused() || el.selectionStart !== sel.start || el.selectionEnd !== sel.end || el.value.slice(sel.start, sel.end) !== sel.value) fail();
+      return sel.value;
+    }
+    const selection = getSelection(), parts = sel.parts;
+    if (sel.caret) {
+      if (!focused() || !selection.isCollapsed || selection.anchorNode !== sel.caret.node || selection.anchorOffset !== sel.caret.offset) fail();
+      return "";
+    }
+    if (!selection.rangeCount || !parts?.length) fail();
+    const r = selection.getRangeAt(0), first = parts[0], last = parts.at(-1);
+    if (!editor && !Array.from(r.getClientRects()).some(inViewport)) fail();
+    if (r.startContainer !== first.node || r.startOffset !== first.start || r.endContainer !== last.node || r.endOffset !== last.end) fail();
+    for (const p of parts) if (!el.contains(p.node) || !visible(p.node) || p.node.substringData(p.start, p.end-p.start) !== p.value) fail();
+    const value = parts.map(p => p.value).join("");
+    if (r.toString() !== value) fail();
+    return value;
+  }
+  function caret() {
+    b.validate();
+    restoreFieldFocus();
+    if (!editor || !focused() || el.readOnly || el.disabled) throw new Error("Click a writable text field or editor first.");
+    if (!field) {
+      const sel = getSelection();
+      if (!sel.rangeCount || !el.contains(sel.getRangeAt(0).commonAncestorContainer)) fail();
+    }
+  }
+  function capture() {
+    if (field) {
+      b.validate(); restoreFieldFocus(); if (!focused()) fail();
+      const start = el.selectionStart, end = el.selectionEnd;
+      if (start == null || end-start > 24000) fail();
+      b.selection = { start, end, value: el.value.slice(start,end) };
+      return end-start;
+    }
+    const selection = getSelection();
+    if (!selection.rangeCount) fail();
+    const r = selection.getRangeAt(0);
+    if (!el.contains(r.commonAncestorContainer)) fail();
+    if (r.collapsed) {
+      if (!editor) throw new Error("Select a nonempty passage on the page first.");
+      b.selection = { caret: { node: r.startContainer, offset: r.startOffset } };
+      return 0;
+    }
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), parts = [];
+    let node, n = 0, size = 0;
+    while ((node = walker.nextNode()) && ++n <= 20000) {
+      if (!r.intersectsNode(node) || !visible(node)) continue;
+      const start = node === r.startContainer ? r.startOffset : 0, end = node === r.endContainer ? r.endOffset : node.length;
+      size += end-start;
+      if (size > 24000) throw new Error("Select at most 24,000 characters at a time.");
+      parts.push({ node, start, end, value: node.substringData(start,end-start) });
+    }
+    if (!parts.length || r.toString() !== parts.map(p => p.value).join("")) fail();
+    // Select-all in a rich editor can anchor on elements rather than text nodes.
+    const first = parts[0], last = parts.at(-1);
+    const canonical = document.createRange();
+    canonical.setStart(first.node, first.start); canonical.setEnd(last.node,last.end);
+    selection.removeAllRanges(); selection.addRange(canonical);
+    b.selection = { parts };
+    return selected().length;
+  }
+  function change(value, inputType, selectionRequired = false) {
+    b.validate();
+    const checkSelection = selectionRequired || !editor || (inputType === "insertFromPaste" && b.selection);
+    if (checkSelection && !selected() && (selectionRequired || !editor)) throw new Error("Select a nonempty passage first.");
+    if (editor) caret();
+    if (field && el.tagName === "INPUT" && /[\r\n]/.test(value)) throw new Error("Use a single line here. Press Enter separately to submit.");
+    const target = editor ? el : b.selection.parts[0].node.parentElement;
+    if (!target.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, composed: true, inputType, data: value || null }))) return false;
+    if (checkSelection) selected();
+    if (editor) caret();
+    if (field) {
+      if (el.selectionStart == null) {
+        if (!document.execCommand("insertText", false, value)) throw new Error("This input type does not support the requested caret edit.");
+        b.selection = null; return true;
+      }
+      const start = el.selectionStart, end = el.selectionEnd;
+      if (el.maxLength >= 0 && value.length > el.maxLength - (el.value.length - (end-start))) return false;
+      el.setRangeText(value, start, end, "end");
+    } else {
+      const selection = getSelection(), range = selection.getRangeAt(0);
+      if (!editor) {
+        const parts = b.selection.parts;
+        for (let i = parts.length-1; i >= 0; i--) {
+          const p = parts[i]; p.node.replaceData(p.start, p.end-p.start, i ? "" : value);
+        }
+        range.setStart(parts[0].node, parts[0].start + value.length);
+      } else {
+        range.deleteContents();
+        const fragment = document.createDocumentFragment();
+        value.split("\n").forEach((line, i) => { if (i) fragment.append(document.createElement("br")); if (line) fragment.append(document.createTextNode(line)); });
+        const last = fragment.lastChild;
+        if (last) { range.insertNode(fragment); range.setStartAfter(last); }
+      }
+      range.collapse(true); selection.removeAllRanges(); selection.addRange(range);
+    }
+    b.selection = null;
+    target.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType, data: value || null }));
+    return true;
+  }
+  b.text = { select, selected, caret, capture, change, field, editor };
+  return true;
+}
+
+return {installTextSelection};
+})();
+
+// core/page-input.js
+modules["core/page-input.js"] = (() => {
+const { actOnPage } = modules["content/page.js"];
+const { performPageInput } = modules["content/direct-input.js"];
+const { installTextSelection } = modules["content/text-selection.js"];
+const { publicURL } = modules["core/context.js"];
+const INPUT_ACTIONS = ["double_click", "type_text", "press_key", "select_text", "copy", "paste", "delete_selection", "replace_selection"];
+
+class PageInputs {
+  constructor(api, clipboard) {
+    this.api = api; this.clipboard = clipboard;
+    this.owner = crypto.randomUUID();
+    this.targets = new Map();
+  }
+
+  async inject(tabId, func, args) {
+    const [injection] = await this.api.scripting.executeScript({ target: { tabId }, func, args });
+    if (injection?.error || !injection?.result) throw new Error(injection?.error?.message || "The input target is unavailable. Read the page again.");
+    return injection.result;
+  }
+
+  async release() {
+    const dispose = owner => { const b = globalThis.__safariChatInput; if (b?.owner === owner) b.dispose(); return true; };
+    await Promise.allSettled([...this.targets.keys()].map(id => this.inject(id, dispose, [this.owner])));
+    this.targets.clear();
+  }
+
+  async execute(args, tabId, url, snapshot, authorize, signal, indicate) {
+    const { operation, elementId, text, point, range, occurrence } = args;
+    const current = this.targets.get(tabId);
+    const clicking = operation === "double_click" || operation === "click";
+    const fresh = snapshot?.url === url;
+    const pointField = fresh && clicking && point && !elementId && snapshot.elements.find(item => {
+      if (!item.actions?.includes("select_text") || !item.bounds) return false;
+      const [left, top, right, bottom] = item.bounds;
+      return point.x >= left && point.x < right && point.y >= top && point.y < bottom;
+    });
+    const page = !elementId && !pointField && (operation === "select_text" || clicking && !!point);
+    const prior = !page && !clicking && current?.url === url && (!elementId || current.ref?.id === elementId) ? current : null;
+    const ref = prior?.ref ?? (fresh && (pointField || snapshot.elements.find(item => item.id === elementId)));
+    const selected = !!prior?.selected;
+    if (!prior && (!fresh || !page && !ref)) throw new Error("Read the visible page and choose the target first.");
+    const editable = !!ref?.actions?.includes("type_text");
+    if (["type_text","press_key"].includes(operation) && !editable) throw new Error("Click a writable text field or editor first.");
+    if (["copy","delete_selection","replace_selection"].includes(operation) && !selected) throw new Error("Select the intended text first.");
+    if (operation === "paste" && !selected && !editable) throw new Error("Select text or click an editable field to paste.");
+    if (["type_text","replace_selection","press_key"].includes(operation) && (typeof text !== "string" || text.length > 12000)) throw new Error("Use at most 12,000 characters per input action.");
+    if (operation === "type_text" && (!text || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text))) throw new Error("Type printable text and line breaks. Use press_key for editing keys.");
+    if (operation === "select_text" && (page && range || text != null && (typeof text !== "string" || text.length > 24000))) throw new Error("Use an exact quote on the visible page, or offsets within a selected element.");
+    if (point && (!clicking || !Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.y < 0 || fresh && (point.x >= snapshot.viewport?.width || point.y >= snapshot.viewport?.height))) throw new Error("Choose a point inside the visible website.");
+    if (!page && operation === "double_click" && !ref?.actions?.includes("double_click")) throw new Error("Select a listed target or give a visible double-click point.");
+    const isStatic = !editable && !ref?.actions?.includes("select_text");
+    const label = ref?.label ?? (clicking ? "Visible page" : "Visible page text");
+    const titles = { click: "Click this element?", double_click: "Double-click this target?", type_text: "Type into this field?", press_key: "Press this key?", select_text: "Select this text?", copy: "Copy this selection to your clipboard?", paste: "Paste your clipboard here?", delete_selection: "Delete this selection?", replace_selection: "Replace this selection?" };
+    let detail = publicURL(url) + "\n" + label;
+    if (typeof text === "string" && text) detail += "\n" + text;
+    if (range) detail += "\nCharacters " + range.start + " to " + range.end;
+    if (point) detail += "\nPoint (" + point.x + ", " + point.y + ")";
+    if (isStatic && ["delete_selection","replace_selection","paste"].includes(operation)) detail += "\nChanges the displayed page text. Reloading the page can restore it.";
+    if (operation === "double_click") detail += "\nSends two clicks to the same target.";
+    const hosts = [new URL(url).hostname];
+    const destination = clicking ? ref?.destinationHost : operation === "press_key" && text === "Enter" ? ref?.submitHost : null;
+    if (destination && destination !== hosts[0]) { hosts.push(destination); detail += "\nDestination: " + destination; }
+    if (operation === "press_key" && text === "Enter") detail += "\nEnter can submit a form.";
+    const grant = await authorize({ operation, title: titles[operation], detail }, hosts, signal);
+    await grant.verify();
+    if ((await this.api.tabs.get(tabId)).url !== url) throw new Error("The tab navigated while awaiting approval. Read it again.");
+    await grant.verify();
+    const target = prior ?? { url, ref: ref || null, selected: false };
+    if (!prior) {
+      await this.inject(tabId, actOnPage, ["bind_input", ref?.id ?? null, null, url, { inputOwner: this.owner }]);
+      this.targets.set(tabId, target);
+    }
+    const run = (step, payload = {}) => this.inject(tabId, performPageInput, [this.owner, step, payload]);
+    if (clicking) {
+      const { point: p } = await run("aim_click", { point });
+      await indicate({ left: p.x-1, top: p.y-1, right: p.x+1, bottom: p.y+1 }, "aim");
+      await grant.verify();
+      const first = await run("click", { count: 1, hosts });
+      if (operation === "click") return { ...first, message: "Pressed and released the target. Verify the result." };
+      await new Promise(resolve => setTimeout(resolve, 100));
+      try {
+        await grant.verify();
+        const result = await run("click", { count: 2, hosts });
+        return { ...result, message: result.doubleClicked ? "Two clicks and a double-click event dispatched. Verify the result." : "Both clicks were sent but the target changed before the double-click event." };
+      } catch (error) { signal.throwIfAborted(); return { ok: false, clicks: 1, doubleClicked: false, error: "The first click was confirmed. Check the page before retrying. " + error.message }; }
+    }
+    await this.inject(tabId, installTextSelection, [this.owner]);
+    if (operation === "copy") {
+      const selection = await run("copy");
+      await grant.verify(); await this.clipboard.write(selection.text);
+      if (selection.rect) await indicate(selection.rect, "copy");
+      return { ok: true, characters: selection.text.length, message: "Copied the selection to the system clipboard." };
+    }
+    if (operation === "paste") {
+      await run("paste_check"); await grant.verify();
+      const value = await this.clipboard.read();
+      if (typeof value !== "string" || value.length > 24000) throw new Error("Paste requires plain text of at most 24,000 characters.");
+      await grant.verify();
+      const result = await run("paste", { text: value }); target.selected = false; return result;
+    }
+    if (operation === "type_text") {
+      const value = text.replace(/\r\n?/g, "\n");
+      await run("begin_typing", { text: value }); target.selected = false;
+      let typed = 0;
+      try {
+        const keys = Array.from(value);
+        for (let i = 0; i < keys.length; i += 64) {
+          await grant.verify();
+          const result = await run("type_text", { text: keys.slice(i,i+64).join("") });
+          typed += result.typed;
+          if (!result.ok) return { ...result, typed };
+        }
+      } catch (error) { signal.throwIfAborted(); return { ok: false, typed, error: "Typing was interrupted. Check the field before retrying. " + error.message }; }
+      finally { await run("end_typing").catch(() => {}); }
+      return { ok: true, typed, message: "Typed at the caret." };
+    }
+    await grant.verify();
+    const result = await run(operation, { text, range, occurrence, hosts });
+    target.selected = (operation === "select_text" && result.ok) || result.selected > 0;
+    return result;
+  }
+}
+
+return {INPUT_ACTIONS, PageInputs};
+})();
+
+// content/page-motion.js
+modules["content/page-motion.js"] = (() => {
+// Serialized into Safari's isolated world. DOM references stay in this document.
+function controlPageMotion(command, id, options) {
+  if (command === "install") {
+    globalThis.__safariChatStartMotion = (owner, state, element, advance, begin, end) => {
+      if (globalThis.__safariChatMotion?.state.active) throw new Error("Another motion is already running on this page.");
+      if (document.hidden) throw new Error("Motion needs a visible tab.");
+      const url = location.href, listeners = new AbortController();
+      let frame, previous = performance.now(), renewed = previous;
+      function stop(reason) {
+        if (!state.active) return state;
+        state.active = false; state.reason = reason;
+        cancelAnimationFrame(frame); listeners.abort();
+        try { end?.(reason); } finally {
+          globalThis.__safariChatMotion = { id: owner, state };
+        }
+        return state;
+      }
+      function tick(now) {
+        if (location.href !== url || !element.isConnected) return stop("page changed");
+        if (document.hidden) return stop("tab hidden");
+        if (now - renewed >= 4000) return stop("connection lost");
+        const dt = Math.max(0, Math.min(64, now - previous)) / 1000;
+        previous = now;
+        let reason;
+        try { reason = advance(dt, now); }
+        catch (error) { reason = error.message || "motion interrupted"; }
+        if (reason) return stop(reason);
+        if (state.active) frame = requestAnimationFrame(tick);
+      }
+      function takeOver(event) {
+        if (!event.isTrusted) return;
+        if (event.type === "keydown" && !["Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) return;
+        stop("stopped by user");
+      }
+      const listen = { capture: true, passive: true, signal: listeners.signal };
+      for (const type of ["wheel", "touchstart", "pointerdown", "keydown"]) window.addEventListener(type, takeOver, listen);
+      window.addEventListener("pagehide", () => stop("page changed"), listen);
+      document.addEventListener("visibilitychange", () => { if (document.hidden) stop("tab hidden"); }, listen);
+      globalThis.__safariChatMotion = { id: owner, state, stop,
+        renew() {
+          if (performance.now() - renewed >= 4000) return stop("connection lost");
+          renewed = performance.now();
+        },
+      };
+      try { begin?.(); } catch (error) { stop("start interrupted"); throw error; }
+      if (state.active) frame = requestAnimationFrame(tick);
+      return state;
+    };
+    globalThis.__safariChatStartScroll = (target, owner, direction, speed, speedChanges) => {
+      const state = { active: true, kind: "scroll", direction, speed };
+      let fraction = 0, stalled = 0, lastDirection, travelled = 0, checkpoint = 0;
+      const applySpeeds = () => {
+        while (checkpoint < speedChanges.length && travelled >= speedChanges[checkpoint].after) {
+          state.speed = speedChanges[checkpoint++].speed;
+          fraction = 0;
+        }
+      };
+      applySpeeds();
+      return globalThis.__safariChatStartMotion(owner, state, target, (dt, now) => {
+        if (state.direction !== lastDirection || !state.speed) { stalled = 0; fraction = 0; }
+        lastDirection = state.direction;
+        const horizontal = ["left", "right"].includes(lastDirection);
+        const sign = ["up", "left"].includes(lastDirection) ? -1 : 1;
+        fraction += sign * Math.min(horizontal ? target.scrollWidth : target.scrollHeight, state.speed * dt);
+        const remaining = speedChanges[checkpoint] ? Math.ceil(speedChanges[checkpoint].after - travelled) : Infinity;
+        const distance = sign * Math.min(Math.abs(Math.trunc(fraction)), remaining);
+        if (!distance) return;
+        fraction -= distance;
+        const before = horizontal ? target.scrollLeft : target.scrollTop;
+        target.scrollBy({ left: horizontal ? distance : 0, top: horizontal ? 0 : distance, behavior: "instant" });
+        const moved = Math.abs((horizontal ? target.scrollLeft : target.scrollTop) - before);
+        if (moved) { stalled = 0; travelled += moved; applySpeeds(); }
+        else if (!stalled) stalled = now;
+        else if (now - stalled >= 200) return "scroll boundary";
+      });
+    };
+    return true;
+  }
+  const motion = globalThis.__safariChatMotion;
+  if (!motion || motion.id !== id) return { active: false, reason: "page changed" };
+  if (motion.state.active) {
+    if (command === "stop") return motion.stop(options.reason);
+    motion.renew();
+    if (command === "adjust" && motion.state.active) {
+      motion.state.speed = options.speed;
+      if (options.direction) motion.state.direction = options.direction;
+    }
+  }
+  return motion.state;
+}
+
+return {controlPageMotion};
+})();
+
+// core/motion-session.js
+modules["core/motion-session.js"] = (() => {
+const { controlPageMotion } = modules["content/page-motion.js"];
+function motionResult(state) {
+  const expected = state.active || ["path finished", "scroll boundary", "stopped by model", "stopped by user"].includes(state.reason);
+  return expected ? { ok: true, motion: state } : { ok: false, motion: state, error: "Motion interrupted: " + state.reason + ". Read the page before continuing." };
+}
+
+// One motion belongs to one chat run and one document. A short lease lets the
+// page stop independently if the background disappears while a model is thinking.
+class MotionSession {
+  constructor(api, changed) {
+    this.api = api;
+    this.changed = changed;
+    this.current = null;
+    this.last = null;
+  }
+
+  async command(motion, command, options = {}) {
+    const [injection] = await this.api.scripting.executeScript({ target: { tabId: motion.tabId }, func: controlPageMotion, args: [command, motion.id, options] });
+    if (!injection?.result || injection.error) throw new Error("Safari could not reach the page.");
+    return injection.result;
+  }
+
+  finish(motion, state) {
+    if (this.current !== motion) return;
+    clearTimeout(motion.timer);
+    motion.signal.removeEventListener("abort", motion.abort);
+    this.current = null;
+    this.last = { kind: motion.kind, ...state, active: false, tabId: motion.tabId };
+    this.changed({ ...this.last, id: motion.id });
+    motion.resolve(this.last);
+  }
+
+  async monitor(motion) {
+    try {
+      await motion.verify();
+      if (this.current !== motion || motion.stopping) return;
+      const state = await this.command(motion, "renew");
+      if (this.current !== motion || motion.stopping) return;
+      if (!state.active) { this.finish(motion, state); return; }
+      if (state.speed !== this.last?.speed) { this.last = { ...state, tabId: motion.tabId }; this.changed({ ...this.last, id: motion.id }); }
+      motion.timer = setTimeout(() => this.monitor(motion), motion.interval);
+    } catch {
+      if (this.current === motion) await this.stop("access or connection changed");
+    }
+  }
+
+  async start(tabId, kind, directions, verify, signal, dispatch, wait) {
+    if (this.current) throw new Error("Stop the current motion first.");
+    const motion = { tabId, kind, id: crypto.randomUUID(), directions, signal, verify, interval: kind === "scroll" ? 1000 : 250 };
+    motion.finished = new Promise(resolve => { motion.resolve = resolve; });
+    motion.abort = () => { this.stop("task stopped"); };
+    await this.command(motion, "install");
+    await verify();
+    signal.throwIfAborted();
+    this.current = motion;
+    signal.addEventListener("abort", motion.abort, { once: true });
+    try {
+      const result = await dispatch(motion.id);
+      if (this.current !== motion || motion.stopping || signal.aborted) {
+        // Stop may have reached the page before its start injection completed.
+        await this.command(motion, "stop", { reason: "task stopped" }).catch(() => {});
+        signal.throwIfAborted();
+        throw new Error("Motion was stopped before it could start.");
+      }
+      if (!result.motion) throw new Error("The page did not confirm the motion.");
+      if (!result.motion.active) { this.finish(motion, result.motion); return { ...result, ...motionResult(result.motion) }; }
+      this.last = { ...result.motion, tabId };
+      this.changed({ ...this.last, id: motion.id });
+      motion.timer = setTimeout(() => this.monitor(motion), motion.interval);
+      if (wait) { result.motion = await motion.finished; signal.throwIfAborted(); }
+      return { ...result, ...motionResult(result.motion) };
+    } catch (error) { await this.stop("start interrupted"); throw error; }
+  }
+
+  async adjust(motion, speed, direction) {
+    if (!motion || !Number.isFinite(speed) || speed < 0) throw new Error("Choose a finite speed of zero or more pixels per second for the active motion.");
+    try { await motion.verify(); }
+    catch (error) { if (this.current === motion) await this.stop("access or connection changed"); throw error; }
+    if (this.current !== motion || motion.stopping) throw new Error("Motion has stopped.");
+    const state = await this.command(motion, "adjust", { direction, speed });
+    if (this.current !== motion || motion.stopping) return motion.finished;
+    if (!state.active) this.finish(motion, state);
+    else { this.last = { ...state, tabId: motion.tabId }; this.changed({ ...this.last, id: motion.id }); }
+    return this.last;
+  }
+
+  stop(reason) {
+    const motion = this.current;
+    if (!motion) return Promise.resolve(this.last);
+    if (!motion.stopping) {
+      clearTimeout(motion.timer);
+      // A discarded WebExtension context can lose its injection acknowledgement.
+      // The page's last lease expires independently within this interval.
+      motion.timer = setTimeout(() => this.finish(motion, { reason }), 4000);
+      motion.stopping = this.command(motion, "stop", { reason })
+        .then(state => this.finish(motion, state), () => this.finish(motion, { reason }));
+    }
+    return motion.finished;
+  }
+}
+
+return {motionResult, MotionSession};
+})();
+
 // core/website-access.js
 modules["core/website-access.js"] = (() => {
 const { safeWebURL } = modules["core/context.js"];
@@ -761,9 +1806,25 @@ return {accessKey, websiteHost, sitePermissionPattern, readWebsiteAccess, change
 // core/browser-tools.js
 modules["core/browser-tools.js"] = (() => {
 const { snapshotPage, actOnPage } = modules["content/page.js"];
+const { installPointerPath } = modules["content/pointer-path.js"];
+const { showActionPointer } = modules["content/action-pointer.js"];
 const { readyTab, watchNavigation } = modules["core/tab-navigation.js"];
+const { INPUT_ACTIONS } = modules["core/page-input.js"];
+const { motionResult } = modules["core/motion-session.js"];
 const { publicURL, safeWebURL } = modules["core/context.js"];
 const { allowsAction, sitePermissionPattern, visibleWebsite } = modules["core/website-access.js"];
+function describePath(path, viewport, bounds) {
+  if (!viewport || !bounds || !Array.isArray(path) || path.length < 2 || path.length > 128) throw new Error("Read the target and choose 2-128 visible viewport points.");
+  for (const point of path) {
+    const { x, y, speed } = point ?? {};
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= viewport.width || y >= viewport.height) throw new Error("Every point must fit inside the visible viewport.");
+    if (speed != null && (!Number.isFinite(speed) || speed < 0)) throw new Error("Waypoint speeds must be finite and nonnegative.");
+  }
+  const [left, top, right, bottom] = bounds, first = path[0], last = path.at(-1);
+  if (first.x < left || first.x >= right || first.y < top || first.y >= bottom) throw new Error("Start the path inside the selected target's visible bounds.");
+  return path.length + " waypoints from (" + first.x + ", " + first.y + ") to (" + last.x + ", " + last.y + ").";
+}
+
 function scriptResult(results, fallback) {
   const injection = results?.[0];
   if (injection?.error != null) {
@@ -775,12 +1836,25 @@ function scriptResult(results, fallback) {
   return injection.result;
 }
 
-async function readTab(api, tabId, limit, { viewportOnly = false, selectionOnly = false, expectedURL } = {}) {
+async function indicatePageAction(api, tabId, url, target, effect = "copy", frameId = 0) {
+  if (!safeWebURL(url) || !Number.isInteger(frameId) || frameId < 0) return;
+  try {
+    const result = await api.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, func: showActionPointer, args: [url, target, effect] });
+    // Allow one visible arrival before navigation. The background timer also
+    // completes when the source tab becomes hidden and its own timers suspend.
+    const delay = result?.[0]?.result;
+    if (effect === "aim" && delay > 0) await new Promise(resolve => setTimeout(resolve, Math.min(delay, 125)));
+  } catch { /* A missing frame or an unavailable visual must not replay or block an action. */ }
+}
+
+async function readTab(api, tabId, limit, { viewportOnly = false, selectionOnly = false, expectedURL, pointerPaths = false } = {}) {
   if (!Number.isInteger(tabId) || tabId < 0) throw new Error("Select a Safari tab first.");
   const url = expectedURL ?? (await api.tabs.get(tabId)).url;
   if (url && !safeWebURL(url)) throw new Error("Safari protects this page. Open an ordinary website to attach it.");
-  const results = await api.scripting.executeScript({ target: { tabId }, func: snapshotPage, args: [limit, viewportOnly, selectionOnly, url ?? null] });
-  return scriptResult(results, "Could not read this page. Check that the tab finished loading and read it again.");
+  const results = await api.scripting.executeScript({ target: { tabId }, func: snapshotPage, args: [limit, viewportOnly, selectionOnly, url ?? null, true, pointerPaths] });
+  const { pointerRect, ...page } = scriptResult(results, "Could not read this page. Check that the tab finished loading and read it again.");
+  if (pointerRect) await indicatePageAction(api, tabId, page.url, pointerRect);
+  return page;
 }
 
 async function sourceWindowId(api, tabId) {
@@ -793,7 +1867,7 @@ async function sourceWindowId(api, tabId) {
   throw new Error("Safari could not identify the source window. Open Safari Chat from the website again.");
 }
 
-function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verifySession, readAccess, initialTabs = [], defaultTabId = null, protectedTabId = null }) {
+function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verifySession, readAccess, motionSession, inputs, initialTabs = [], defaultTabId = null, protectedTabId = null }) {
   const readableTabs = new Map(initialTabs.filter(tab => Number.isInteger(tab.id) && safeWebURL(tab.url)).map(tab => [tab.id, new URL(tab.url).origin]));
   // A requested destination is a hint for Safari's permission sheet, never proof
   // of the live tab's URL or a grant to share its contents.
@@ -857,7 +1931,7 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
     const requestedAccess = !!grant;
     grant ??= await readGrant(url);
     await grant.verify();
-    const capture = () => readTab(api, tabId, pageChars, { viewportOnly: true, expectedURL: url });
+    const capture = () => readTab(api, tabId, pageChars, { viewportOnly: true, expectedURL: url, pointerPaths: !!motionSession });
     let page;
     try { page = await capture(); } catch (error) {
       // A tab's address may still be visible when Safari rejects injection.
@@ -878,14 +1952,49 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
     if (readAccess) await grant.verify();
     if (new URL(page.url).origin !== origin) throw new Error("The tab changed websites while reading. Request permission for the new page.");
     if (grant.rememberRead) readableTabs.set(tabId, origin);
-    snapshots.set(tabId, { url: page.url, elements: page.elements });
-    return { ...page, url: publicURL(page.url), tabId };
+    snapshots.set(tabId, { url: page.url, elements: page.elements, viewport: page.viewport });
+    return { ...page, url: publicURL(page.url), tabId, ...(motionSession?.last?.tabId === tabId && { motion: motionSession.last }) };
   }
   return async function execute(args, signal) {
-    const { operation, tabId: requestedTab, elementId, url, text, direction, checked } = args ?? {};
+    const { operation, tabId: requestedTab, elementId, url, text, direction, speed, checked, path, wait, speedChanges } = args ?? {};
     const tabId = requestedTab ?? defaultTabId;
-    if (!["read", "click", "fill", "select", "set_checked", "scroll", "navigate", "open_tab", "close_tab", "list_tabs"].includes(operation)) throw new Error("Unknown browser action.");
+    if (!["read", "click", "fill", "select", "set_checked", "scroll", "drag", "move_pointer", "set_speed", "stop_motion", "wait_motion", "navigate", "open_tab", "close_tab", "list_tabs", ...INPUT_ACTIONS].includes(operation)) throw new Error("Unknown browser action.");
     signal.throwIfAborted();
+    const motion = motionSession?.current;
+    const pointerPath = operation === "drag" || operation === "move_pointer";
+    const continuous = operation === "scroll" && speed != null;
+    if (speedChanges != null && (!continuous || motion || !Array.isArray(speedChanges) || speedChanges.length > 128 ||
+        speedChanges.some((change, i) => !Number.isFinite(change?.after) || change.after < 0 || (i && change.after <= speedChanges[i-1].after) || !Number.isFinite(change?.speed) || change.speed < 0))) {
+      throw new Error("On starting a continuous scroll, supply up to 128 speed changes with increasing distances in CSS pixels and nonnegative speeds.");
+    }
+    if (["stop_motion", "wait_motion", "set_speed"].includes(operation)) {
+      if (!motionSession || motionSession.last?.tabId !== tabId) throw new Error("There is no motion for this run in that tab.");
+      let state = motionSession.last;
+      if (operation === "set_speed") {
+        state = await motionSession.adjust(motion, speed);
+        if (wait && motion) state = await motion.finished;
+      } else if (motion) state = operation === "wait_motion" ? await motion.finished : await motionSession.stop("stopped by model");
+      signal.throwIfAborted();
+      if (!state.active) snapshots.delete(tabId);
+      return motionResult(state);
+    }
+    if (continuous || pointerPath) {
+      if (!motionSession) throw new Error("Use Safari side chat for continuous scroll and pointer paths.");
+      if (speed != null && (!Number.isFinite(speed) || speed < 0)) throw new Error("Use a finite speed of zero or more CSS pixels per second.");
+      if (motionSession.last?.reason === "stopped by user") throw new Error("The user stopped motion. Leave it stopped for this message.");
+      if (continuous && !["up", "down", "left", "right"].includes(direction)) throw new Error("Continuous scroll needs up, down, left or right.");
+      if (motion) {
+        if (!continuous || motion.kind !== "scroll" || motion.tabId !== tabId || elementId) throw new Error("Stop the current motion before starting another. Use set_speed to adjust it.");
+        if (!motion.directions.includes(direction)) throw new Error("Use a direction supported by the scrolling area.");
+        const state = await motionSession.adjust(motion, speed, direction);
+        return motionResult(wait ? await motion.finished : state);
+      }
+    }
+    if (motion && !["read", "list_tabs"].includes(operation)) {
+      await motionSession.stop("another action");
+      snapshots.delete(motion.tabId);
+      signal.throwIfAborted();
+    }
     if (operation === "list_tabs") {
       const grant = await authorize({ operation, title: "Share your open tabs?", detail: "Share the titles and addresses of accessible tabs in this window." }, [], signal);
       const windowId = await sourceWindowId(api, defaultTabId);
@@ -912,9 +2021,17 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
     if (!currentURL) throw new Error("Safari has not exposed a website address for this tab. Read the tab before trying this action.");
     const hosts = [new URL(currentURL).hostname];
     const snapshot = snapshots.get(tabId);
+    const fieldClick = inputs && operation === "click" && (args.point || snapshot?.elements.find(item => item.id === elementId)?.actions?.includes("type_text"));
+    if (INPUT_ACTIONS.includes(operation) || fieldClick) {
+      if (!inputs) throw new Error("Use Safari side chat for direct keyboard, selection and pointer input.");
+      const indicate = (target, effect) => indicatePageAction(api, tabId, currentURL, target, effect);
+      snapshots.delete(tabId);
+      return inputs.execute(args, tabId, currentURL, snapshot, authorize, signal, indicate);
+    }
     let detail;
     let target;
     let galleryScroll = false;
+    let directions;
     if (operation === "navigate") {
       target = safeWebURL(url);
       if (!target) throw new Error("Only HTTP and HTTPS navigation is supported.");
@@ -927,17 +2044,26 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
       if (["fill", "select"].includes(operation) && (typeof text !== "string" || text.length > 12000)) throw new Error("Invalid field text.");
       if (!snapshot || snapshot.url !== currentURL) throw new Error("Read the current page before acting on an element.");
       const ref = snapshot?.elements.find(element => element.id === elementId);
-      if (!(operation === "scroll" && !elementId) && !ref) throw new Error("Read the current page before acting on an element.");
-      if (ref?.actions && !ref.actions.includes(operation)) throw new Error("This control does not support that action. Read the page and use one of its listed actions.");
+      if (!(["scroll", "move_pointer"].includes(operation) && !elementId) && !ref) throw new Error("Read the current page before acting on an element.");
+      if (operation !== "move_pointer" && ref?.actions && !ref.actions.includes(operation)) throw new Error("This control does not support that action. Read the page and use one of its listed actions.");
       if (operation === "scroll" && ref?.directions && !ref.directions.includes(direction)) throw new Error("Use one of this area's listed scroll directions.");
       galleryScroll = operation === "scroll" && ref?.kind === "carousel";
+      if (continuous && galleryScroll) throw new Error("This gallery has discrete navigation controls. Use scroll with speed null for each item.");
+      directions = ref?.directions ?? ["up", "down", "left", "right"];
       detail = `${publicURL(currentURL)}\n${ref?.label ?? "Page"}${["fill", "select"].includes(operation) ? `\n${text}` : ""}${operation === "scroll" ? `\n${galleryScroll ? "Advance gallery" : "Scroll"} ${direction}` : ""}${operation === "set_checked" ? `\n${checked ? "Check" : "Uncheck"}` : ""}`;
       if (operation === "click" && ref.destinationHost && ref.destinationHost !== hosts[0]) {
         hosts.push(ref.destinationHost);
         detail += `\nDestination: ${ref.destinationHost}`;
       }
+      if (pointerPath) detail += "\n" + describePath(path, snapshot.viewport, ref?.bounds ?? [0, 0, snapshot.viewport?.width, snapshot.viewport?.height]);
+      if (continuous) detail += "\nStart at " + speed + " px/s. Speed and direction can change within this area. You can stop scrolling in chat or on the page.";
     }
-    const grant = await authorize({ operation, title: galleryScroll ? "Move this gallery?" : { click: "Click this element?", fill: "Enter this text?", select: "Choose this option?", set_checked: "Change this checkbox or radio option?", scroll: "Scroll this page or area?", navigate: "Navigate this tab?", close_tab: "Close this tab?" }[operation], detail }, hosts, signal);
+    const title = continuous ? "Scroll continuously?" : galleryScroll ? "Move this gallery?" : {
+      drag: "Drag along this path?", move_pointer: "Move the pointer along this path?", click: "Click this element?",
+      fill: "Enter this text?", select: "Choose this option?", set_checked: "Change this checkbox or radio option?",
+      scroll: "Scroll this page or area?", navigate: "Navigate this tab?", close_tab: "Close this tab?",
+    }[operation];
+    const grant = await authorize({ operation, title, detail, ...(pointerPath && { path: path.map(({ x, y }) => [x, y]) }) }, hosts, signal);
     signal.throwIfAborted();
     // The user may navigate while an approval is visible; reject stale permission.
     const now = await api.tabs.get(tabId);
@@ -951,12 +2077,32 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
       return { ok: true, url: publicURL(target) };
     }
     if (operation === "close_tab") { readableTabs.delete(tabId); destinations.delete(tabId); await api.tabs.remove(tabId); return { ok: true }; }
-    const dispatch = async () => scriptResult(await api.scripting.executeScript({ target: { tabId }, func: actOnPage, args: [operation, elementId, text, currentURL, { direction, checked }] }), "The page did not confirm the action. Read it again before retrying.");
-    return operation === "click" ? watchNavigation(api, tabId, currentURL, signal, dispatch, false) : dispatch();
+    const inject = (preview = false, motionId = null) => api.scripting.executeScript({
+      target: { tabId }, func: actOnPage,
+      args: [operation, elementId ?? null, text ?? null, currentURL, { direction: direction ?? null, checked: checked ?? null, preview, ...(inputs && operation === "click" && { inputOwner: inputs.owner }), ...(motionId && { motionId, speed: speed ?? 600, ...(pointerPath && { path }), ...(speedChanges && { speedChanges }) }) }],
+    });
+    if (now.active !== false && (operation === "click" || operation === "set_checked" || galleryScroll)) {
+      const preview = await inject(true).catch(() => null);
+      if (preview?.[0]?.result?.pointer) await indicatePageAction(api, tabId, currentURL, { ref: elementId }, "aim");
+      // The user can stop the run or revoke a grant while a visible pointer paints.
+      await grant.verify();
+    }
+    const dispatch = async motionId => scriptResult(await inject(false, motionId), "The page did not confirm the action. Read it again before retrying.");
+    if (pointerPath) {
+      scriptResult(await api.scripting.executeScript({ target: { tabId }, func: installPointerPath }), "Safari could not prepare the pointer path.");
+      await grant.verify();
+      const { x, y } = path[0];
+      await indicatePageAction(api, tabId, currentURL, { left: x - 1, top: y - 1, right: x + 1, bottom: y + 1 }, "aim");
+    }
+    if (continuous || pointerPath) return motionSession.start(tabId, operation, directions, grant.verify, signal, dispatch, wait ?? pointerPath);
+    if (operation !== "click") return dispatch();
+    const result = await watchNavigation(api, tabId, currentURL, signal, dispatch, false);
+    if (inputs && result.focused) inputs.targets.set(tabId, { url: currentURL, ref: snapshot.elements.find(item => item.id === elementId), selected: false });
+    return result;
   };
 }
 
-return {readTab, sourceWindowId, createBrowserTools};
+return {indicatePageAction, readTab, sourceWindowId, createBrowserTools};
 })();
 
 // core/chat-dock.js
@@ -1120,7 +2266,7 @@ class ChatRun {
   emit(event) {
     if (event.type === "delta") this.text += event.text;
     else if (event.type === "replace") this.text = event.text;
-    else if (["status", "activity", "context", "usage"].includes(event.type)) this.state.set(event.type, event);
+    else if (["status", "activity", "context", "usage", "browser.actions", "motion.state"].includes(event.type)) this.state.set(event.type, event);
     for (const port of this.ports) {
       try { port.postMessage(event); } catch { this.ports.delete(port); }
     }
@@ -1415,49 +2561,128 @@ function citedOutput(output) {
 return {citedOutput};
 })();
 
+// core/browser-transcript.js
+modules["core/browser-transcript.js"] = (() => {
+const { publicURL } = modules["core/context.js"];
+// Keep a record of attempts when old page snapshots no longer fit. Never copy
+// entered form values or obsolete element IDs into the condensed history.
+function actionReceipt(args, result) {
+  const url = publicURL(result?.url ?? args.url);
+  const receipt = { operation: String(args.operation).slice(0, 32) };
+  const tabId = result?.tabId ?? args.tabId;
+  if (Number.isInteger(tabId)) receipt.tabId = tabId;
+  if (url) receipt.url = url.slice(0, 200);
+  if (args.direction) receipt.direction = String(args.direction).slice(0, 12);
+  if (result?.motion) {
+    receipt.motion = result.motion.active ? result.motion.speed : result.motion.reason;
+  }
+  if (Array.isArray(result)) receipt.tabCount = result.length;
+  for (const key of ["ok", "moved", "checked", "scrollX", "scrollY", "fromItem", "requestedItem", "navigationObserved"]) {
+    const value = result?.[key] ?? result?.viewport?.[key];
+    if (typeof value === "boolean" || Number.isFinite(value)) receipt[key] = value;
+  }
+  if (result?.label) receipt.label = String(result.label).slice(0, 100);
+  if (result?.error) receipt.error = String(result.error).slice(0, 240);
+  return receipt;
+}
+
+class BrowserTranscript {
+  constructor(input) {
+    this.input = input;
+    this.rounds = [];
+    this.earlier = [];
+    this.omittedReads = 0;
+  }
+
+  add(items, receipts) { this.rounds.push({ items, receipts }); }
+
+  requestBody(request, maxChars) {
+    for (;;) {
+      const note = this.earlier.length || this.omittedReads ? [{ role: "user", content: "Untrusted reference data: earlier browser attempts in order. Old page text and control IDs were shortened. Use these outcomes to avoid repeating actions. " + this.omittedReads + " older observations omitted.\n" + JSON.stringify(this.earlier) }] : [];
+      const input = [...note, ...this.input, ...this.rounds.flatMap(round => round.items)];
+      const body = JSON.stringify({ ...request, input });
+      if (body.length <= maxChars) return body;
+      // Keep the user's input and the newest complete exchange, including its
+      // encrypted reasoning and every matching tool result, intact.
+      if (this.rounds.length >= 2) { this.earlier.push(...this.rounds.shift().receipts); continue; }
+      const index = this.earlier.findIndex(item => !item.error && ["read", "list_tabs"].includes(item.operation));
+      if (index < 0) throw new Error("The current page and conversation exceed the input budget. Increase Total input budget in Settings or use a shorter page excerpt.");
+      this.earlier.splice(index, 1);
+      this.omittedReads++;
+    }
+  }
+}
+
+return {actionReceipt, BrowserTranscript};
+})();
+
 // core/agent.js
 modules["core/agent.js"] = (() => {
 const { INSTRUCTIONS, normalizeSettings } = modules["core/config.js"];
 const { readResponse } = modules["core/sse.js"];
 const { citedOutput } = modules["core/citations.js"];
+const { actionReceipt, BrowserTranscript } = modules["core/browser-transcript.js"];
 const BROWSER_TOOL = {
   type: "namespace", name: "safari", description: "User-approved Safari operations. Read a page before acting on element IDs.",
   tools: [{
-    type: "function", name: "browser", description: "Use tabId null for the page where this chat was opened, or an explicit tab ID from attached context or list_tabs. Read the visible page before acting; use current element IDs and their listed actions. Website access follows the user's approval settings. fill enters text without submitting. select chooses a native dropdown by exact value or unique label. set_checked changes a native checkbox/radio. scroll moves the page (elementId null), a listed scroll area, or a carousel using its navigation controls; use its listed directions. To move through other galleries, click a listed tab or next/previous control rather than an offer link. To open an offer the user chose, click its listed link or button. Read again after changes to verify outcomes. To inspect a site in a new tab, call open_tab once, then read its returned tabId. The read waits for loading and handles Safari website permission in the current chat. Use its result before reporting whether the site was accessible. Unused fields must be null.", strict: true,
-    parameters: { type: "object", additionalProperties: false, required: ["operation", "tabId", "elementId", "url", "text", "direction", "checked"], properties: {
-      operation: { type: "string", enum: ["read", "click", "fill", "select", "set_checked", "scroll", "navigate", "open_tab", "close_tab", "list_tabs"] },
+    type: "function", name: "browser", strict: true,
+    description: [
+      "Use tabId null for the originating page or a known tab ID. Read before acting, use fresh element IDs, then read to verify. fill does not submit; select uses exact value/label.",
+      "scroll moves the page (elementId null), a listed area or a carousel one step with speed null. Use gallery navigation controls to advance items.",
+      "Start continuous scrolling with up/down/left/right and a speed in CSS pixels/second. Optional speedChanges set speeds at cumulative travel distances in CSS pixels. Use wait true to scroll until the user stops it. Otherwise read while moving, slow or reverse with scroll, and stop_motion on reaching the goal.",
+      "drag holds the primary button on a listed drag target through a path and releases. move_pointer follows a path with the button up; elementId null allows any visible starting point. Read bounds are [left,top,right,bottom] in visible viewport CSS pixels. When an element is selected start inside it. Supply 2-128 waypoints {x,y,speed}. Each speed applies from that point until changed; null inherits. Initial pointer speed defaults to 600 px/s.",
+      "A pointer path waits by default. Set wait false to return immediately for live control. set_speed changes the current scroll or pointer speed mid-segment; zero pauses. wait_motion waits without model polling. stop_motion releases an active drag at its current point. Respect manual takeover. Events are scripted; verify the website accepted them.",
+      "double_click sends two clicks and dblclick to the same target. click and double_click can use a listed target or a visible viewport point. Click an editable field to focus it. type_text types at its current caret. press_key takes a printable or editing key in text, e.g. Backspace, Shift+ArrowLeft, Meta+A or Enter (can submit).",
+      "select_text takes an exact quote in text (occurrence is one-based when ambiguous), range {start,end} in UTF-16 offsets in a listed element, or neither to use its current selection. Null elementId with a quote searches visible page text. For fields use the field ID. Equal offsets place the caret. copy sends the verified selection to the system clipboard. delete_selection and replace_selection edit it. paste inserts plain clipboard text over the selection or at the caret. Ordinary page edits change the local display. After selection or a field click, follow-up editing operations can reuse that target with elementId null. Never enter sensitive fields.",
+      "open_tab once, then read the returned tabId to wait for loading and handle Safari permission. Unused fields must be null.",
+    ].join(" "),
+    parameters: { type: "object", additionalProperties: false, required: ["operation", "tabId", "elementId", "url", "text", "direction", "speed", "path", "wait", "speedChanges", "point", "range", "occurrence", "checked"], properties: {
+      operation: { type: "string", enum: ["read", "click", "fill", "select", "set_checked", "scroll", "drag", "move_pointer", "set_speed", "stop_motion", "wait_motion", "double_click", "type_text", "press_key", "select_text", "copy", "paste", "delete_selection", "replace_selection", "navigate", "open_tab", "close_tab", "list_tabs"] },
       tabId: { type: ["integer", "null"] }, elementId: { type: ["string", "null"] },
       url: { type: ["string", "null"] }, text: { type: ["string", "null"] },
-      direction: { type: ["string", "null"], enum: ["up", "down", "left", "right", "top", "bottom", null] }, checked: { type: ["boolean", "null"] },
+      direction: { type: ["string", "null"], enum: ["up", "down", "left", "right", "top", "bottom", null] },
+      speed: { type: ["number", "null"] }, wait: { type: ["boolean", "null"] },
+      point: { type: ["object", "null"], additionalProperties: false, required: ["x","y"], properties: { x: { type: "number" }, y: { type: "number" } } },
+      range: { type: ["object", "null"], additionalProperties: false, required: ["start","end"], properties: { start: { type: "integer" }, end: { type: "integer" } } },
+      occurrence: { type: ["integer","null"] },
+      speedChanges: { type: ["array", "null"], items: { type: "object", additionalProperties: false, required: ["after", "speed"], properties: {
+        after: { type: "number" }, speed: { type: "number" },
+      } } },
+      path: { type: ["array", "null"], items: { type: "object", additionalProperties: false, required: ["x", "y", "speed"], properties: {
+        x: { type: "number" }, y: { type: "number" }, speed: { type: ["number", "null"] },
+      } } }, checked: { type: ["boolean", "null"] },
     } },
   }],
 };
 
 async function runAgent({ input, model, effort, settings: rawSettings, signal }, dependencies) {
   const settings = normalizeSettings(rawSettings);
-  const { credential, executeTool, emit, fetchImpl = fetch } = dependencies;
+  const { credential, executeTool, stopMotion, emit, fetchImpl = fetch } = dependencies;
   if (!model || typeof model !== "string") throw new Error("Connect your account and choose an available model first.");
-  const transcript = [...input];
+  const transcript = new BrowserTranscript(input);
   const usage = { input: 0, cached: 0, output: 0, requests: 0 };
   let resultText = "";
-  for (let round = 0; round <= settings.maxToolRounds; round++) {
+  const limit = settings.maxBrowserActions;
+  let used = 0;
+  const reportActions = () => emit({ type: "browser.actions", actions: { used, limit } });
+  reportActions();
+  for (;;) {
     signal.throwIfAborted();
-    const canAct = round < settings.maxToolRounds;
-    const tools = [...(canAct ? [BROWSER_TOOL] : []), ...(settings.webSearch && round < settings.maxToolRounds ? [{ type: "web_search", search_context_size: "medium" }] : [])];
+    const canAct = used < limit;
+    if (!canAct) await stopMotion?.("action limit");
+    const tools = canAct ? [BROWSER_TOOL, ...(settings.webSearch ? [{ type: "web_search", search_context_size: "medium" }] : [])] : [];
     const capabilities = canAct
-      ? "Safari browser tools are available in this chat. For requested page interactions, use safari.browser to read the page and perform the action through its approval flow. An attachment is not required to request a read of the originating tab. Earlier assistant replies may describe capabilities that have since changed; use the tools available now. If a tool fails, explain its specific error rather than claiming this chat cannot interact with the browser."
-      : "The browser tool round limit has been reached for this response. Explain the verified result and any remaining work; do not claim unperformed actions succeeded.";
-    const request = { model, instructions: `${INSTRUCTIONS}\n\n${capabilities}`, input: transcript, store: false, stream: true, include: ["reasoning.encrypted_content"], ...(tools.length ? { tools, parallel_tool_calls: false } : {}) };
+      ? "Safari browser tools are available in this chat. For requested page interactions, use safari.browser to read the page and perform the action through its approval flow. Continue through the requested steps while permitted actions can make progress. Stop when the task is complete, needs user input, or is blocked. An attachment is not required to request a read of the originating tab. Earlier assistant replies may describe capabilities that have since changed; use the tools available now. If a tool fails, explain its specific error rather than claiming this chat cannot interact with the browser."
+      : "The browser action limit for this message has been reached. Summarize the verified outcome and any unfinished steps.";
+    const request = { model, instructions: `${INSTRUCTIONS}\n\n${capabilities}`, store: false, stream: true, include: ["reasoning.encrypted_content"], ...(tools.length ? { tools, parallel_tool_calls: false } : {}) };
     if (effort) request.reasoning = { effort };
-    if (JSON.stringify(request).length > settings.inputChars + 4000) {
-      throw new Error("The browser task reached its context budget. Start a new chat with the relevant page attached.");
-    }
-    emit({ type: "status", text: round ? "Continuing\u2026" : "Thinking\u2026" });
+    const body = transcript.requestBody(request, settings.inputChars + 4000);
+    emit({ type: "status", text: used ? "Continuing\u2026" : "Thinking\u2026" });
     const token = await credential();
     signal.throwIfAborted();
     const response = await fetchImpl("https://api.openai.com/v1/responses", {
       method: "POST", signal, credentials: "omit", cache: "no-store", redirect: "error",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(request),
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body,
     });
     const previousText = resultText;
     const completed = await readResponse(response, { signal, onDelta: text => {
@@ -1481,22 +2706,29 @@ async function runAgent({ input, model, effort, settings: rawSettings, signal },
       return { text: resultText, usage };
     }
     if (!canAct || calls.length > 4) throw new Error("The response exceeded the browser action limit.");
-    transcript.push(...output);
+    const items = [...output], receipts = [];
     for (const call of calls) {
       signal.throwIfAborted();
       if (call.name !== "browser" || (call.namespace && call.namespace !== "safari")) throw new Error("The model requested an unknown tool.");
       let args;
       try { args = JSON.parse(call.arguments); } catch { throw new Error("The model returned invalid action arguments."); }
       let result;
-      emit({ type: "activity", operation: args.operation, state: "working" });
-      try { result = await executeTool(args, signal); }
-      catch (error) { signal.throwIfAborted(); result = { error: error.message }; }
-      emit({ type: "activity", operation: args.operation, state: result?.error ? "error" : "done", detail: result?.error || result?.message || "" });
+      if (used < limit) {
+        used++;
+        reportActions();
+        emit({ type: "activity", operation: args?.operation, state: "working" });
+        try { result = await executeTool(args, signal); }
+        catch (error) { signal.throwIfAborted(); result = { error: error.message }; }
+        emit({ type: "activity", operation: args?.operation, state: result?.error ? "error" : "done", detail: result?.error || result?.message || "" });
+        receipts.push(actionReceipt(args ?? {}, result));
+      } else {
+        result = { error: "Skipped because this message used its browser action allowance. This call was not attempted." };
+      }
       const serialized = JSON.stringify(result);
-      transcript.push({ type: "function_call_output", call_id: call.call_id, output: serialized.length > settings.pageChars + 6000 ? JSON.stringify({ error: "Result exceeded the page context limit." }) : serialized });
+      items.push({ type: "function_call_output", call_id: call.call_id, output: serialized.length > settings.pageChars + 6000 ? JSON.stringify({ error: "Result exceeded the page context limit." }) : serialized });
     }
+    transcript.add(items, receipts);
   }
-  throw new Error("The browser task reached its action limit. Continue with a new message.");
 }
 
 return {BROWSER_TOOL, runAgent};
@@ -1629,11 +2861,13 @@ modules["background.js"] = (() => {
 const { buildInput, publicURL, safeWebURL } = modules["core/context.js"];
 const { normalizeSettings } = modules["core/config.js"];
 const { settings, saveChat, listChats, chatKey } = modules["core/storage.js"];
-const { readTab, createBrowserTools, sourceWindowId } = modules["core/browser-tools.js"];
+const { readTab, createBrowserTools, indicatePageAction, sourceWindowId } = modules["core/browser-tools.js"];
 const { ChatDock, sourceTabId } = modules["core/chat-dock.js"];
 const { ChatRun } = modules["core/chat-run.js"];
 const { FrameDrafts } = modules["core/frame-drafts.js"];
 const { runAgent } = modules["core/agent.js"];
+const { PageInputs } = modules["core/page-input.js"];
+const { MotionSession } = modules["core/motion-session.js"];
 const { LocalData } = modules["core/local-data.js"];
 const { draftKey, sessionKey, saveDraft } = modules["core/drafts.js"];
 const { DesktopController } = modules["core/desktop.js"];
@@ -1730,7 +2964,9 @@ async function checkCapture(account, url) {
   const safe = safeWebURL(url);
   if (!safe) throw new Error("Safari protects this page. Choose an accessible website.");
   // Picking a source explicitly authorizes the excerpt, subject to saved blocks.
-  allowsAction(await readWebsiteAccess(api.storage.local, account), [new URL(safe).hostname]);
+  const access = await readWebsiteAccess(api.storage.local, account);
+  allowsAction(access, [new URL(safe).hostname]);
+  return access;
 }
 
 async function credential(auth) {
@@ -1781,9 +3017,11 @@ async function eraseLocalData() {
   return { browserCleared, nativeCleared, failures };
 }
 
-async function showPanel(tab, share = false, selection = "") {
+async function showPanel(tab, share) {
   if (!Number.isInteger(tab?.id) || dock.panelURLMatches(tab.url) || localData.closed) return;
   if (share && !localData.closed) {
+    const selection = share.selectionText;
+    const frameURL = share.frameId ? share.frameUrl : tab.url;
     let auth;
     try {
       auth = await native("auth.status");
@@ -1791,12 +3029,14 @@ async function showPanel(tab, share = false, selection = "") {
       const limit = (await settings(api.storage.local)).pageChars;
       const page = selection ? { text: selection, title: tab.title, url: tab.url } : await readTab(api, tab.id, limit, { expectedURL: tab.url });
       if (!safeWebURL(tab.url) || safeWebURL(page.url) !== safeWebURL(tab.url)) throw new Error("The page changed. Choose Ask Safari Chat on the page you want to share.");
-      await localData.write(async storage => {
-        await checkCapture(auth.account, tab.url);
+      const markSelection = await localData.write(async storage => {
+        const access = await checkCapture(auth.account, tab.url);
         checkSession(await native("auth.status"), auth.account, auth.generation);
         const kind = selection ? "selection" : "page", url = publicURL(page.url);
         await storage.set({ [`draft:${tab.id}`]: { kind, key: `${kind}:${tab.id}:${url}`, tabId: tab.id, text: page.text.slice(0, limit), title: page.title ?? "Page", url, truncated: !!page.truncated || page.text.length > limit, generation: auth.generation, created: Date.now() } });
+        return selection && visibleWebsite(frameURL, access);
       });
+      if (markSelection) await indicatePageAction(api, tab.id, frameURL, "selection", "copy", share.frameId);
     } catch (error) {
       if (!localData.closed) await localData.write(async storage => {
         if (auth) checkSession(await native("auth.status"), auth.account, auth.generation);
@@ -1827,11 +3067,11 @@ async function focusSource(panel) {
   if (Number.isInteger(tab.windowId)) await api.windows.update(tab.windowId, { focused: true });
   return tab;
 }
-async function openFromSafari(tab, share = false, selection = "") {
+async function openFromSafari(tab, share) {
   if (!Number.isInteger(tab?.id)) return;
   try {
     if (!share && dock.panelURLMatches(tab.url)) tab = await focusSource(tab);
-    await showPanel(tab, share, selection);
+    await showPanel(tab, share);
     await dockStatus(tab.id);
   }
   catch (error) { await dockStatus(tab.id, error.message); }
@@ -1853,7 +3093,7 @@ api.runtime.onInstalled.addListener(() => {
   }).catch(console.error);
 });
 api.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === "ask") return openFromSafari(tab, true, info.selectionText);
+  if (info.menuItemId === "ask") return openFromSafari(tab, info);
 });
 api.tabs.onRemoved.addListener(tabId => {
   for (const run of activeRuns.values()) {
@@ -2059,6 +3299,14 @@ api.runtime.onConnect.addListener(port => {
     if (disconnected && message.type !== "run") return;
     if (localData.closed) { port.postMessage({ type: "data.erasing" }); return; }
     if (message.type === "cancel") { if (attached?.ports.has(port)) attached.abort(); return; }
+    if (message.type === "motion.stop") { if (typeof message.id === "string" && attached?.ports.has(port) && attached.motionSession?.current?.id === message.id) await attached.motionSession.stop("stopped by user"); return; }
+    if (message.type === "motion.speed") {
+      if (typeof message.id === "string" && attached?.ports.has(port) && attached.motionSession?.current?.id === message.id) {
+        try { await attached.motionSession.adjust(attached.motionSession.current, message.speed); }
+        catch (error) { if (attached.ports.has(port)) port.postMessage({ type: "motion.error", message: error.message }); }
+      }
+      return;
+    }
     if (message.type === "approval") { if (attached?.ports.has(port)) attached.answer(message); return; }
     if (message.type === "resume") {
       try {
@@ -2095,7 +3343,8 @@ api.runtime.onConnect.addListener(port => {
     const controller = run.controller;
     const emit = event => run.emit(event);
     // A finite deadline also bounds abandoned network reads and approval prompts.
-    const timer = setTimeout(() => controller.abort(new Error("This task timed out. Please try again.")), 300000);
+    const timeoutError = new Error("This message reached its five-minute time limit. Check the current page before continuing.");
+    const timer = setTimeout(() => controller.abort(timeoutError), 300000);
     let runChat;
     let writing = false;
     const started = Date.now();
@@ -2104,7 +3353,8 @@ api.runtime.onConnect.addListener(port => {
     const finish = (text, error = false) => localData.write(async storage => {
       await verifySession();
       const pointer = !run.ports.size && !frameDrafts.pending.has(source) ? sessionKey(run.account, source) : undefined;
-      const saved = await saveChat(storage, { ...runChat, messages: [...runChat.messages, { role: "assistant", text, workMs, ...(error ? { error: true } : {}) }] }, pointer);
+      const browserActions = run.state.get("browser.actions")?.actions;
+      const saved = await saveChat(storage, { ...runChat, messages: [...runChat.messages, { role: "assistant", text, workMs, browserActions, ...(error ? { error: true } : {}) }] }, pointer);
       return { id: saved.id, title: saved.title, revision: saved.revision };
     });
     const runEmit = event => { controller.signal.throwIfAborted(); if (event.type === "activity") usedTools = true; emit(event); };
@@ -2140,10 +3390,18 @@ api.runtime.onConnect.addListener(port => {
       const requestSiteAccess = (siteOrigin, signal) => run.prompt({ operation: "read", siteOrigin,
         title: "Read " + new URL(siteOrigin).hostname + "?",
         detail: "Allow website access in Safari to let this chat read the open tab and continue." }, signal);
-      const executeTool = createBrowserTools({ api, pageChars: prefs.pageChars, approve, requestSiteAccess, readAccess: () => readWebsiteAccess(api.storage.local, auth.account), verifySession: async () => {
+      const motionSession = new MotionSession(api, state => emit({ type: "motion.state", state }));
+      run.motionSession = motionSession;
+      const inputs = new PageInputs(api, {
+        write: text => native("clipboard.write", { generation: auth.generation, text }),
+        read: async () => (await native("clipboard.read", { generation: auth.generation })).text,
+      });
+      const executeTool = createBrowserTools({ api, pageChars: prefs.pageChars, motionSession, inputs, approve, requestSiteAccess, readAccess: () => readWebsiteAccess(api.storage.local, auth.account), verifySession: async () => {
         try { await verifySession(); } catch (error) { controller.abort(error); throw error; }
       }, initialTabs, defaultTabId, protectedTabId: port.sender.frameId ? null : host });
-      const result = await runAgent({ input: built.input, model: message.model, effort, settings: prefs, signal: controller.signal }, { credential: () => credential(auth), executeTool, emit: runEmit });
+      const stopMotion = reason => motionSession.stop(reason);
+      const result = await runAgent({ input: built.input, model: message.model, effort, settings: prefs, signal: controller.signal }, { credential: () => credential(auth), executeTool, stopMotion, emit: runEmit })
+        .finally(() => Promise.all([stopMotion("task ended"), inputs.release()]));
       controller.signal.throwIfAborted();
       writing = true;
       workMs = usedTools ? Date.now() - started : undefined;
@@ -2151,7 +3409,8 @@ api.runtime.onConnect.addListener(port => {
     } catch (error) {
       let saved, saveError;
       if (runChat && !localData.closed && !writing) {
-        try { saved = await finish(run.text || (controller.signal.aborted ? "Response stopped." : "No response received."), true); }
+        const stopped = controller.signal.reason === timeoutError ? timeoutError.message : "Response stopped.";
+        try { saved = await finish(run.text || (controller.signal.aborted ? stopped : "No response received."), true); }
         catch (failure) { saveError = failure.message; }
       }
       terminal({ type: controller.signal.aborted ? "cancelled" : "error", saved, saveError: saveError || (writing ? error.message : undefined), message: (controller.signal.aborted ? controller.signal.reason?.message : error?.message) ?? "The request could not finish." });

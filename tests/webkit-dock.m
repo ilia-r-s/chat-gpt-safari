@@ -32,6 +32,7 @@ static void fail(NSString *reason) {
 @interface DockCheck ()
 @property DestinationTab *destination;
 @property NSUInteger siteRequests;
+@property (copy) NSString *clipboardFixture;
 @end
 
 @implementation DockCheck
@@ -47,6 +48,33 @@ static void fail(NSString *reason) {
     if ([type isEqual:@"test.fail"]) fail(message[@"error"]);
     if ([type isEqual:@"test.phase"]) {
         reply(@(self.loads), nil);
+    } else if ([type isEqual:@"test.showSource"]) {
+        // WebKit marks a fully offscreen window hidden. Expose a thin strip
+        // without activating the fixture app or taking keyboard focus.
+        NSRect screen = NSScreen.mainScreen.visibleFrame;
+        self.window.level = NSFloatingWindowLevel;
+        [self.window setFrameOrigin:NSMakePoint(NSMinX(screen) - NSWidth(self.window.frame) + 4, NSMinY(screen))];
+        [self.window orderFront:nil];
+        [self.view callAsyncJavaScript:@"for(let i=0;document.hidden && i<60;i++) await new Promise(r=>setTimeout(r,35)); return !document.hidden" arguments:@{} inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:^(NSNumber *visible, NSError *error) {
+            if (error || !visible.boolValue) fail(@"The test window did not become visible to WebKit.");
+            reply(@YES, nil);
+        }];
+    } else if ([type isEqual:@"test.sketch"]) {
+        NSString *setup = @"(()=>{const c=document.createElement('canvas');c.id='sketch';c.setAttribute('aria-label','Sketch pad');c.style.cssText='position:fixed;top:100px;left:12px;width:140px;height:90px;z-index:10';document.body.append(c);let held=false,moves=0;c.onpointerdown=e=>{held=e.buttons===1};c.onpointermove=e=>{if(held&&e.buttons===1)moves++};c.onpointerup=e=>{c.dataset.drawn=String(held&&moves>=3&&e.buttons===0);held=false};return true})()";
+        [self.view evaluateJavaScript:setup completionHandler:^(id success, NSError *error) {
+            if (error || ![success boolValue]) fail(@"Could not mount the WebKit drawing surface.");
+            reply(@YES, nil);
+        }];
+    } else if ([type isEqual:@"test.input"]) {
+        NSString *setup = @"(()=>{const d=document.createElement('div');d.style.cssText='position:fixed;left:4px;top:220px;width:175px;z-index:10;background:white';d.innerHTML='<input id=wkfield aria-label=Notes><p id=wktext>Alpha <strong>beta</strong> gamma.</p><button id=wkdouble style=position:static>Double target</button>';document.body.append(d);d.querySelector('button').ondblclick=e=>e.target.dataset.twice=String(e.detail===2);return true})()";
+        [self.view evaluateJavaScript:setup completionHandler:^(id ok, NSError *error) {
+            if (error || ![ok boolValue]) fail(@"Could not mount the input fixture.");
+            reply(@YES, nil);
+        }];
+    } else if ([type isEqual:@"clipboard.read"] || [type isEqual:@"clipboard.write"]) {
+        if (![message[@"generation"] isEqual:@"test"]) fail(@"Clipboard operation used the wrong test session.");
+        if ([type isEqual:@"clipboard.write"]) self.clipboardFixture = message[@"text"];
+        reply(@{@"ok":@YES, @"text":self.clipboardFixture ?: @""}, nil);
     } else if ([type isEqual:@"test.clickPermission"]) {
         // Deliver an actual pointer event to the extension iframe. A script-only
         // click cannot establish Safari's gesture for permissions.request().
@@ -70,8 +98,11 @@ static void fail(NSString *reason) {
             } else {
                 if (self.loads != 4) fail(@"Expected three full reloads.");
                 if (!self.destination || self.siteRequests != 1) fail(@"Expected one inactive destination and one exact website request.");
-                puts("System WebKit passed three dock reloads and read a second website in one inactive tab after a real permission request from the restored source pane.");
-                exit(0);
+                [self.view evaluateJavaScript:@"String(document.querySelector('button').dataset.pointerHit==='true' && document.getElementById('sketch').dataset.drawn==='true' && document.body.dataset.hover==='complete' && document.getElementById('wkdouble').dataset.twice==='true' && document.getElementById('wkfield').value==='YesHi' && document.querySelector('#wktext strong').textContent==='Hi')" completionHandler:^(id hit, NSError *error) {
+                    if (error || ![hit isEqual:@"true"]) fail([NSString stringWithFormat:@"The website's final pointer, field or text state did not match the requested actions: %@ %@", hit, error]);
+                    puts("System WebKit passed dock reloads, website permission, variable-speed scrolling, drawing, button-up pointer paths, double-click, focused typing and selection/clipboard edits on a field and page text.");
+                    exit(0);
+                }];
             }
         }];
     } else if ([type isEqual:@"auth.status"] || [type isEqual:@"auth.credential"]) {

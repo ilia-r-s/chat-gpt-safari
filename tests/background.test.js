@@ -36,21 +36,30 @@ test("a delayed response forks when a second editor changes its starting revisio
   assert.equal(f.data[`chat:${turn.chatId}`].messages[0].text, "Second editor");
 });
 test("restoring a dock reads no page and context-menu excerpts are session-bound and consumed once", async () => {
-  const f = await fixture(), reads = [];
+  const f = await fixture(), reads = [], pointers = [];
   const tab = { id: 7, windowId: 4, title: "Example", url: "https://example.com/?private=1" };
   f.api.scripting = { executeScript: async spec => {
     if (spec.files) { assert.deepEqual(Array.from(spec.files), ["content/mount.js"]); return []; }
+    if (spec.func.name === "showActionPointer") { pointers.push(spec); return []; }
     reads.push(spec); return [{ result: { text: "Shared page body", url: tab.url, title: tab.title } }];
   } };
   await f.events.action(tab); await f.events.updated(7, { status: "complete" }, tab);
   assert.equal(f.createdWindows.length, 0); assert.equal(reads.length, 0);
+  assert.equal(pointers.length, 0);
   const take = (generation = "session-a") => f.events.message({ type: "context.take", generation, account: "account-a", tabId: 7 }, f.sender);
   await f.events.menu({ menuItemId: "ask", selectionText: "Only this passage" }, tab);
   assert.equal(reads.length, 0);
+  assert.deepEqual(Array.from(pointers[0].target.frameIds), [0]);
+  assert.equal(pointers[0].args[0], tab.url);
   assert.equal((await f.events.message({ type: "bootstrap", tabId: 7 }, f.sender)).value.hasContext, true);
   const passage = (await take()).value;
   assert.equal(passage.kind, "selection"); assert.equal(passage.text, "Only this passage"); assert.equal(passage.url, "https://example.com/");
   assert.equal((await take()).value, null);
+  const frameUrl = "https://frame.example/article";
+  await f.events.menu({ menuItemId: "ask", selectionText: "A frame passage", frameId: 3, frameUrl }, tab);
+  assert.deepEqual(Array.from(pointers[1].target.frameIds), [3]);
+  assert.equal(pointers[1].args[0], frameUrl);
+  assert.equal((await take()).value.text, "A frame passage");
   await f.events.menu({ menuItemId: "ask" }, tab);
   assert.equal(reads.length, 1);
   f.setAccount("account-a", "replacement");

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { branchChat } from "../extension/panel/conversation.js";
+import { branchChat, continuationMessage } from "../extension/panel/conversation.js";
 
 const original = {
   id: "original", account: "account-a", title: "First question",
@@ -11,6 +11,13 @@ const original = {
     { role: "assistant", text: "Partial answer", error: true },
   ],
 };
+test("Continue retains the user's goal when earlier turns fall outside the history setting", () => {
+  const short = continuationMessage(original.messages, 8);
+  assert.deepEqual(short, { role: "user", text: "Please continue.", contexts: [] });
+  const single = continuationMessage(original.messages, 1);
+  assert.match(single.text, /Follow-up$/); assert.doesNotMatch(single.text, /Partial answer/);
+  assert.deepEqual(continuationMessage([...original.messages, short, short, short], 4), single);
+});
 test("editing an earlier message branches without later turns or mutations to the original", () => {
   const before = structuredClone(original);
   const branch = branchChat(original, 0, " Revised question ");

@@ -1,10 +1,18 @@
 # Validation
 
-## Development build 0.3.4 (9)
+## Development build 0.3.6 (11)
 
-The November 19, 2026 verification includes 123 JavaScript tests, 30 native XCTest cases, isolated Chrome panel and DOM checks, a 320-pixel system WebKit panel check, an installed-WebKit extension transport check, SwiftUI rendering and native MCP discovery. The unsigned macOS app and embedded extension build in Debug and Release. The Release archive contains Intel and Apple Silicon executables.
+The November 20, 2026 verification includes 126 JavaScript tests, 31 native XCTest cases, isolated Chrome panel and DOM checks, a 320-pixel system WebKit panel check, an installed-WebKit extension transport check and native MCP discovery. The unsigned macOS app and embedded extension build in Debug and Release. The Release archive contains Intel and Apple Silicon executables.
 
 The panel was compared with OpenAI’s published side-chat illustration. The behavioral checks use local pages, simulated provider replies and inert account fixtures. System WebKit runs the render checks in an ephemeral WKWebView. A nonpersistent WKWebExtensionController also supplies real toolbar, injection, runtime message, port and storage APIs. Signed Safari extension routing, real account access and live provider behavior require the installation checks below. [Official design reference](https://learn.chatgpt.com/docs/chrome-extension)
+
+The action pointer is checked at 900 and 390 pixels in Chrome. Hit tests cover a clipped button, a gallery control, a checkbox, a link before navigation, the copied selection and a chat message’s Copy button. The checks also cover clipboard rejection, cancellation, Reduce Motion, keyboard focus and cleanup. The system WebKit extension test verifies that a foreground page read displays the pointer and that the website receives its click at the marked control.
+
+A deterministic provider requested all 100 browser attempts. The tests check the tool-free final summary, bounded input with large page reads, and a batch crossing the limit. Chrome restored the exhausted counter on reload and continued with the newly configured allowance while retaining the unsent draft and file.
+
+Chrome exercised programmed scrolling distances, decimal speeds, reversal, a zero-speed pause, manual takeover, permission revocation and navigation. A drawing fixture checked ink at multiple corners, a visible pointer at a pause, button state on release, mouse-driven handle movement and cancellation. A button-up path started on blank space and changed speed between corners. The system WebKit extension exercised live speed edits in the pane, a multi-speed drag on a page-owned canvas and a separate pointer path with no press or click.
+
+The direct-input checks cover double-click order and a target replaced after the first click, field focus, individual key and input events, Enter submission, and partial selection in fields, rich editors and ordinary paragraphs. Chrome checked that edits across inline markup preserve the markup and that changed selections prevent an edit. WebKit used the production extension and a fixture clipboard to copy from a field and paste into field and paragraph selections. A native XCTest exercised the production clipboard bridge against a private macOS pasteboard, including size limits and session changes.
 
 ## Automated coverage
 
@@ -12,7 +20,7 @@ Run `./scripts/check.sh` for syntax/manifest resource checks, JavaScript unit/in
 
 - Bounded complete-turn context, newest-source deduplication, Unicode estimates, invalid URLs, and settings limits.
 - UTF-8/CRLF/multiline SSE framing, partial/failed/incomplete responses, cancellation, invalid data, and admission errors. Completed streamed tool/message items survive a metadata-only terminal event within bounded storage; failed or interrupted streams never authorize their calls. Completion-only text appears, and empty final responses fail visibly without repeating actions.
-- Public API request contract, tool-loop limits, encrypted reasoning continuity, no silent fallback billing, unknown tools and exhausted round limits. Every ordinary chat receives browser tools, including when an obsolete disabled mode is present in stored settings.
+- Public API request contract, tool-loop limits, encrypted reasoning continuity, no silent fallback billing, unknown tools and exhausted action allowances. Every ordinary chat receives browser tools, including when an obsolete disabled mode is present in stored settings.
 - Reasoning capability discovery, exact documented model fallbacks, unknown models, unavailable overrides rejected before inference, and the sending panel's effort retained across rounds. Opt-in public web search uses its documented request shape, reports activity, retains separate browser-action approvals, and does not retry provider rejection. Valid URL citations persist as clickable links; malformed/unsafe annotations and overlaps are rejected.
 - Same-name UTF-8 files retain separate IDs, indentation, tabs, line endings and literal replacement characters. Invalid bytes are rejected. Excerpt trimming accounts for both JSON encoding layers and preserves Unicode character boundaries.
 - Partial settings patches merge serially without resetting unrelated preferences or desktop consent. Text-file batches respect type, count, size, encoding and truncation bounds.

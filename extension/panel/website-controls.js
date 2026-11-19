@@ -57,6 +57,8 @@ export function setupWebsiteControls({ state, rpc, answer, openSettings, report 
   }
   function dismiss() {
     pending = null; closeChoices(); $("approval").hidden = true;
+    $("approval-path").hidden = true;
+    $("approval-path").querySelector("polyline").removeAttribute("points");
     $("approval-detail").textContent = ""; $("approval-title").textContent = ""; $("allow-host").textContent = "";
   }
   function respond(allow, scope = "once") {
@@ -73,6 +75,20 @@ export function setupWebsiteControls({ state, rpc, answer, openSettings, report 
     $("approval-more").hidden = !!request.siteOrigin;
     $("approval-title").textContent = request.title;
     $("approval-detail").textContent = request.detail;
+    const preview = $("approval-path"), points = request.path;
+    preview.hidden = !points?.length;
+    if (points?.length) {
+      const xs = points.map(p => p[0]), ys = points.map(p => p[1]);
+      const x = Math.min(...xs), y = Math.min(...ys);
+      const width = Math.max(...xs) - x, height = Math.max(...ys) - y;
+      const pad = Math.max(8, width * 0.08, height * 0.12);
+      preview.querySelector("svg").setAttribute("viewBox", [x - pad, y - pad, width + 2 * pad, height + 2 * pad].join(" "));
+      preview.querySelector("polyline").setAttribute("points", points.map(p => p.join(",")).join(" "));
+      preview.querySelectorAll("circle").forEach((circle, i) => {
+        const [cx, cy] = i ? points.at(-1) : points[0];
+        circle.setAttribute("cx", cx); circle.setAttribute("cy", cy); circle.setAttribute("r", pad * (i ? 0.44 : 0.3));
+      });
+    }
     $("allow-site").hidden = request.hosts?.length !== 1;
     $("allow-host").textContent = request.hosts?.length === 1 ? `Automatically allow browser actions on ${request.hosts[0]}.` : "";
     $("approval").hidden = false;

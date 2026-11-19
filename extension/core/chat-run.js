@@ -31,7 +31,7 @@ export class ChatRun {
   emit(event) {
     if (event.type === "delta") this.text += event.text;
     else if (event.type === "replace") this.text = event.text;
-    else if (["status", "activity", "context", "usage"].includes(event.type)) this.state.set(event.type, event);
+    else if (["status", "activity", "context", "usage", "browser.actions", "motion.state"].includes(event.type)) this.state.set(event.type, event);
     for (const port of this.ports) {
       try { port.postMessage(event); } catch { this.ports.delete(port); }
     }

@@ -1,12 +1,29 @@
 /** Self-contained functions: Safari serializes these into its isolated content-script world. */
-export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false, expectedURL = null) {
+export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false, expectedURL = null, indicateCopy = false, pointerPaths = false) {
   if (expectedURL && location.href !== expectedURL) throw new Error("The tab navigated before it could be read. Choose the page again.");
   const selection = getSelection();
   const editable = node => node?.parentElement?.closest("input,textarea,[contenteditable]");
   const selected = !editable(selection?.anchorNode) && !editable(selection?.focusNode) ? selection?.toString() ?? "" : "";
   const metadata = { title: document.title.slice(0, 180), url: location.href, selection: selected.slice(0, limit) };
-  if (selectionOnly) return { ...metadata, truncated: selected.length > limit };
   const viewportWidth = Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth);
+  // Return only the visible fragment of text included in this capture.
+  let pointerRect;
+  function markCopiedText(range) {
+    const container = range.commonAncestorContainer;
+    const parent = container.nodeType === Node.ELEMENT_NODE ? container : container.parentElement;
+    const rects = range.getClientRects();
+    for (let i = 0; i < Math.min(rects.length, 256); i++) {
+      const rect = rects[i], left = Math.max(0, rect.left), right = Math.min(viewportWidth, rect.right);
+      const top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
+      if (left >= right || top >= bottom) continue;
+      const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+      if (hit && parent?.contains(hit) && range.intersectsNode(hit)) { pointerRect = { left, right, top, bottom }; return; }
+    }
+  }
+  if (selectionOnly) {
+    if (indicateCopy && !document.hidden && selected && selection.rangeCount) markCopiedText(selection.getRangeAt(0));
+    return { ...metadata, truncated: selected.length > limit, ...(pointerRect && { pointerRect }) };
+  }
   const labelFor = element => {
     const labelled = (element.getAttribute("aria-labelledby") || "").split(/\s+/).slice(0, 8).map(id => document.getElementById(id)?.textContent?.slice(0, 120) || "").join(" ").trim();
     const field = element.matches("input,textarea,select") || element.isContentEditable;
@@ -78,16 +95,30 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
     }
   }
   let visited = 0;
+  let pointerCandidates = indicateCopy && !document.hidden ? 32 : 0;
   let node;
   while ((node = walker.nextNode()) && length < limit && ++visited <= 20000) {
     const parent = node.parentElement;
     const excluded = viewportOnly ? "script,style,noscript,textarea,input,select,[contenteditable],svg" : "script,style,noscript,nav,footer,textarea,input,select,[contenteditable],svg";
     if (!parent || parent.closest(excluded) || !visible(parent)) continue;
     if (viewportOnly) trackScrollAreas(parent);
-    const text = node.textContent.slice(0, limit - length + 1).replace(/\s+/g, " ").trim();
-    if (text) { chunks.push(text.slice(0, limit - length)); length += text.length + 1; }
+    const source = node.data.slice(0, limit - length + 1);
+    const text = source.replace(/\s+/g, " ").trim();
+    if (text) {
+      if (pointerCandidates && !pointerRect) {
+        const box = parent.getBoundingClientRect();
+        if (box.right > 0 && box.left < viewportWidth && box.bottom > 0 && box.top < innerHeight) {
+          pointerCandidates--;
+          const range = document.createRange(), start = source.search(/\S/);
+          range.setStart(node, start);
+          range.setEnd(node, start + Math.min(text.length, limit - length, 80));
+          markCopiedText(range);
+        }
+      }
+      chunks.push(text.slice(0, limit - length)); length += text.length + 1;
+    }
   }
-  const excerpt = { ...metadata, text: chunks.join("\n"), truncated: captionsTrimmed || length >= limit || visited > 20000 };
+  const excerpt = { ...metadata, text: chunks.join("\n"), truncated: captionsTrimmed || length >= limit || visited > 20000, ...(pointerRect && { pointerRect }) };
   if (!viewportOnly) return excerpt;
   // getRandomValues also works on ordinary HTTP pages; randomUUID requires a secure context.
   const prefix = [...crypto.getRandomValues(new Uint8Array(8))].map(byte => byte.toString(16).padStart(2, "0")).join("");
@@ -98,6 +129,10 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
   const add = (element, label, properties, budget = 4300, extra = {}) => {
     const id = `${prefix}-${elements.length + 1}`;
     const entry = { id, tag: element.tagName.toLowerCase(), label, ...properties };
+    if (pointerPaths) {
+      const rect = element.getBoundingClientRect();
+      entry.bounds = [Math.max(0, rect.left), Math.max(0, rect.top), Math.min(viewportWidth, rect.right), Math.min(innerHeight, rect.bottom)].map(Math.round);
+    }
     const size = JSON.stringify(entry).length;
     if (elementChars + size > budget) { elementsTruncated = true; return; }
     elementChars += size;
@@ -144,16 +179,28 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
     add(list, `${label} navigation`, { actions: ["scroll"], kind: "carousel", directions: orientation === "vertical" ? ["up", "down"] : ["left", "right"], currentItem: selected + 1, itemCount: tabs.length }, 1500, { gallery });
   }
   let examined = 0;
-  for (const element of document.querySelectorAll("a[href],button,input,textarea,select,[role='button'],[role='tab'],[role='checkbox'],[role='radio'],[role='combobox'],[role='option'],[contenteditable='true'],[contenteditable='plaintext-only']")) {
+  const controls = "a[href],button,input,textarea,select,[role='button'],[role='tab'],[role='checkbox'],[role='radio'],[role='combobox'],[role='option'],[contenteditable='true'],[contenteditable='plaintext-only']";
+  const dragTargets = "canvas,[draggable='true'],[role='slider'],[role='application'],[data-drag-handle]";
+  const doubleTargets = "[ondblclick],[role=row],[role=gridcell],[role=treeitem],[role=listitem]";
+  const candidates = pointerPaths ? controls + "," + dragTargets + "," + doubleTargets + ",[style*='cursor' i],[class*='handle' i],[class*='dragg' i]" : controls;
+  for (const element of document.querySelectorAll(candidates)) {
     if (elements.length >= 50 || ++examined > 5000) { elementsTruncated = true; break; }
     if (!visible(element) || element.matches(":disabled,[aria-disabled='true'],input[type='hidden'],input[type='password'],input[type='file']")) continue;
     const label = labelFor(element);
     if (sensitive.test([label, element.name, element.id, element.autocomplete, element.getAttribute("placeholder")].join(" "))) continue;
     trackScrollAreas(element);
-    let actions = ["click"];
+    const actions = element.matches(controls) ? ["click"] : [];
+    if (pointerPaths && (element.matches(dragTargets + ",input[type='range']") || /^(grab|grabbing|move|crosshair|[nesw]+-resize)$/.test(getComputedStyle(element).cursor))) actions.push("drag");
+    if (pointerPaths && (actions.length || element.matches(doubleTargets))) actions.push("double_click");
+    if (!actions.length) continue;
     if (element.matches("input[type='checkbox'],input[type='radio']")) actions.push("set_checked");
     else if (element instanceof HTMLSelectElement) { if (!element.multiple) actions.push("select"); }
     else if (!element.readOnly && (element.matches("input:not([type='button']):not([type='submit']):not([type='reset']):not([type='image']),textarea") || element.isContentEditable)) actions.push("fill");
+    const edit = element.matches("textarea,input:not([type]),input:is([type=text],[type=search],[type=url],[type=tel],[type=email])") || element.isContentEditable;
+    if (pointerPaths && edit) {
+      actions.push("select_text");
+      if (!element.readOnly) actions.push("type_text", "press_key");
+    }
     let options;
     if (element instanceof HTMLSelectElement) {
       options = [];
@@ -170,7 +217,16 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
       const target = new URL(destination);
       if (target.hostname && target.hostname !== location.hostname) destinationHost = target.hostname;
     }
-    add(element, label, { actions, ...(destinationHost ? { destinationHost } : {}), ...(element.getAttribute("role") === "tab" ? { role: "tab", selected: element.getAttribute("aria-selected") === "true" } : {}), ...(element.type ? { type: element.type } : {}), ...(element.required ? { required: true } : {}), ...(options ? { options, optionsTruncated: element.options.length > options.length } : {}) });
+    const fieldInfo = {};
+    if (pointerPaths && edit) {
+      fieldInfo.focused = document.activeElement === element;
+      if (element.form) {
+        const submit = Array.from(element.form.elements).find(node => ["submit", "image"].includes(node.type) && !node.disabled);
+        const action = submit?.hasAttribute("formaction") ? submit.formAction : element.form.action;
+        if (URL.canParse(action)) fieldInfo.submitHost = new URL(action).hostname;
+      }
+    }
+    add(element, label, { actions, ...fieldInfo, ...(destinationHost ? { destinationHost } : {}), ...(element.getAttribute("role") === "tab" ? { role: "tab", selected: element.getAttribute("aria-selected") === "true" } : {}), ...(element.type ? { type: element.type } : {}), ...(element.required ? { required: true } : {}), ...(options ? { options, optionsTruncated: element.options.length > options.length } : {}) });
   }
   // Image-only strips have no text or clickable descendants to discover them.
   let media = 0;
@@ -182,7 +238,7 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
     if (!visible(area) || galleries.some(gallery => gallery.scope.contains(area) && getComputedStyle(area).overflowX === "hidden")) continue;
     add(area, labelFor(area), { actions: ["scroll"], directions: scrollDirections(area), scrollTop: Math.round(area.scrollTop), scrollLeft: Math.round(area.scrollLeft) }, 5000);
   }
-  globalThis.__safariChatRefs = { url: location.href, refs };
+  globalThis.__safariChatRefs = { url: location.href, refs, viewport: { width: viewportWidth, height: innerHeight, x: scrollX, y: scrollY } };
   const page = document.scrollingElement ?? document.documentElement;
   return {
     ...excerpt, elements, elementsTruncated,
@@ -191,7 +247,7 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
   };
 }
 
-export function actOnPage(operation, elementId, text, expectedURL, { direction, checked } = {}) {
+export function actOnPage(operation, elementId, text, expectedURL, { direction, checked, preview = false, motionId, speed, path, speedChanges, inputOwner } = {}) {
   const state = globalThis.__safariChatRefs;
   if (!state || state.url !== location.href || location.href !== expectedURL) throw new Error("The page changed. Read it again before acting.");
   const labelFor = element => {
@@ -201,10 +257,14 @@ export function actOnPage(operation, elementId, text, expectedURL, { direction, 
   };
   const signature = (element, ignoreSelection = false) => JSON.stringify([element.tagName, element.type, element.name, element.getAttribute("role"), element.getAttribute("href"), element.closest("a[href]")?.href, element.getAttribute("target"), element.getAttribute("download"), element.form?.action, element.form?.method, element.getAttribute("formaction"), element.formAction, element.getAttribute("aria-controls"), ignoreSelection ? null : element.getAttribute("aria-selected"), element.getAttribute("aria-orientation")]);
   const reference = state.refs.get(elementId);
-  const element = reference?.element;
+  const freePointer = operation === "move_pointer" && !elementId;
+  const element = freePointer ? document.documentElement : reference?.element;
   const pageScroll = operation === "scroll" && !elementId;
   let label = "Page";
-  if (!pageScroll) {
+  const pageInput = operation === "bind_input" && !elementId;
+  function validate() {
+    if (location.href !== expectedURL) throw new Error("The page changed. Read it again.");
+    if (pageScroll || pageInput || freePointer) return;
     if (!element?.isConnected || element.matches(":disabled,[aria-disabled='true']") || !element.getClientRects().length || element.closest("[hidden],[inert],[aria-hidden='true'],#safari-chat-host")) throw new Error("This element changed or is no longer available. Read the page again.");
     const style = getComputedStyle(element);
     if (style.visibility !== "visible" || style.opacity === "0") throw new Error("This element is no longer visible. Read the page again.");
@@ -216,8 +276,41 @@ export function actOnPage(operation, elementId, text, expectedURL, { direction, 
     if (label !== reference.label || signature(element) !== reference.signature) throw new Error("The element changed since approval. Read the page again.");
     if (element.matches("input[type='password'],input[type='file'],input[type='hidden']") || /password|passcode|credit.?card|debit.?card|card.?number|\bcc[-_](number|csc|exp|name)|\bcvc\b|\bcvv\b|security.?code|verification.?code|one.?time|\botp\b|secret|token/i.test([label, element.name, element.id, element.autocomplete, element.getAttribute("placeholder")].join(" "))) throw new Error("Enter sensitive information directly in the website.");
   }
-  // Invalidate even if a page handler rejects or changes the requested value.
-  globalThis.__safariChatRefs = null;
+  validate();
+  function bindInput() {
+    const prior = globalThis.__safariChatInput;
+    prior?.dispose();
+    const node = pageInput ? document.body : element;
+    const binding = { owner: inputOwner, element: node, url: expectedURL, validate, page: pageInput,
+      dispose() {
+        clearTimeout(binding.timer);
+        binding.typing?.abort();
+        if (globalThis.__safariChatInput === binding) delete globalThis.__safariChatInput;
+      },
+    };
+    binding.timer = setTimeout(binding.dispose, 300000);
+    globalThis.__safariChatInput = binding;
+  }
+  if (operation === "bind_input") {
+    bindInput();
+    globalThis.__safariChatRefs = null;
+    return { ok: true, label };
+  }
+  // A preview resolves the same validated target, but leaves the real action single-use.
+  if (preview && (document.hidden || !(operation === "click" || operation === "set_checked" || reference?.gallery && operation === "scroll"))) return {};
+  if (!preview) globalThis.__safariChatRefs = null;
+  if (operation === "drag" || operation === "move_pointer") {
+    const motion = globalThis.__safariChatStartPath(motionId, element, operation, path, speed, state.viewport);
+    return { ok: true, operation, label, motion };
+  }
+  function click(target) {
+    if (preview) {
+      state.pointerTarget = { id: elementId, element: target };
+      return;
+    }
+    state.showPointer?.(expectedURL, target, "press");
+    target.click();
+  }
   if (operation === "scroll") {
     if (!["up", "down", "left", "right", "top", "bottom"].includes(direction)) throw new Error("Choose a valid scroll direction.");
     const gallery = reference?.gallery;
@@ -245,12 +338,17 @@ export function actOnPage(operation, elementId, text, expectedURL, { direction, 
         const style = getComputedStyle(parent), clip = parent.getBoundingClientRect();
         if (++depth > 64 || style.opacity === "0" || (/auto|scroll|hidden|clip/.test(style.overflowX) && (rect.right <= clip.left || rect.left >= clip.right)) || (/auto|scroll|hidden|clip/.test(style.overflowY) && (rect.bottom <= clip.top || rect.top >= clip.bottom))) throw new Error("The next gallery control is not visible. Read the page again.");
       }
-      control.click();
+      click(control);
+      if (preview) return { pointer: true };
       return { ok: true, operation, dispatched: true, fromItem: selected + 1, requestedItem: next + 1, message: "Gallery navigation activated. Read the page again to verify the newly visible cards." };
     }
     const target = pageScroll ? document.scrollingElement ?? document.documentElement : element;
     const axis = ["left", "right"].includes(direction) ? "overflowX" : "overflowY";
     if (!pageScroll && !/^(auto|scroll|hidden)$/.test(getComputedStyle(target)[axis])) throw new Error("This area cannot scroll in that direction. Use its listed directions or gallery controls.");
+    if (motionId) {
+      const motion = globalThis.__safariChatStartScroll(target, motionId, direction, speed, speedChanges ?? []);
+      return { ok: true, operation, label, motion };
+    }
     const before = { x: target.scrollLeft, y: target.scrollTop };
     let top = before.y, left = before.x;
     const height = pageScroll ? innerHeight : target.clientHeight;
@@ -273,13 +371,21 @@ export function actOnPage(operation, elementId, text, expectedURL, { direction, 
       const url = new URL(destination);
       if (!/^https?:$/.test(url.protocol) || url.username || url.password) throw new Error("Only ordinary web links can be opened.");
     }
-    element.click();
-    return { ok: true, operation, label, message: "Click dispatched. Read the page again to verify the outcome." };
+    const editable = element.matches("textarea,input:not([type]),input:is([type=text],[type=search],[type=url],[type=tel],[type=email])") || element.isContentEditable;
+    if (!preview && editable) element.focus({ preventScroll: true });
+    click(element);
+    if (preview) return { pointer: true };
+    const focused = editable && document.activeElement === element;
+    if (inputOwner && focused) bindInput();
+    return { ok: true, operation, label, focused, message: "Click dispatched. Read the page again to verify the outcome." };
   }
   if (operation === "set_checked") {
     if (!element.matches("input[type='checkbox'],input[type='radio']") || typeof checked !== "boolean") throw new Error("Choose a checkbox or radio button and a boolean checked state.");
     if (element.type === "radio" && !checked) throw new Error("Select another radio option instead of unchecking this one.");
-    if (element.checked !== checked) element.click();
+    if (element.checked !== checked) {
+      click(element);
+      if (preview) return { pointer: true };
+    }
     if (element.checked !== checked) throw new Error("The page did not keep the requested checked state. Read it again.");
     return { ok: true, operation, label, checked: element.checked };
   }

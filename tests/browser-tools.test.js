@@ -10,7 +10,12 @@ function fixture(approval = async () => {}) {
     get: async id => ({ id, url, title: "Example" }), query: async () => [{ id: 1, url, title: "Example" }],
     create: async params => { writes.push(params); return { id: 2 }; },
     update: async (...params) => { writes.push(params); }, remove: async id => { writes.push(id); },
-  }, scripting: { executeScript: async ({ func, args }) => func.name === "snapshotPage" ? [{ result: { url, title: "Example", text: "Page", elements: [{ id: "ref-1", label: "Submit" }] } }] : (writes.push(args), [{ result: { ok: true } }]) } };
+  }, scripting: { executeScript: async ({ func, args }) => {
+    if (func.name === "snapshotPage") return [{ result: { url, title: "Example", text: "Page", elements: [{ id: "ref-1", label: "Submit" }] } }];
+    if (args[4]?.preview) return [{ result: {} }];
+    writes.push(args);
+    return [{ result: { ok: true } }];
+  } } };
   return { api, execute: createBrowserTools({ api, pageChars: 6000, approve: approval }), writes, navigate: value => { url = value; } };
 }
 const signal = new AbortController().signal;
@@ -147,7 +152,8 @@ test("losing the click acknowledgement during navigation asks for a fresh read w
   f.api.tabs.onUpdated = { addListener: fn => updates.add(fn), removeListener: fn => updates.delete(fn) };
   await f.execute({ operation: "read", tabId: 1 }, signal);
   let clicks = 0;
-  f.api.scripting.executeScript = async () => {
+  f.api.scripting.executeScript = async ({ args }) => {
+    if (args[4]?.preview) return [{ result: {} }];
     clicks++;
     f.navigate("https://example.com/next");
     for (const listener of updates) listener(1, { status: "complete" }, await f.api.tabs.get(1));

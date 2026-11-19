@@ -1,11 +1,12 @@
 import { DEFAULTS } from "../core/config.js";
 import { estimateTokens } from "../core/context.js";
 import { markdown } from "./markdown.js";
-import { branchChat } from "./conversation.js";
+import { branchChat, continuationMessage } from "./conversation.js";
 import { EFFORT_LABELS } from "../core/models.js";
 import { setupAttachments } from "./attachments.js";
 import { setupWebsiteControls } from "./website-controls.js";
 import { accessKey } from "../core/website-access.js";
+import { showActionPointer } from "../content/action-pointer.js";
 
 const $ = id => document.getElementById(id);
 const tabParameter = new URL(location.href).searchParams.get("tab");
@@ -48,7 +49,7 @@ let themeOverride = null;
 let themeSave = Promise.resolve();
 let modelIntent = null;
 let modelSave = Promise.resolve();
-const settingFields = { "desktop-setting": "desktopControl", "page-setting": "pageChars", "budget-setting": "inputChars", "turns-setting": "historyTurns" };
+const settingFields = { "desktop-setting": "desktopControl", "page-setting": "pageChars", "budget-setting": "inputChars", "turns-setting": "historyTurns", "actions-setting": "maxBrowserActions" };
 const savingFields = new Set();
 
 const rpc = async (type, payload = {}) => {
@@ -224,6 +225,7 @@ function renderMessages() {
   $("history-button").title = chat.messages.length ? `${chat.title} · Recent chats` : "Recent chats";
   $("prompt").placeholder = chat.messages.length ? "Ask for follow-up changes" : "Ask anything or @mention a tab";
   renderConnection();
+  renderActionBudget();
   updateChatURL();
   chat.messages.forEach((message, index) => appendMessage(message, index));
 }
@@ -241,6 +243,21 @@ function renderConnection() {
   $("run-options").hidden = !connected || removing;
   $("composer").hidden = !connected || removing;
   $("retry-models").hidden = !connected || !!loadingCatalog || modelChoices.length > 0;
+}
+function renderActionBudget() {
+  const last = chat?.messages.at(-1);
+  const actions = !preparing && last?.role === "assistant" ? last.browserActions : undefined;
+  const limit = actions?.limit ?? prefs.maxBrowserActions;
+  const used = actions?.used ?? 0;
+  const exhausted = !!actions && used === limit && !running;
+  $("action-budget").hidden = !ready || !auth.canInfer || removing;
+  const legacy = !actions && !running && last?.role === "assistant";
+  $("actions-left").textContent = legacy ? `Next message · ${limit} browser actions available` : `${limit - used}/${limit} browser actions left${used && used < limit ? ` · ${used} used` : ""}`;
+  $("actions-left").title = actions ? `${used} of ${limit} attempts used for this message. A new message allows ${prefs.maxBrowserActions}.` : `Your next message allows ${limit} browser actions.`;
+  const note = exhausted ? "Limit reached." : "";
+  if ($("action-limit-note").textContent !== note) $("action-limit-note").textContent = note;
+  $("continue-actions").hidden = !exhausted;
+  $("continue-actions").disabled = switching || !ready || removing || !$("model").value;
 }
 function updateChatURL() {
   if (window.top !== window || removing) return;
@@ -261,7 +278,11 @@ function appendMessage(message, index) {
   const article = document.createElement("article"); article.className = `message ${message.role}`;
   const tools = document.createElement("div"); tools.className = "message-tools";
   const copy = messageButton("Copy", "M8 8h12v13H8zM16 8V3H3v13h5");
-  copy.onclick = guard(async () => { await navigator.clipboard.writeText(message.text); notice("Copied to clipboard.", true); });
+  copy.onclick = guard(async () => {
+    await navigator.clipboard.writeText(message.text);
+    showActionPointer(location.href, copy, "copy");
+    notice("Copied to clipboard.", true);
+  });
   tools.append(copy);
   if (message.role === "user") {
     const body = document.createElement("div"); body.className = "user-content"; body.textContent = message.text;
@@ -352,7 +373,8 @@ function setRunning(value) {
   for (const id of ["attach-file", "file-input", "add-button", "menu-page", "menu-tabs"]) $(id).disabled = preparing || switching || removing || !ready;
   for (const button of document.querySelectorAll("#attachments button, [data-prompt]")) button.disabled = preparing || switching || removing || !ready;
   resizePrompt();
-  if (!value) websiteUI.dismiss();
+  renderActionBudget();
+  if (!value) { websiteUI.dismiss(); $("motion-controls").hidden = true; }
 }
 function acceptSave(owner, saved) {
   const fork = saved.id !== owner.id;
@@ -404,8 +426,23 @@ function handleStream(event, runID, draftChatId) {
     loadChat(draftChatId ?? event.saved?.id ?? runID).then(() => { if (event.message && version === accountChange) notice(event.message); })
       .catch(error => notice(error.message)).finally(() => { if (version === accountChange) { switching = false; setRunning(false); } });
   } else if (event.type === "approval.answered") websiteUI.dismiss();
-  else if (event.type === "activity") {
-    const names = { read: "Read page", click: "Click element", fill: "Fill field", select: "Choose option", set_checked: "Change checked state", scroll: "Scroll page", navigate: "Visit page", open_tab: "Open tab", close_tab: "Close tab", list_tabs: "List tabs", web_search: "Search the web" };
+  else if (event.type === "browser.actions") {
+    chat.messages.at(-1).browserActions = event.actions;
+    renderActionBudget();
+  }
+  else if (event.type === "motion.error") notice(event.message);
+  else if (event.type === "motion.state") {
+    const state = event.state, controls = $("motion-controls"), speed = $("motion-speed");
+    controls.hidden = !state.active;
+    if (state.active) {
+      const name = state.kind === "scroll" ? "Scrolling " + state.direction : state.kind === "drag" ? "Dragging" : "Moving pointer";
+      $("motion-status").textContent = state.speed === 0 ? name + " · Paused" : name;
+      if (controls.dataset.motionId !== state.id || document.activeElement !== speed) speed.value = state.speed;
+      controls.dataset.motionId = state.id;
+      $("stop-motion").textContent = state.kind === "scroll" ? "Stop scrolling" : state.kind === "drag" ? "Stop dragging" : "Stop pointer";
+    }
+  } else if (event.type === "activity") {
+    const names = { read: "Read page", click: "Click element", fill: "Fill field", select: "Choose option", set_checked: "Change checked state", scroll: "Scroll page", double_click: "Double-click", type_text: "Type into field", press_key: "Press key", select_text: "Select text", copy: "Copy selection", paste: "Paste text", delete_selection: "Delete selection", replace_selection: "Replace selection", drag: "Drag pointer", move_pointer: "Move pointer", set_speed: "Change speed", wait_motion: "Wait for motion", stop_motion: "Stop motion", navigate: "Visit page", open_tab: "Open tab", close_tab: "Close tab", list_tabs: "List tabs", web_search: "Search the web" };
     $("activity").hidden = false;
     $("activity").dataset.state = event.state;
     if (currentAssistant && !chat.messages.at(-1).text) currentAssistant.textContent = "";
@@ -436,7 +473,7 @@ async function send(event) {
   const text = $("prompt").value.trim(); if (!text) return;
   await startResponse({ ...chat, messages: [...chat.messages, { role: "user", text, contexts: structuredClone(contexts) }], title: chat.messages.length ? chat.title : text.slice(0, 80) });
 }
-async function startResponse(candidate) {
+async function startResponse(candidate, { keepDraft = false } = {}) {
   if (running || switching || removing || !ready) return;
   if (!auth.connected || !auth.canInfer) throw new Error("Connect your ChatGPT account or API key in the companion app first.");
   if (!$("model").value) throw new Error("Choose a model before sending a message.");
@@ -463,7 +500,9 @@ async function startResponse(candidate) {
   if (removing || version !== accountChange) return;
   if (cancelPreparation) { setRunning(false); notice("Response stopped before sending.", true); return; }
   chat = candidate;
-  contexts = []; renderAttachments(); $("prompt").value = ""; $("prompt").style.height = "auto";
+  if (!keepDraft) {
+    contexts = []; renderAttachments(); $("prompt").value = ""; $("prompt").style.height = "auto";
+  }
   persistDraft().catch(() => {});
   $("edit-dialog").close();
   $("prompt").focus();
@@ -622,6 +661,7 @@ function syncFields() {
     if (savingFields.has(id)) continue;
     if (key === "desktopControl") $(id).checked = prefs[key]; else $(id).value = prefs[key];
   }
+  renderActionBudget();
 }
 function openSettings() {
   $("theme-setting").value = prefs.theme; syncFields();
@@ -653,6 +693,12 @@ $("composer").onsubmit = guard(send);
 $("prompt").onkeydown = guard(event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) return send(event); });
 $("prompt").oninput = () => { resizePrompt(); scheduleDraft(); };
 $("stop-button").onclick = () => { if (preparing) cancelPreparation = true; port?.postMessage({ type: "cancel" }); websiteUI.dismiss(); };
+$("stop-motion").onclick = () => port?.postMessage({ type: "motion.stop", id: $("motion-controls").dataset.motionId });
+$("motion-speed").onchange = () => {
+  const field = $("motion-speed");
+  if (field.reportValidity()) port?.postMessage({ type: "motion.speed", id: $("motion-controls").dataset.motionId, speed: field.valueAsNumber });
+};
+$("motion-speed").onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } };
 $("new-button").onclick = guard(() => navigateChat());
 $("close-button").onclick = guard(async () => { await persistDraft(); await rpc("panel.close"); if (window.top === window) window.close(); });
 $("edit-form").onsubmit = guard(async event => {
@@ -708,8 +754,17 @@ $("source-button").onclick = guard(async () => {
   await rpc("panel.source");
 });
 $("retry-theme").onclick = guard(() => changeTheme(prefs.theme));
+$("continue-actions").onclick = guard(async () => {
+  const count = chat.messages.at(-1)?.browserActions;
+  if (!count || count.used !== count.limit) return;
+  await startResponse({ ...chat, messages: [...chat.messages, continuationMessage(chat.messages, prefs.historyTurns)] }, { keepDraft: true });
+});
 for (const [id, key] of Object.entries(settingFields)) $(id).onchange = async () => {
   const field = $(id);
+  if (!field.validity.valid) {
+    $("settings-status").textContent = `Enter a whole number from ${field.min} to ${field.max}.`;
+    field.reportValidity(); return;
+  }
   savingFields.add(id); field.disabled = true;
   try {
     await savePreferences({ [key]: key === "desktopControl" ? field.checked : Number(field.value) });
@@ -722,6 +777,7 @@ for (const [id, key] of Object.entries(settingFields)) $(id).onchange = async ()
   }
 };
 function saveModelSelection() {
+  renderActionBudget();
   $("effort-name").textContent = EFFORT_LABELS[$("effort").value];
   const choice = { model: $("model").value, reasoningEffort: $("effort").value };
   modelIntent = choice; Object.assign(prefs, choice); preferenceRevision++;

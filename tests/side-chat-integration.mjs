@@ -122,6 +122,57 @@ export async function testSideChatIntegration(browser, origin) {
   } finally { await context.close(); }
 }
 
+export async function testActionAllowance(browser, origin) {
+  const page = await browser.newPage({ viewport: { width: 440, height: 720 } });
+  const gate = Promise.withResolvers();
+  try {
+    const operations = Array.from({ length: 100 }, () => ({ operation: "list_tabs" }));
+    const f = await fixture({ toolRequest: operations });
+    f.data["website-access:account-a"] = { mode: "auto", allowed: [], blocked: [] };
+    let lists = 0;
+    f.api.tabs.query = async () => { if (++lists === 99) await gate.promise; return []; };
+    await connectPanel(page, f);
+    await page.goto(origin + "/panel/panel.html?tab=1");
+    const prompt = page.locator("#prompt"), meter = page.locator("#actions-left");
+    await meter.filter({ hasText: /^100\/100 browser actions left$/ }).waitFor();
+    await prompt.fill("Check my open tabs until the browser action allowance is used."); await prompt.press("Enter");
+    await meter.filter({ hasText: "1/100 browser actions left · 99 used" }).waitFor();
+    await page.locator("#settings-button").click();
+    await page.getByText("Context and usage", { exact: true }).click();
+    const setting = page.locator("#actions-setting");
+    assert.equal(await setting.inputValue(), "100");
+    await setting.fill("7"); await setting.press("Tab");
+    await page.getByText("Setting saved.", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "Close settings" }).click();
+    assert.match(await meter.innerText(), /^1\/100 /);
+    await prompt.fill("Keep this private follow-up draft.");
+    await page.locator("#file-input").setInputFiles({ name: "draft.txt", mimeType: "text/plain", buffer: Buffer.from("unsent evidence") });
+    await page.locator("#attachments").getByText("draft.txt").waitFor();
+    gate.resolve();
+    const more = page.getByRole("button", { name: "Continue", exact: true });
+    await more.waitFor();
+    assert.equal(lists, 100); assert.equal(f.requests.length, 101); assert.equal(f.requests.at(-1).tools, undefined);
+    await page.reload();
+    await more.waitFor();
+    assert.equal(await meter.textContent(), "0/100 browser actions left");
+    assert.equal(await prompt.inputValue(), "Keep this private follow-up draft.");
+    await page.screenshot({ path: "build/screenshots/panel-action-limit.png" });
+    await page.setViewportSize({ width: 320, height: 640 });
+    const button = await more.boundingBox();
+    assert.ok(button.x >= 0 && button.x + button.width <= 320 && button.y + button.height <= 640);
+    await more.click();
+    await meter.filter({ hasText: "7/7 browser actions left" }).waitFor();
+    await page.waitForFunction(() => document.getElementById("stop-button").hidden && document.querySelectorAll("#messages .assistant").length === 2);
+    assert.equal(f.requests.length, 102); assert.equal(lists, 100);
+    assert.ok(f.requests.at(-1).tools); assert.equal(f.requests.at(-1).input.at(-1).content, "Please continue.");
+    assert.doesNotMatch(JSON.stringify(f.requests.at(-1)), /unsent evidence|private follow-up draft/);
+    assert.equal(await prompt.inputValue(), "Keep this private follow-up draft.");
+    await page.locator("#attachments").getByText("draft.txt").waitFor();
+    assert.equal(await more.isVisible(), false);
+    console.log("Action allowance passed 100 dispatches, draft recovery, a changed next-message limit and one explicit continuation.");
+  } finally { gate.resolve(); await page.close(); }
+}
+
 // The source and panel run at distinct origins. Each real navigation destroys
 // the iframe and its port. Only the extension transport, account and SSE server are fixtures.
 export async function testDockWorkflow(browser, origin) {
@@ -210,7 +261,14 @@ export async function testDockWorkflow(browser, origin) {
     f.api.scripting = { executeScript: async ({ target, files, func, args }) => {
       assert.equal(target.tabId, 1);
       if (files) { assert.deepEqual(Array.from(files), ["content/mount.js"]); await source.evaluate(script); return []; }
-      if (func.name === "actOnPage" && args[0] === "click") clicks++;
+      if (func.name === "actOnPage" && args[0] === "click" && !args[4]?.preview) {
+        clicks++;
+        assert.equal(await source.evaluate(() => {
+          const pointer = window.__safariChatActionPointer, link = document.querySelector("main a");
+          const box = pointer?.position.getBoundingClientRect(), dock = document.getElementById("safari-chat-host").getBoundingClientRect();
+          return !!box && pointer.host.getBoundingClientRect().right <= dock.left + 1 && link.contains(document.elementFromPoint(box.left + 3, box.top + 3));
+        }), true, "the pointer lands on the link in the page column before it navigates");
+      }
       const result = await source.evaluate(({ code, args }) => eval(`(${code})`)(...args), { code: func.toString(), args });
       if (func.name === "snapshotPage") {
         reads++; if (reads === 1) actions[2].elementId = result.elements.find(item => item.label === "Continue").id;
@@ -234,6 +292,7 @@ export async function testDockWorkflow(browser, origin) {
     const second = await panel();
     assert.ok(first.isDetached()); assert.notEqual(first, second);
     await second.locator("#approval").getByText("Navigate this tab?").waitFor();
+    assert.match(await second.locator("#actions-left").textContent(), /^99\/100 /);
     assert.equal(await prompt(second).inputValue(), "Keep this follow-up draft.");
     assert.equal(f.requests.length, 1); assert.equal(reads, 0);
     await second.getByRole("button", { name: "More approval options" }).click();
@@ -257,6 +316,7 @@ export async function testDockWorkflow(browser, origin) {
     await source.goBack();
     const back = await panel();
     await back.locator("#messages .assistant").getByText("First part, completed.", { exact: true }).waitFor();
+    assert.match(await back.locator("#actions-left").textContent(), /^95\/100 /);
     assert.equal(await prompt(back).inputValue(), "Keep this follow-up draft.");
     const chats = Object.keys(f.data).filter(key => key.startsWith("chat:"));
     assert.equal(chats.length, 1); assert.equal(f.data[chats[0]].messages.length, 2);

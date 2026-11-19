@@ -11,3 +11,16 @@ export function branchChat(chat, userIndex, text = chat.messages[userIndex]?.tex
     title: `${(userIndex === 0 ? text.trim() : chat.title).slice(0, 80)} · Revision`, messages,
   };
 }
+
+export function continuationMessage(messages, historyTurns) {
+  const users = messages.filter(message => message.role === "user");
+  const index = users.findLastIndex(message => message.text !== "Please continue.");
+  let text = "Please continue.";
+  // Keep the request self-contained when a short history window drops the goal.
+  if (index >= 0 && users.length - index >= historyTurns) {
+    const prefix = "Check the current state and continue this task from its last verified step.\n\n";
+    const goal = users[index].text;
+    text = goal.startsWith(prefix) || goal.length + prefix.length > 12000 ? goal : prefix + goal;
+  }
+  return { role: "user", text, contexts: [] };
+}

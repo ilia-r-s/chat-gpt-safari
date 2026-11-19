@@ -9,8 +9,12 @@ import { pathToFileURL } from "node:url";
 import { snapshotPage, actOnPage } from "../extension/content/page.js";
 import { testPageInteractions } from "./page-interactions.mjs";
 import { testGalleryInteractions } from "./gallery-interactions.mjs";
-import { testSideChatIntegration, testDockWorkflow } from "./side-chat-integration.mjs";
+import { testSideChatIntegration, testDockWorkflow, testActionAllowance } from "./side-chat-integration.mjs";
 import { testBrowserAgent } from "./browser-agent.mjs";
+import { testContinuousScroll } from "./continuous-scroll.mjs";
+import { testDirectInput } from "./direct-input.mjs";
+import { testPointerPaths } from "./pointer-paths.mjs";
+import { testActionPointer } from "./action-pointer.mjs";
 import { testWebKitDock } from "./webkit-dock.mjs";
 import { testPanelMount } from "./panel-mount.mjs";
 import { testComposerFeatures } from "./composer-features.mjs";
@@ -232,6 +236,21 @@ try {
   assert.equal(await page.locator("#messages img").count(), 0);
   assert.match(await page.locator("#activity-label").textContent(), /Fill field.*Done/);
   assert.match(await page.locator("#activity-detail").textContent(), /not submitted/);
+  const copy = page.locator(".assistant").getByRole("button", { name: "Copy", exact: true });
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async text => { window.copied = text; } } });
+  });
+  await copy.click();
+  assert.match(await page.evaluate(() => window.copied), /Response 1/);
+  assert.equal(await copy.evaluate(button => {
+    const box = window.__safariChatActionPointer.position.getBoundingClientRect();
+    return button.contains(document.elementFromPoint(box.left + 3, box.top + 3));
+  }), true);
+  await page.locator("#safari-chat-action-pointer").waitFor({ state: "detached" });
+  await page.evaluate(() => { navigator.clipboard.writeText = async () => { throw Error("Clipboard denied"); }; });
+  await copy.click();
+  await page.locator("#notice").filter({ hasText: "Clipboard denied" }).waitFor();
+  assert.equal(await page.locator("#safari-chat-action-pointer").count(), 0);
   await page.evaluate(() => { delete globalThis.__browserActivity; });
   await page.getByRole("textbox", { name: "Message Safari Chat" }).fill("And the next point?");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
@@ -380,8 +399,13 @@ try {
   assert.deepEqual(errors, []);
   await testPageInteractions(browser);
   await testGalleryInteractions(browser);
+  await testActionPointer(browser, origin);
   await testBrowserAgent(browser, origin);
+  await testContinuousScroll(browser, origin);
+  await testPointerPaths(browser, origin);
+  await testDirectInput(browser, origin);
   await testSideChatIntegration(browser, origin);
+  await testActionAllowance(browser, origin);
   await testPanelMount(browser, origin);
   await testDockWorkflow(browser, origin);
   if (process.env.SAFARI_CHAT_WEBKIT === "1") {

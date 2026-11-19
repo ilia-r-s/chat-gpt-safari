@@ -40,13 +40,73 @@ test("unknown tools cannot execute", async () => {
   await assert.rejects(runAgent(base, dependencies), /unknown tool/);
   assert.equal(executed, false);
 });
-test("repeated tool requests terminate at the configured round limit", async () => {
+test("the tool-free summary cannot issue more actions", async () => {
   let requests = 0;
   await assert.rejects(runAgent({ ...base, settings: { maxToolRounds: 1 } }, {
     credential: async () => "test", emit() {}, executeTool: async () => ({ ok: true }),
     fetchImpl: async () => { requests++; return stream({ output: [{ type: "function_call", name: "browser", call_id: "x", arguments: "{}" }] }); },
   }), /action limit/);
   assert.equal(requests, 2);
+});
+test("100 attempts fit a long turn with large page reads and fresh evidence for the final summary", async () => {
+  const counts = [], sizes = [];
+  let executed = 0;
+  const goal = "Find the carousel, compare offers, then return to the top.";
+  const result = await runAgent({ ...base, input: [{ role: "user", content: goal }], settings: { inputChars: 12000 } }, {
+    credential: async () => "test",
+    emit(event) { if (event.type === "browser.actions") counts.push(event.actions.used); },
+    executeTool: async args => {
+      executed++;
+      return args.operation === "fill" ? { ok: true, label: "Search box" } :
+        { url: "https://example.org/long/" + "a".repeat(170) + "?token=secret", text: "Page observation " + executed + " " + ".".repeat(7000), elements: [{ id: "ref-" + executed }] };
+    },
+    fetchImpl: async (_, options) => {
+      const request = JSON.parse(options.body), input = request.input;
+      sizes.push(options.body.length);
+      assert.ok(input.some(item => item.content === goal));
+      if (executed) {
+        assert.equal(input.at(-1).call_id, "call-" + executed);
+        assert.equal(input.at(-2).call_id, input.at(-1).call_id);
+        assert.equal(input.at(-3).encrypted_content, "reason-" + executed);
+      }
+      if (executed === 100) {
+        assert.equal(request.tools, undefined);
+        assert.match(input.at(-1).output, /Page observation 100/);
+        assert.match(input[0].content, /Search box/);
+        assert.match(input[0].content, /[1-9]\d* older observations omitted/);
+        assert.doesNotMatch(input[0].content, /private form value|ref-|token=secret/);
+        return stream({ output: [answer] });
+      }
+      const id = executed + 1;
+      return stream({ output: [
+        { type: "reasoning", encrypted_content: "reason-" + id, summary: [] },
+        { type: "function_call", name: "browser", call_id: "call-" + id, arguments: JSON.stringify(executed ? { operation: "read" } : { operation: "fill", text: "private form value" }) },
+      ] });
+    },
+  });
+  assert.equal(result.text, "Finished.");
+  assert.equal(sizes.length, 101); assert.ok(sizes.every(size => size <= 16000));
+  assert.deepEqual(counts, Array.from({ length: 101 }, (_, i) => i));
+});
+test("a batch crossing the action allowance reports failures and pairs skipped calls without dispatch", async () => {
+  const attempts = [], counts = [];
+  let requests = 0;
+  await runAgent({ ...base, settings: { maxBrowserActions: 2 } }, {
+    credential: async () => "test",
+    emit(event) { if (event.type === "browser.actions") counts.push(event.actions); },
+    executeTool: async args => { attempts.push(args.operation); if (args.operation === "click") throw Error("User declined"); return { ok: true }; },
+    fetchImpl: async (_, options) => {
+      if (++requests === 1) return stream({ output: ["read", "click", "scroll"].map(operation => ({ type: "function_call", name: "browser", call_id: operation, arguments: JSON.stringify({ operation }) })) });
+      const request = JSON.parse(options.body);
+      assert.equal(request.tools, undefined);
+      const results = request.input.filter(item => item.type === "function_call_output");
+      assert.deepEqual(results.map(item => item.call_id), ["read", "click", "scroll"]);
+      assert.match(results[1].output, /declined/); assert.match(results[2].output, /not attempted/);
+      return stream({ output: [answer] });
+    },
+  });
+  assert.deepEqual(attempts, ["read", "click"]);
+  assert.deepEqual(counts, [0, 1, 2].map(used => ({ used, limit: 2 })));
 });
 test("cancelled runs do not request credentials or make API calls", async () => {
   const controller = new AbortController(); controller.abort(); let called = false;

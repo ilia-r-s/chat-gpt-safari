@@ -1,11 +1,13 @@
 import { buildInput, publicURL, safeWebURL } from "./core/context.js";
 import { normalizeSettings } from "./core/config.js";
 import { settings, saveChat, listChats, chatKey } from "./core/storage.js";
-import { readTab, createBrowserTools, sourceWindowId } from "./core/browser-tools.js";
+import { readTab, createBrowserTools, indicatePageAction, sourceWindowId } from "./core/browser-tools.js";
 import { ChatDock, sourceTabId } from "./core/chat-dock.js";
 import { ChatRun } from "./core/chat-run.js";
 import { FrameDrafts } from "./core/frame-drafts.js";
 import { runAgent } from "./core/agent.js";
+import { PageInputs } from "./core/page-input.js";
+import { MotionSession } from "./core/motion-session.js";
 import { LocalData } from "./core/local-data.js";
 import { draftKey, sessionKey, saveDraft } from "./core/drafts.js";
 import { DesktopController } from "./core/desktop.js";
@@ -103,7 +105,9 @@ async function checkCapture(account, url) {
   const safe = safeWebURL(url);
   if (!safe) throw new Error("Safari protects this page. Choose an accessible website.");
   // Picking a source explicitly authorizes the excerpt, subject to saved blocks.
-  allowsAction(await readWebsiteAccess(api.storage.local, account), [new URL(safe).hostname]);
+  const access = await readWebsiteAccess(api.storage.local, account);
+  allowsAction(access, [new URL(safe).hostname]);
+  return access;
 }
 
 async function credential(auth) {
@@ -154,9 +158,11 @@ async function eraseLocalData() {
   return { browserCleared, nativeCleared, failures };
 }
 
-async function showPanel(tab, share = false, selection = "") {
+async function showPanel(tab, share) {
   if (!Number.isInteger(tab?.id) || dock.panelURLMatches(tab.url) || localData.closed) return;
   if (share && !localData.closed) {
+    const selection = share.selectionText;
+    const frameURL = share.frameId ? share.frameUrl : tab.url;
     let auth;
     try {
       auth = await native("auth.status");
@@ -164,12 +170,14 @@ async function showPanel(tab, share = false, selection = "") {
       const limit = (await settings(api.storage.local)).pageChars;
       const page = selection ? { text: selection, title: tab.title, url: tab.url } : await readTab(api, tab.id, limit, { expectedURL: tab.url });
       if (!safeWebURL(tab.url) || safeWebURL(page.url) !== safeWebURL(tab.url)) throw new Error("The page changed. Choose Ask Safari Chat on the page you want to share.");
-      await localData.write(async storage => {
-        await checkCapture(auth.account, tab.url);
+      const markSelection = await localData.write(async storage => {
+        const access = await checkCapture(auth.account, tab.url);
         checkSession(await native("auth.status"), auth.account, auth.generation);
         const kind = selection ? "selection" : "page", url = publicURL(page.url);
         await storage.set({ [`draft:${tab.id}`]: { kind, key: `${kind}:${tab.id}:${url}`, tabId: tab.id, text: page.text.slice(0, limit), title: page.title ?? "Page", url, truncated: !!page.truncated || page.text.length > limit, generation: auth.generation, created: Date.now() } });
+        return selection && visibleWebsite(frameURL, access);
       });
+      if (markSelection) await indicatePageAction(api, tab.id, frameURL, "selection", "copy", share.frameId);
     } catch (error) {
       if (!localData.closed) await localData.write(async storage => {
         if (auth) checkSession(await native("auth.status"), auth.account, auth.generation);
@@ -200,11 +208,11 @@ async function focusSource(panel) {
   if (Number.isInteger(tab.windowId)) await api.windows.update(tab.windowId, { focused: true });
   return tab;
 }
-async function openFromSafari(tab, share = false, selection = "") {
+async function openFromSafari(tab, share) {
   if (!Number.isInteger(tab?.id)) return;
   try {
     if (!share && dock.panelURLMatches(tab.url)) tab = await focusSource(tab);
-    await showPanel(tab, share, selection);
+    await showPanel(tab, share);
     await dockStatus(tab.id);
   }
   catch (error) { await dockStatus(tab.id, error.message); }
@@ -226,7 +234,7 @@ api.runtime.onInstalled.addListener(() => {
   }).catch(console.error);
 });
 api.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === "ask") return openFromSafari(tab, true, info.selectionText);
+  if (info.menuItemId === "ask") return openFromSafari(tab, info);
 });
 api.tabs.onRemoved.addListener(tabId => {
   for (const run of activeRuns.values()) {
@@ -432,6 +440,14 @@ api.runtime.onConnect.addListener(port => {
     if (disconnected && message.type !== "run") return;
     if (localData.closed) { port.postMessage({ type: "data.erasing" }); return; }
     if (message.type === "cancel") { if (attached?.ports.has(port)) attached.abort(); return; }
+    if (message.type === "motion.stop") { if (typeof message.id === "string" && attached?.ports.has(port) && attached.motionSession?.current?.id === message.id) await attached.motionSession.stop("stopped by user"); return; }
+    if (message.type === "motion.speed") {
+      if (typeof message.id === "string" && attached?.ports.has(port) && attached.motionSession?.current?.id === message.id) {
+        try { await attached.motionSession.adjust(attached.motionSession.current, message.speed); }
+        catch (error) { if (attached.ports.has(port)) port.postMessage({ type: "motion.error", message: error.message }); }
+      }
+      return;
+    }
     if (message.type === "approval") { if (attached?.ports.has(port)) attached.answer(message); return; }
     if (message.type === "resume") {
       try {
@@ -468,7 +484,8 @@ api.runtime.onConnect.addListener(port => {
     const controller = run.controller;
     const emit = event => run.emit(event);
     // A finite deadline also bounds abandoned network reads and approval prompts.
-    const timer = setTimeout(() => controller.abort(new Error("This task timed out. Please try again.")), 300000);
+    const timeoutError = new Error("This message reached its five-minute time limit. Check the current page before continuing.");
+    const timer = setTimeout(() => controller.abort(timeoutError), 300000);
     let runChat;
     let writing = false;
     const started = Date.now();
@@ -477,7 +494,8 @@ api.runtime.onConnect.addListener(port => {
     const finish = (text, error = false) => localData.write(async storage => {
       await verifySession();
       const pointer = !run.ports.size && !frameDrafts.pending.has(source) ? sessionKey(run.account, source) : undefined;
-      const saved = await saveChat(storage, { ...runChat, messages: [...runChat.messages, { role: "assistant", text, workMs, ...(error ? { error: true } : {}) }] }, pointer);
+      const browserActions = run.state.get("browser.actions")?.actions;
+      const saved = await saveChat(storage, { ...runChat, messages: [...runChat.messages, { role: "assistant", text, workMs, browserActions, ...(error ? { error: true } : {}) }] }, pointer);
       return { id: saved.id, title: saved.title, revision: saved.revision };
     });
     const runEmit = event => { controller.signal.throwIfAborted(); if (event.type === "activity") usedTools = true; emit(event); };
@@ -513,10 +531,18 @@ api.runtime.onConnect.addListener(port => {
       const requestSiteAccess = (siteOrigin, signal) => run.prompt({ operation: "read", siteOrigin,
         title: "Read " + new URL(siteOrigin).hostname + "?",
         detail: "Allow website access in Safari to let this chat read the open tab and continue." }, signal);
-      const executeTool = createBrowserTools({ api, pageChars: prefs.pageChars, approve, requestSiteAccess, readAccess: () => readWebsiteAccess(api.storage.local, auth.account), verifySession: async () => {
+      const motionSession = new MotionSession(api, state => emit({ type: "motion.state", state }));
+      run.motionSession = motionSession;
+      const inputs = new PageInputs(api, {
+        write: text => native("clipboard.write", { generation: auth.generation, text }),
+        read: async () => (await native("clipboard.read", { generation: auth.generation })).text,
+      });
+      const executeTool = createBrowserTools({ api, pageChars: prefs.pageChars, motionSession, inputs, approve, requestSiteAccess, readAccess: () => readWebsiteAccess(api.storage.local, auth.account), verifySession: async () => {
         try { await verifySession(); } catch (error) { controller.abort(error); throw error; }
       }, initialTabs, defaultTabId, protectedTabId: port.sender.frameId ? null : host });
-      const result = await runAgent({ input: built.input, model: message.model, effort, settings: prefs, signal: controller.signal }, { credential: () => credential(auth), executeTool, emit: runEmit });
+      const stopMotion = reason => motionSession.stop(reason);
+      const result = await runAgent({ input: built.input, model: message.model, effort, settings: prefs, signal: controller.signal }, { credential: () => credential(auth), executeTool, stopMotion, emit: runEmit })
+        .finally(() => Promise.all([stopMotion("task ended"), inputs.release()]));
       controller.signal.throwIfAborted();
       writing = true;
       workMs = usedTools ? Date.now() - started : undefined;
@@ -524,7 +550,8 @@ api.runtime.onConnect.addListener(port => {
     } catch (error) {
       let saved, saveError;
       if (runChat && !localData.closed && !writing) {
-        try { saved = await finish(run.text || (controller.signal.aborted ? "Response stopped." : "No response received."), true); }
+        const stopped = controller.signal.reason === timeoutError ? timeoutError.message : "Response stopped.";
+        try { saved = await finish(run.text || (controller.signal.aborted ? stopped : "No response received."), true); }
         catch (failure) { saveError = failure.message; }
       }
       terminal({ type: controller.signal.aborted ? "cancelled" : "error", saved, saveError: saveError || (writing ? error.message : undefined), message: (controller.signal.aborted ? controller.signal.reason?.message : error?.message) ?? "The request could not finish." });

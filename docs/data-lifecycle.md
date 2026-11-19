@@ -12,7 +12,7 @@ Safari Chat keeps runtime data in browser-managed storage, Keychain, and its nat
 | Native coordination | A lock on the App Group directory itself, held only during a vault update | No file is created. Cleanup removes `credentials.lock` left by older development builds. The OS owns container roots/metadata. |
 | Native framework caches/preferences | The app's and native extension's own sandbox containers | Extension cleanup handles the extension process's known runtime paths; **Erase native data and quit** handles the containing app. |
 | The installed application | The one app bundle and its embedded extension | Uninstall in Safari, remove the app using Finder, and empty its Trash item if desired. |
-| Explicit Markdown exports or copied text | The location or clipboard chosen by the user | Separate user-owned output; remove it yourself if no longer wanted. |
+| Explicit Markdown exports or copied text | The selected export location or the macOS clipboard. Side-chat copy and paste transfer plain text directly between the selected webpage and the pasteboard. The tool result contains the outcome. | Exports and clipboard contents are user-owned. Erasing the extension leaves them available. |
 | Source checkout, build ZIPs, test screenshots, build caches | The development repository | Not installed runtime data; remove development artifacts separately. The uninstaller never deletes source code. |
 
 ## Removal flow

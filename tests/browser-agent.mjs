@@ -43,13 +43,13 @@ export async function testBrowserAgent(browser, origin) {
   assert.equal(result.text, 'Scrolled down.'); assert.equal(text, result.text);
   assert.ok(await page.evaluate(() => scrollY > 0));
   assert.deepEqual(approvals, ['read', 'scroll']);
-  assert.deepEqual(operations, ['snapshotPage', 'actOnPage', 'snapshotPage']);
+  assert.deepEqual(operations, ['snapshotPage', 'showActionPointer', 'actOnPage', 'snapshotPage']);
   await page.evaluate(() => scrollTo(0, 0));
   await assert.rejects(runAgent(base, {
     credential: async () => 'fixture-only', executeTool, emit() {},
     fetchImpl: async () => stream([call('scroll', 'down')], { type: 'response.failed', response: { error: { message: 'Provider failed before completion' } } }),
   }), /Provider failed/);
   assert.equal(await page.evaluate(() => scrollY), 0, 'a streamed call must not execute before successful completion');
-  assert.equal(operations.length, 3);
+  assert.equal(operations.length, 4);
   await page.close();
 }

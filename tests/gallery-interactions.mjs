@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { snapshotPage, actOnPage } from '../extension/content/page.js';
+import { showActionPointer } from '../extension/content/action-pointer.js';
 
 export async function testGalleryInteractions(browser) {
   const page = await browser.newPage({ viewport: { width: 900, height: 700 } });
@@ -33,7 +34,15 @@ export async function testGalleryInteractions(browser) {
   assert.equal(gallery(snapshot).currentItem, 1);
   assert.equal(gallery(snapshot).itemCount, 3);
   assert.ok(!snapshot.elements.some(element => element.label === 'TV' && element.actions.includes('scroll')), 'transformed strip is not exposed as a native scroll area');
+  assert.ok(await page.evaluate(({ id, draw }) => {
+    const preview = window.actOnPage('scroll', id, null, location.href, { direction: 'right', preview: true });
+    return preview.pointer && eval('(' + draw + ')')(location.href, { ref: id }, 'aim') > 0;
+  }, { id: gallery(snapshot).id, draw: showActionPointer.toString() }));
   assert.equal((await scroll(gallery(snapshot).id, 'right')).dispatched, true);
+  assert.ok(await page.evaluate(() => {
+    const box = window.__safariChatActionPointer.position.getBoundingClientRect();
+    return document.querySelector('[aria-selected=true]').contains(document.elementFromPoint(box.left + 3, box.top + 3));
+  }), 'the arrow lands on the activated slide control');
   snapshot = await read();
   assert.equal(gallery(snapshot).currentItem, 2);
   assert.match(snapshot.text, /Music card 2/);
