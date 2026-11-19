@@ -23,8 +23,10 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 switch type {
                 case "app.open":
                     try await CompanionApp.open(extensionBundle: Bundle(for: SafariWebExtensionHandler.self)); result = ["ok": true]
-                case "auth.signin":
-                    try await CompanionApp.open(extensionBundle: Bundle(for: SafariWebExtensionHandler.self), signIn: true); result = ["ok": true]
+                case "auth.signin", "auth.apikey":
+                    let action: CompanionApp.Action = type == "auth.signin" ? .signIn : .apiKey
+                    try await CompanionApp.open(extensionBundle: Bundle(for: SafariWebExtensionHandler.self), action: action)
+                    result = ["ok": true]
                 case "desktop.verify":
                     result = try DesktopRelay.verify(sessionID, profileID: profileID)
                 case "desktop.enable":

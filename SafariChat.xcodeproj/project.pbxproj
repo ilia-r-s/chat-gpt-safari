@@ -319,7 +319,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 9;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 3C73MH433Q;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -331,7 +331,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.3.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(SAFARI_CHAT_BUNDLE_ID)";
 				PRODUCT_NAME = "Safari Chat";
 				SAFARI_CHAT_BUNDLE_ID = org.safarichat.app;
@@ -361,7 +361,7 @@
 				CODE_SIGN_ENTITLEMENTS = native/Extension/Extension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 9;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 3C73MH433Q;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -374,7 +374,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.3.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(SAFARI_CHAT_BUNDLE_ID).Extension";
 				PRODUCT_NAME = "Safari Chat Extension";
 				SAFARI_CHAT_BUNDLE_ID = org.safarichat.app;
@@ -396,7 +396,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 9;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 3C73MH433Q;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -408,7 +408,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.3.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(SAFARI_CHAT_BUNDLE_ID)";
 				PRODUCT_NAME = "Safari Chat";
 				SAFARI_CHAT_BUNDLE_ID = org.safarichat.app;
@@ -429,7 +429,7 @@
 				CODE_SIGN_ENTITLEMENTS = native/Extension/Extension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 9;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 3C73MH433Q;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -442,7 +442,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.3.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(SAFARI_CHAT_BUNDLE_ID).Extension";
 				PRODUCT_NAME = "Safari Chat Extension";
 				SAFARI_CHAT_BUNDLE_ID = org.safarichat.app;

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createBrowserTools, readTab, readyTab } from "../extension/core/browser-tools.js";
+import { createBrowserTools, readTab } from "../extension/core/browser-tools.js";
+import { readyTab } from "../extension/core/tab-navigation.js";
 
 function fixture(approval = async () => {}) {
   let url = "https://example.com/";
@@ -69,12 +70,12 @@ test("carousel approval names the gallery and refuses unsupported directions", a
 test("the source page is the default target but still needs read and scroll approvals", async () => {
   const f = fixture(), approvals = [], reads = [];
   const get = f.api.tabs.get; f.api.tabs.get = async id => { reads.push(id); return get(id); };
-  const execute = createBrowserTools({ api: f.api, pageChars: 6000, defaultTabId: 7, protectedTabId: 7, approve: async action => approvals.push(action.operation) });
+  const execute = createBrowserTools({ api: f.api, pageChars: 6000, defaultTabId: 7, protectedTabId: 8, approve: async action => approvals.push(action.operation) });
   await assert.rejects(execute({ operation: "scroll", tabId: null, direction: "down" }, signal), /Read the current page/);
   assert.equal((await execute({ operation: "read", tabId: null }, signal)).tabId, 7);
   await execute({ operation: "scroll", tabId: null, elementId: null, direction: "down" }, signal);
   assert.deepEqual(approvals, ["read", "scroll"]); assert.ok(reads.every(id => id === 7));
-  await assert.rejects(execute({ operation: "close_tab", tabId: null }, signal), /chat in its own tab/);
+  await assert.rejects(execute({ operation: "close_tab", tabId: 8 }, signal), /tab contains Safari Chat/i);
   assert.equal(f.writes.length, 1);
 });
 test("opening, visiting, and closing tabs each require approval and report the new tab ID", async () => {
@@ -100,10 +101,10 @@ test("cancellation while rechecking an approved tab prevents the mutation", asyn
   await assert.rejects(f.execute({ operation: "close_tab", tabId: 1 }, controller.signal), { name: "AbortError" });
   assert.equal(reads, 2); assert.deepEqual(f.writes, []);
 });
-test("embedded chat refuses to navigate or close its own tab", async () => {
+test("tools refuse to navigate or close the extension tab that hosts chat", async () => {
   const f = fixture();
   const execute = createBrowserTools({ api: f.api, pageChars: 6000, approve: async () => { throw new Error("Approval should not be reached"); }, protectedTabId: 1 });
-  for (const operation of ["navigate", "close_tab"]) await assert.rejects(execute({ operation, tabId: 1, url: "https://example.com/next" }, signal), /chat in its own tab/);
+  for (const operation of ["navigate", "close_tab"]) await assert.rejects(execute({ operation, tabId: 1, url: "https://example.com/next" }, signal), /tab contains Safari Chat/i);
   assert.deepEqual(f.writes, []);
 });
 test("loading waits are event-driven and remove listeners on completion or cancellation", async () => {
@@ -128,6 +129,35 @@ test("navigation during an approval invalidates the action", async () => {
   await assert.rejects(f.execute({ operation: "click", tabId: 1, elementId: "ref-1" }, signal), /navigated while awaiting/);
   assert.equal(f.writes.length, 0);
 });
+
+test("a redirect back to the original URL can finish before Safari acknowledges navigation", { timeout: 1000 }, async () => {
+  const f = fixture(), updates = new Set();
+  f.api.tabs.onUpdated = { addListener: fn => updates.add(fn), removeListener: fn => updates.delete(fn) };
+  let navigations = 0;
+  f.api.tabs.update = async id => {
+    navigations++;
+    for (const status of ["loading", "complete"]) for (const listener of updates) listener(id, { status }, await f.api.tabs.get(id));
+  };
+  const result = await f.execute({ operation: "navigate", tabId: 1, url: "https://example.com/redirect" }, signal);
+  assert.equal(result.ok, true); assert.equal(navigations, 1); assert.equal(updates.size, 0);
+});
+
+test("losing the click acknowledgement during navigation asks for a fresh read without replaying the click", async () => {
+  const f = fixture(), updates = new Set();
+  f.api.tabs.onUpdated = { addListener: fn => updates.add(fn), removeListener: fn => updates.delete(fn) };
+  await f.execute({ operation: "read", tabId: 1 }, signal);
+  let clicks = 0;
+  f.api.scripting.executeScript = async () => {
+    clicks++;
+    f.navigate("https://example.com/next");
+    for (const listener of updates) listener(1, { status: "complete" }, await f.api.tabs.get(1));
+    throw Error("Frame was removed");
+  };
+  const click = await f.execute({ operation: "click", tabId: 1, elementId: "ref-1" }, signal);
+  assert.equal(click.navigationObserved, true); assert.match(click.message, /Read the new page/);
+  await assert.rejects(f.execute({ operation: "click", tabId: 1, elementId: "ref-1" }, signal), /Read the current page/);
+  assert.equal(clicks, 1); assert.equal(updates.size, 0);
+});
 test("browser tools reject private schemes and arbitrary operations", async () => {
   const f = fixture();
   await assert.rejects(f.execute({ operation: "open_tab", url: "file:///secret" }, signal), /HTTP/);
@@ -146,4 +176,49 @@ test("read consent is scoped to the website, not just a reusable tab ID", async 
   await f.execute({ operation: "read", tabId: 1 }, signal);
   assert.equal(approvals.length, 2);
   assert.equal(approvals[1], "https://another.example/");
+});
+
+test("website grants cover the exact host, including both ends of cross-site navigation", async () => {
+  const f = fixture(), prompts = [];
+  const access = { mode: "ask", allowed: ["example.com"], blocked: [] };
+  const execute = createBrowserTools({ api: f.api, pageChars: 6000, readAccess: async () => access,
+    approve: async details => { prompts.push(details); return "once"; } });
+  await execute({ operation: "read", tabId: 1 }, signal);
+  await execute({ operation: "scroll", tabId: 1, direction: "down" }, signal);
+  await execute({ operation: "open_tab", url: "https://example.com/other" }, signal);
+  assert.deepEqual(prompts, []);
+  await execute({ operation: "navigate", tabId: 1, url: "https://sub.example.com/" }, signal);
+  assert.deepEqual(prompts[0].hosts, ["example.com", "sub.example.com"]);
+  await execute({ operation: "list_tabs" }, signal);
+  assert.deepEqual(prompts[1].hosts, []);
+  access.blocked.push("sub.example.com"); access.mode = "auto";
+  await assert.rejects(execute({ operation: "navigate", tabId: 1, url: "https://sub.example.com./" }, signal), /blocked/);
+  const snapshot = f.api.scripting.executeScript;
+  f.api.scripting.executeScript = async args => {
+    const result = await snapshot(args);
+    if (args.func.name === "snapshotPage") result[0].result.elements[0].destinationHost = "sub.example.com";
+    return result;
+  };
+  await execute({ operation: "read", tabId: 1 }, signal);
+  await assert.rejects(execute({ operation: "click", tabId: 1, elementId: "ref-1" }, signal), /blocked/);
+  f.api.tabs.query = async () => [{ id: 1, url: "https://example.com/" }, { id: 2, url: "https://sub.example.com./private" }];
+  assert.deepEqual((await execute({ operation: "list_tabs" }, signal)).map(tab => tab.tabId), [1]);
+});
+
+test("removing an automatic grant re-prompts on reads and prevents an already authorized write", async () => {
+  const f = fixture(), prompts = [];
+  const access = { mode: "auto", allowed: [], blocked: [] };
+  const execute = createBrowserTools({ api: f.api, pageChars: 6000, readAccess: async () => access,
+    approve: async details => { prompts.push(details.operation); } });
+  await execute({ operation: "read", tabId: 1 }, signal);
+  access.mode = "ask";
+  await execute({ operation: "read", tabId: 1 }, signal);
+  assert.deepEqual(prompts, ["read"]);
+  access.blocked = ["example.com"];
+  await assert.rejects(execute({ operation: "read", tabId: 1 }, signal), /blocked/);
+  access.blocked = []; access.mode = "auto";
+  let gets = 0; const get = f.api.tabs.get;
+  f.api.tabs.get = async id => { if (++gets === 2) access.mode = "ask"; return get(id); };
+  await assert.rejects(execute({ operation: "close_tab", tabId: 1 }, signal), /access changed/);
+  assert.deepEqual(f.writes, []);
 });

@@ -23,6 +23,13 @@ test("API-key catalog uses documented exact models, without guessing variants", 
   ]);
 });
 
+test("GPT-6.2 API listings expose the documented efforts unless the catalog advertises its own", () => {
+  const models = modelCatalog({ data: [{ id: "gpt-6.2-astra" }, { id: "gpt-6.2-sol-2026-11-19" }, { id: "gpt-6.2-sol", supported_reasoning_levels: ["high"] }] });
+  assert.deepEqual(models.map(model => model.reasoningEfforts), [
+    ["low", "medium", "high", "xhigh", "max"], ["low", "medium", "high", "xhigh", "max"], ["high"],
+  ]);
+});
+
 test("Auto omits an effort override and unsupported choices are refused", () => {
   const model = { reasoningEfforts: ["low", "high"] };
   assert.equal(resolveEffort(undefined, "auto"), undefined);

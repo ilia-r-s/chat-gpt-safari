@@ -13,7 +13,7 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
     return (element.getAttribute("aria-label") || labelled || element.labels?.[0]?.innerText || element.getAttribute("placeholder") || (!field && element.innerText) || element.name || element.tagName).trim().slice(0, 120);
   };
   const sensitive = /password|passcode|credit.?card|debit.?card|card.?number|\bcc[-_](number|csc|exp|name)|\bcvc\b|\bcvv\b|security.?code|verification.?code|one.?time|\botp\b|secret|token/i;
-  const signature = (element, ignoreSelection = false) => JSON.stringify([element.tagName, element.type, element.name, element.getAttribute("role"), element.getAttribute("href"), element.getAttribute("target"), element.getAttribute("download"), element.form?.action, element.form?.method, element.getAttribute("formaction"), element.getAttribute("aria-controls"), ignoreSelection ? null : element.getAttribute("aria-selected"), element.getAttribute("aria-orientation")]);
+  const signature = (element, ignoreSelection = false) => JSON.stringify([element.tagName, element.type, element.name, element.getAttribute("role"), element.getAttribute("href"), element.closest("a[href]")?.href, element.getAttribute("target"), element.getAttribute("download"), element.form?.action, element.form?.method, element.getAttribute("formaction"), element.formAction, element.getAttribute("aria-controls"), ignoreSelection ? null : element.getAttribute("aria-selected"), element.getAttribute("aria-orientation")]);
   const scrollDirections = element => {
     const style = getComputedStyle(element);
     return [
@@ -27,7 +27,7 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
     for (let parent = element, depth = 0; parent && depth < 8 && checkedAreas.size < 500; parent = parent.parentElement, depth++) {
       if (checkedAreas.has(parent)) break;
       checkedAreas.add(parent);
-      if (parent === document.scrollingElement || parent === document.body) continue;
+      if (parent === document.scrollingElement || (parent === document.body && !Number.isFinite(globalThis.__safariChatPageRight))) continue;
       if (scrollDirections(parent).length) {
         if (scrollAreas.size < 10) scrollAreas.add(parent);
       }
@@ -163,7 +163,14 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
         options.push(item);
       }
     }
-    add(element, label, { actions, ...(element.getAttribute("role") === "tab" ? { role: "tab", selected: element.getAttribute("aria-selected") === "true" } : {}), ...(element.type ? { type: element.type } : {}), ...(element.required ? { required: true } : {}), ...(options ? { options, optionsTruncated: element.options.length > options.length } : {}) });
+    const destination = element.closest("a[href]")?.href || (["submit", "image"].includes(element.type) && element.form
+      ? (element.hasAttribute("formaction") ? element.formAction : element.form.action) : null);
+    let destinationHost;
+    if (destination && URL.canParse(destination)) {
+      const target = new URL(destination);
+      if (target.hostname && target.hostname !== location.hostname) destinationHost = target.hostname;
+    }
+    add(element, label, { actions, ...(destinationHost ? { destinationHost } : {}), ...(element.getAttribute("role") === "tab" ? { role: "tab", selected: element.getAttribute("aria-selected") === "true" } : {}), ...(element.type ? { type: element.type } : {}), ...(element.required ? { required: true } : {}), ...(options ? { options, optionsTruncated: element.options.length > options.length } : {}) });
   }
   // Image-only strips have no text or clickable descendants to discover them.
   let media = 0;
@@ -192,7 +199,7 @@ export function actOnPage(operation, elementId, text, expectedURL, { direction, 
     const field = element.matches("input,textarea,select") || element.isContentEditable;
     return (element.getAttribute("aria-label") || labelled || element.labels?.[0]?.innerText || element.getAttribute("placeholder") || (!field && element.innerText) || element.name || element.tagName).trim().slice(0, 120);
   };
-  const signature = (element, ignoreSelection = false) => JSON.stringify([element.tagName, element.type, element.name, element.getAttribute("role"), element.getAttribute("href"), element.getAttribute("target"), element.getAttribute("download"), element.form?.action, element.form?.method, element.getAttribute("formaction"), element.getAttribute("aria-controls"), ignoreSelection ? null : element.getAttribute("aria-selected"), element.getAttribute("aria-orientation")]);
+  const signature = (element, ignoreSelection = false) => JSON.stringify([element.tagName, element.type, element.name, element.getAttribute("role"), element.getAttribute("href"), element.closest("a[href]")?.href, element.getAttribute("target"), element.getAttribute("download"), element.form?.action, element.form?.method, element.getAttribute("formaction"), element.formAction, element.getAttribute("aria-controls"), ignoreSelection ? null : element.getAttribute("aria-selected"), element.getAttribute("aria-orientation")]);
   const reference = state.refs.get(elementId);
   const element = reference?.element;
   const pageScroll = operation === "scroll" && !elementId;
@@ -232,7 +239,7 @@ export function actOnPage(operation, elementId, text, expectedURL, { direction, 
       if (next < 0 || next >= tabs.length) return { ok: true, operation, moved: false, message: "This gallery is at its first or last item. Scroll in the other direction." };
       const control = tabs[next].element;
       const rect = control.getBoundingClientRect();
-      if (control.matches(":disabled,[aria-disabled='true']") || control.closest("[hidden],[inert],[aria-hidden='true']") || !control.getClientRects().length || rect.width === 0 || rect.height === 0 || rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth) || getComputedStyle(control).visibility !== "visible") throw new Error("The next gallery control is not available. Read the page again.");
+      if (control.matches(":disabled,[aria-disabled='true']") || control.closest("[hidden],[inert],[aria-hidden='true'],#safari-chat-host") || !control.getClientRects().length || rect.width === 0 || rect.height === 0 || rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth) || getComputedStyle(control).visibility !== "visible") throw new Error("The next gallery control is not available. Read the page again.");
       let depth = 0;
       for (let parent = control; parent; parent = parent.parentElement) {
         const style = getComputedStyle(parent), clip = parent.getBoundingClientRect();
@@ -260,8 +267,12 @@ export function actOnPage(operation, elementId, text, expectedURL, { direction, 
   }
   element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
   if (operation === "click") {
-    const link = element.closest("a[href]");
-    if (link && !/^https?:$/.test(new URL(link.href).protocol)) throw new Error("Only ordinary web links can be opened.");
+    const destination = element.closest("a[href]")?.href || (["submit", "image"].includes(element.type) && element.form
+      ? (element.hasAttribute("formaction") ? element.formAction : element.form.action) : null);
+    if (destination) {
+      const url = new URL(destination);
+      if (!/^https?:$/.test(url.protocol) || url.username || url.password) throw new Error("Only ordinary web links can be opened.");
+    }
     element.click();
     return { ok: true, operation, label, message: "Click dispatched. Read the page again to verify the outcome." };
   }

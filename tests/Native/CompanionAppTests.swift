@@ -4,9 +4,11 @@ import XCTest
 
 final class CompanionAppTests: XCTestCase {
     func testDirectSignInOnlyAcceptsTheFixedActionWithoutCallerParameters() {
-        XCTAssertTrue(CompanionApp.isSignInURL(CompanionApp.signInURL))
-        for value in ["safarichat://connect", "safarichat://signin?redirect=https://evil.example", "safarichat://signin/path", "safarichat://user@signin", "https://signin", "safarichat://signin#payload"] {
-            XCTAssertFalse(CompanionApp.isSignInURL(URL(string: value)!))
+        for action in [CompanionApp.Action.signIn, .apiKey] {
+            XCTAssertEqual(CompanionApp.Action(url: action.url), action)
+        }
+        for value in ["safarichat://connect", "safarichat://signin?redirect=https://evil.example", "safarichat://signin/path", "safarichat://user@signin", "https://signin", "safarichat://signin#payload", "safarichat://api-key?key=value"] {
+            XCTAssertNil(CompanionApp.Action(url: URL(string: value)!))
         }
     }
     func testResolvesOwnCompanionWithCustomizedBundleIdentifier() throws {

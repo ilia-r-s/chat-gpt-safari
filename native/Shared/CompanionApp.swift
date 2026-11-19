@@ -21,19 +21,25 @@ enum CompanionApp {
         return app
     }
 
-    static let signInURL = URL(string: "safarichat://signin")!
+    enum Action: String {
+        case signIn = "signin", apiKey = "api-key"
 
-    static func isSignInURL(_ url: URL) -> Bool {
-        url.scheme == "safarichat" && url.host == "signin" && url.path.isEmpty && url.query == nil && url.fragment == nil && url.user == nil && url.password == nil && url.port == nil
+        var url: URL { URL(string: "safarichat://\(rawValue)")! }
+
+        init?(url: URL) {
+            guard url.scheme == "safarichat", let host = url.host, url.path.isEmpty,
+                  url.query == nil, url.fragment == nil, url.user == nil, url.password == nil, url.port == nil else { return nil }
+            self.init(rawValue: host)
+        }
     }
 
-    @MainActor static func open(extensionBundle: Bundle, signIn: Bool = false) async throws {
+    @MainActor static func open(extensionBundle: Bundle, action: Action? = nil) async throws {
         let app = try applicationURL(extensionURL: extensionBundle.bundleURL, extensionIdentifier: extensionBundle.bundleIdentifier)
         let options = NSWorkspace.OpenConfiguration()
-        options.activates = !signIn
+        options.activates = action != .signIn
         options.addsToRecentItems = false
         do {
-            if signIn { _ = try await NSWorkspace.shared.open([signInURL], withApplicationAt: app, configuration: options) }
+            if let action { _ = try await NSWorkspace.shared.open([action.url], withApplicationAt: app, configuration: options) }
             else { _ = try await NSWorkspace.shared.openApplication(at: app, configuration: options) }
         }
         catch { throw ChatError.message("macOS could not open Safari Chat. Open Safari Chat.app from Finder or run it from Xcode, then try again. \(error.localizedDescription)") }

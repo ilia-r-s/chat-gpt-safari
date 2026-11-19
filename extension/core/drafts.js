@@ -25,6 +25,7 @@ export async function saveDraft(storage, draft, tabId) {
   const all = await storage.get(null);
   const prior = all[key];
   const chat = all[chatKey(value.id)];
+  if (prior?.sourceChatId) value.sourceChatId = prior.sourceChatId;
   for (const old of [prior, chat]) {
     if (old && old.account !== value.account) throw new Error("This chat belongs to a different account.");
   }
@@ -35,6 +36,7 @@ export async function saveDraft(storage, draft, tabId) {
   if (draft.revision !== undefined && draft.revision !== revision) {
     if (!hasDraft) return { ...value, revision: 0 }; // Another editor owns the stored text.
     if (prior?.text === value.text && JSON.stringify(prior.contexts) === JSON.stringify(value.contexts)) return { ...prior, revision };
+    value.sourceChatId ??= value.id;
     value.id = crypto.randomUUID(); key = draftKey(value.id);
     if (chat) copy = prepareChat(all, { ...chat, id: value.id, revision: 0, title: chat.title.slice(0, 106) + " (draft copy)" }, chat.id);
   }

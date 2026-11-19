@@ -1,10 +1,10 @@
 export const EFFORTS = Object.freeze(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
-export const EFFORT_LABELS = Object.freeze({ auto: "Auto", none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" });
+export const EFFORT_LABELS = Object.freeze({ auto: "Model default", none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" });
 
-// Public model docs checked 2026-11-17. Explicit catalog capabilities take
+// Public model docs checked 2026-11-19. Explicit catalog capabilities take
 // precedence; do not infer support for unknown variants from a family prefix.
 const documented = Object.fromEntries([
-  [["gpt-6.1-sol", "gpt-6-astra"], ["low", "medium", "high", "xhigh", "max"]],
+  [["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-astra"], ["low", "medium", "high", "xhigh", "max"]],
   [["gpt-6-sol", "gpt-6-luna", "gpt-5.6", "gpt-5.6-sol"], ["none", "low", "medium", "high", "xhigh", "max"]],
   [["gpt-5.5", "gpt-5.4", "gpt-5.2"], ["none", "low", "medium", "high", "xhigh"]],
   [["gpt-5.1"], ["none", "low", "medium", "high"]],
@@ -33,7 +33,7 @@ export function modelCatalog(data) {
 export function resolveEffort(model, value = "auto") {
   if (value === "auto") return undefined;
   if (!EFFORTS.includes(value) || !model?.reasoningEfforts?.includes(value)) {
-    throw new Error("This reasoning effort is not available for the selected model. Choose Auto or refresh the model list.");
+    throw new Error("This reasoning effort is not available for the selected model. Choose Model default or reload the model list.");
   }
   return value;
 }

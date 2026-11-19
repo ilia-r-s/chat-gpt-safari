@@ -6,7 +6,7 @@ import { createBrowserTools } from '../extension/core/browser-tools.js';
 // tab targeting and content-script execution uses the production code.
 export async function testBrowserAgent(browser, origin) {
   const page = await browser.newPage({ viewport: { width: 900, height: 700 } });
-  await page.goto(`${origin}/__dock_fixture__`);
+  await page.goto(`${origin}/__workflow/one`);
   await page.setContent('<main><h1>Top of the page</h1><div style="height:2200px"></div><h2>Bottom of the page</h2></main>');
   const approvals = [], operations = [];
   const api = {

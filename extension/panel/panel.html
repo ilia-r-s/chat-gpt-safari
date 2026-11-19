@@ -10,53 +10,85 @@
 </head>
 <body>
   <header class="topbar">
-    <button class="brand" id="history-button" title="Recent chats" aria-label="Recent chats"><span class="chatgpt-mark" aria-hidden="true"></span><strong>Safari Chat</strong><svg viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button>
-    <span id="conversation-title">New chat</span>
-    <button class="icon-button" id="new-button" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24"><path d="M11 5H5v14h14v-6m-9 1 1-4 8-8 3 3-8 8z"/></svg></button>
-    <button class="icon-button" id="open-tab-button" title="Open chat in a tab" aria-label="Open chat in a tab"><svg viewBox="0 0 24 24"><path d="M14 4h6v6m0-6L10 14M10 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/></svg></button>
-    <button class="icon-button" id="settings-button" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24"><path d="M3 7h4m6 0h8M3 17h10m6 0h2"/><circle cx="10" cy="7" r="3"/><circle cx="16" cy="17" r="3"/></svg></button>
-    <button class="icon-button" id="close-button" title="Close panel" aria-label="Close panel"><svg viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
+    <button class="brand" id="history-button" title="Recent chats" aria-label="Recent chats" aria-haspopup="dialog">
+      <span class="chatgpt-mark" aria-hidden="true"></span><strong>Safari Chat</strong><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+    </button>
+    <span id="conversation-title" class="sr-only"></span>
+    <nav aria-label="Chat controls">
+      <button class="icon-button" id="new-button" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24"><path d="M12 4H7a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-5M10 14l.8-3.8L18 3a1.5 1.5 0 0 1 2 2l-7.2 7.5z"/></svg></button>
+      <button class="icon-button" id="source-button" title="Return to source tab" aria-label="Return to source tab" hidden><svg viewBox="0 0 24 24"><path d="M10 6l-6 6 6 6M4 12h11a5 5 0 0 0 5-5"/></svg></button>
+      <button class="icon-button" id="settings-button" aria-label="Settings" title="Settings" aria-haspopup="dialog"><svg viewBox="0 0 24 24"><path d="M3 7h4m6 0h8M3 17h10m6 0h2"/><circle cx="10" cy="7" r="3"/><circle cx="16" cy="17" r="3"/></svg></button>
+      <button class="icon-button" id="close-button" title="Close panel" aria-label="Close panel"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </nav>
   </header>
 
   <main id="conversation" aria-label="Conversation">
     <section id="welcome" class="welcome">
-      <h1>What can I help with?</h1>
-      <div class="suggestions">
-        <button data-prompt="summarize">Summarize this page</button>
-        <button data-prompt="explain">Explain selected text</button>
-        <button data-prompt="write">Help me write</button>
+      <span class="chatgpt-mark welcome-mark" aria-hidden="true"></span>
+      <p id="opening-chat" class="muted" role="status">Opening chat…</p>
+      <div class="starters" hidden>
+        <h1>What can I help with?</h1>
+        <div class="suggestions">
+          <button data-prompt="summarize"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18m-14 4h10m-10 3h6"/></svg>Summarize this page</button>
+          <button data-prompt="explain"><svg viewBox="0 0 24 24"><path d="M4 6h6v7l-4 4m8-11h6v7l-4 4"/></svg>Explain selected text</button>
+          <button data-prompt="write"><svg viewBox="0 0 24 24"><path d="m5 15-1 5 5-1L20 8l-4-4zM13 7l4 4"/></svg>Help me write</button>
+        </div>
       </div>
       <div class="connect-card" id="connect-card" hidden>
-        <span class="connect-dot"></span><div><strong>Bring your ChatGPT account</strong><p>Sign in securely in your browser, then continue here.</p></div>
-        <button class="primary" id="connect-button" data-oai-siwc-button>Continue with ChatGPT <span>↗</span></button>
+        <h1>Connect to Safari Chat</h1><p>Use your ChatGPT account or an API key to chat beside this page.</p>
+        <button class="primary" id="connect-button" data-oai-siwc-button>Continue with ChatGPT</button>
         <button class="text-button" id="api-key-button">Use an OpenAI API key</button>
       </div>
     </section>
     <div id="messages" role="log" aria-live="polite" aria-relevant="additions"></div>
+    <div class="turn-feedback">
+      <div id="activity" class="activity" role="status" hidden><span id="activity-label"></span><small id="activity-detail"></small></div>
+      <section id="approval" class="approval" hidden aria-labelledby="approval-title">
+        <strong id="approval-title" role="status"></strong><pre id="approval-detail"></pre>
+        <div class="approval-actions">
+          <button id="decline-button" class="secondary">Decline</button>
+          <div class="split-button">
+            <button id="approve-button">Allow once</button>
+            <button id="approval-more" popovertarget="approval-options" aria-label="More approval options" aria-expanded="false" title="More approval options"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+          </div>
+        </div>
+      </section>
+    </div>
   </main>
-
-  <section id="approval" class="approval" hidden aria-label="Browser action approval">
-    <p class="eyebrow">YOUR PERMISSION</p><strong id="approval-title"></strong><pre id="approval-detail"></pre>
-    <div><button id="decline-button" class="secondary">Decline</button><button id="approve-button" class="primary">Allow once</button></div>
-  </section>
 
   <div id="notice" class="notice" role="status" hidden></div>
   <footer class="bottom">
-    <div id="activity" class="activity" role="status" hidden><span id="activity-label"></span><small id="activity-detail"></small></div>
+    <div class="run-options" id="run-options" role="group" aria-label="Response settings" hidden>
+      <label class="compact-select"><span>Model</span><strong aria-hidden="true" id="model-name">Choose a model</strong><select id="model" aria-label="Model"><option value="">Choose a model</option></select></label>
+      <label class="compact-select" id="effort-control" hidden><span>Effort</span><strong aria-hidden="true" id="effort-name">Model default</strong><select id="effort" aria-label="Reasoning effort" title="Model default leaves the effort choice to the selected model."><option value="auto">Model default</option></select></label>
+      <button type="button" id="retry-models" class="text-button" hidden>Reload models</button>
+    </div>
     <div id="tab-mentions" class="mentions" role="listbox" aria-label="Mention a Safari tab" hidden></div>
     <form id="composer" class="composer">
       <div class="source-row"><div class="attachments" id="attachments"></div><button type="button" id="search-chip" class="pill" aria-label="Remove web search" hidden>Web search ×</button></div>
       <label class="sr-only" for="prompt">Message Safari Chat</label>
       <textarea id="prompt" rows="1" maxlength="12000" placeholder="Ask anything or @mention a tab" aria-controls="tab-mentions" aria-autocomplete="list" aria-describedby="composer-hint"></textarea>
       <div class="composer-toolbar">
-        <button class="icon-button add-button" id="add-button" type="button" popovertarget="add-menu" aria-controls="add-menu" aria-expanded="false" title="Add context and tools" aria-label="Add context and tools"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button><input id="file-input" type="file" multiple accept=".txt,.md,.csv,.json,.log,.js,.ts,.py,.html,.css,.xml,.yaml,.yml" hidden>
-        <button class="permission-mode" type="button" id="actions-guidance" title="Browser permissions">Ask before acting <span aria-hidden="true">⌄</span></button>
+        <button class="icon-button add-button" id="add-button" type="button" popovertarget="add-menu" aria-controls="add-menu" aria-expanded="false" title="Add context and tools" aria-label="Add context and tools"><svg viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></svg></button>
+        <input id="file-input" type="file" multiple accept=".txt,.md,.csv,.json,.log,.js,.ts,.py,.html,.css,.xml,.yaml,.yml" hidden>
+        <button class="permission-mode" type="button" id="actions-guidance" popovertarget="access-menu" aria-controls="access-menu" aria-expanded="false" title="Browser approvals"><span id="mode-label">Ask for approval</span><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
         <button class="send-button" id="send-button" type="submit" aria-label="Send message"><svg viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
         <button class="send-button" id="stop-button" type="button" aria-label="Stop response" hidden><span class="stop-square"></span></button>
       </div>
     </form>
     <div class="composer-help"><span id="draft-status" role="status"></span><span class="sr-only" id="composer-hint">Type @ to mention a tab. Enter sends. Shift + Enter adds a line.</span></div>
   </footer>
+
+  <div id="access-menu" class="add-menu" popover="auto" role="dialog" aria-label="Browser approvals">
+    <button id="ask-mode" aria-pressed="true"><span><strong>Ask for approval</strong><small>Ask before acting, except on allowed sites.</small></span><span class="menu-check" aria-hidden="true">✓</span></button>
+    <button id="auto-mode" aria-pressed="false"><span><strong>Approve for me</strong><small>Automatically allow browser actions and tab listings across all accessible sites.</small></span><span class="menu-check" aria-hidden="true">✓</span></button>
+    <div class="menu-divider"></div>
+    <button id="manage-sites"><strong>Manage website access…</strong></button>
+  </div>
+  <div id="approval-options" class="add-menu" popover="auto" role="dialog" aria-label="Remember approval">
+    <button id="allow-site"><span><strong>Allow for this site</strong><small id="allow-host"></small></span></button>
+    <button id="allow-all"><span><strong>Allow for all sites</strong><small>Use accessible websites automatically for this account.</small></span></button>
+  </div>
 
   <div id="add-menu" class="add-menu" popover="auto" role="dialog" aria-label="Add context and tools">
     <button id="attach-file" type="button"><svg viewBox="0 0 24 24"><path d="M8 12v5a4 4 0 0 0 8 0V6a3 3 0 0 0-6 0v10a1 1 0 0 0 2 0V7"/></svg><span><strong>Add files</strong><small>Text, Markdown, code & data</small></span></button>
@@ -66,7 +98,12 @@
     <button id="web-search" type="button" aria-pressed="false"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></svg><span><strong>Web search</strong><small>Answers with sources, when available</small></span><span class="menu-check" aria-hidden="true">✓</span></button>
   </div>
 
-  <dialog id="history-dialog" aria-labelledby="history-heading"><div class="dialog-head"><h2 id="history-heading">Recent chats</h2><button class="icon-button" data-close="history-dialog" aria-label="Close recent chats">×</button></div><input id="history-search" type="search" placeholder="Search chats" aria-label="Search chats"><div id="history-list" class="item-list"></div><p class="muted">Saved on this Mac, separately for each account.</p></dialog>
+  <dialog id="history-dialog" class="sheet" aria-labelledby="history-heading">
+    <div class="dialog-head"><h2 id="history-heading">Recent chats</h2><button class="icon-button" data-close="history-dialog" aria-label="Close recent chats">×</button></div>
+    <input id="history-search" type="search" placeholder="Search chats" aria-label="Search chats" autofocus>
+    <div id="history-list" class="item-list"></div>
+    <div class="sheet-footer"><p class="muted">Chats are saved on this Mac for each account.</p></div>
+  </dialog>
   <dialog id="tabs-dialog" aria-labelledby="tabs-heading"><div class="dialog-head"><h2 id="tabs-heading">Add browser tabs</h2><button class="icon-button" data-close="tabs-dialog" aria-label="Close tabs">×</button></div><input id="tabs-search" type="search" aria-label="Search browser tabs" placeholder="Search tabs"><div id="tabs-list" class="item-list"></div><p id="tabs-status" class="muted" role="status"></p><p class="muted">Only tabs Safari allows this extension to access are shown.</p><div class="dialog-actions"><button id="add-selected-tabs" class="primary" disabled>Add tabs</button></div></dialog>
   <dialog id="edit-dialog" aria-labelledby="edit-title">
     <form id="edit-form">
@@ -81,29 +118,41 @@
     <div class="dialog-head"><h2 id="companion-title">Open Safari Chat</h2><button class="icon-button" data-close="companion-dialog" aria-label="Close app setup">×</button></div>
     <p id="companion-error" class="muted" role="alert"></p>
     <ol class="muted"><li>Open <strong>Safari Chat.app</strong> from Finder and connect your account there.</li><li>In Safari → Settings → Extensions, enable the extension included with that app.</li></ol>
-    <p class="muted">If you added a temporary extension, it can preview the interface but cannot connect to the companion app. This development build needs to be run from <strong>SafariChat.xcodeproj</strong> in Xcode with signing configured for both targets.</p>
+    <details class="setting-section"><summary>Using a development build?</summary><p class="muted">A temporary extension previews the interface. To connect an account, run the Safari Chat scheme from <strong>SafariChat.xcodeproj</strong> with both targets signed, then enable its extension in Safari.</p></details>
     <div class="dialog-actions"><button class="primary" id="retry-companion-button">Try opening app again</button><button class="secondary" data-close="companion-dialog">Close</button></div>
   </dialog>
-  <dialog id="settings-dialog" aria-labelledby="settings-title">
+  <dialog id="settings-dialog" class="sheet" aria-labelledby="settings-title">
     <div class="dialog-head"><h2 id="settings-title">Settings</h2><button class="icon-button" data-close="settings-dialog" aria-label="Close settings">×</button></div>
-    <button id="account-button" class="settings-account"><span class="account-avatar" aria-hidden="true">S</span><span id="account-label">Connect account</span><span aria-hidden="true">↗</span></button>
-    <div class="model-settings">
-      <label class="model-label"><span>Model</span><select id="model" aria-label="Model"><option value="">Choose a model</option></select></label>
-      <label class="effort-label" id="effort-control" hidden><span>Reasoning effort</span><select id="effort" aria-label="Reasoning effort" title="Higher effort can take longer and use more tokens. Auto uses the model's default."><option value="auto">Auto</option></select></label>
-    </div>
-    <p class="setting-hint" id="usage">Local context</p>
+    <button id="account-button" class="settings-account"><span class="account-avatar" aria-hidden="true"></span><span><small>Account</small><strong id="account-label">Connect account</strong></span><span aria-hidden="true">↗</span></button>
     <label class="setting-row">Appearance<select id="theme-setting" aria-label="Appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
-    <p id="theme-status" class="setting-hint" role="status">Appearance saves automatically.</p>
-    <div class="setting-section"><h3 id="browser-permissions" tabindex="-1">Browser permissions</h3><p class="muted">You choose which pages to share and approve each browser change. Safari manages website access. A separate chat tab stays open during navigation.</p><button class="secondary" id="popout-button">Open chat in a tab ↗</button></div>
-    <label class="setting-row">ChatGPT desktop control<input id="desktop-setting" type="checkbox" role="switch"></label><p class="muted">Requires the Safari Chat desktop plugin and the signed app. Requests from the plugin show their approvals in ChatGPT. This does not connect Safari to ChatGPT's built-in browser integration.</p>
-    <div class="setting-section"><h3>Context & efficiency</h3><p class="muted">Smaller context uses fewer tokens. Older turns and long pages may be trimmed.</p>
+    <p id="theme-status" class="setting-hint" role="status"></p><button class="text-button" id="retry-theme" hidden>Retry saving appearance</button>
+    <details class="setting-section" id="website-section">
+      <summary id="browser-permissions">Website access</summary>
+      <label class="setting-row">Default for websites<select id="default-access"><option value="ask">Ask for approval</option><option value="auto">Approve for me</option></select></label>
+      <p class="muted">Rules match the exact hostname for this account and Safari profile. Blocked sites take priority. Safari manages its own website permissions.</p>
+      <form id="site-form" class="site-form">
+        <label for="site-host">Website hostname</label><input id="site-host" placeholder="example.com or a website URL" maxlength="2048" required autocapitalize="none" spellcheck="false">
+        <div><select id="site-rule" aria-label="Website rule"><option value="allow">Always allow</option><option value="block">Block</option></select><button type="submit" class="secondary" id="save-site">Add website</button></div>
+      </form>
+      <ul id="site-list" aria-label="Saved website rules"></ul><p id="site-status" class="muted" role="status"></p>
+    </details>
+    <details class="setting-section"><summary>ChatGPT desktop control</summary>
+      <label class="setting-row">Allow desktop requests<input id="desktop-setting" type="checkbox" role="switch"></label>
+      <p class="muted">The local Safari Chat plugin sends approvals to the originating ChatGPT thread. Requires the signed companion app.</p>
+    </details>
+    <details class="setting-section"><summary>Context and usage</summary>
+      <p class="muted" id="usage">Local context</p>
+      <p class="muted">Page size limits each excerpt. The input budget covers excerpts and messages together. Recent turns includes your current message.</p>
       <label class="setting-row">Page size<select id="page-setting"><option value="6000">6,000 characters</option><option value="12000">12,000 characters</option><option value="24000">24,000 characters</option></select></label>
       <label class="setting-row">Total input budget<select id="budget-setting"><option value="24000">24,000 characters</option><option value="48000">48,000 characters</option><option value="96000">96,000 characters</option></select></label>
       <label class="setting-row">Recent turns<select id="turns-setting"><option value="4">4 turns</option><option value="8">8 turns</option><option value="16">16 turns</option></select></label>
-    </div>
-    <div class="dialog-actions"><button class="secondary" id="export-button">Export chat</button><button class="secondary" id="signout-button">Sign out</button><button class="primary" id="save-settings">Save settings</button></div>
-    <p class="muted">Safari Chat is an independent companion for ChatGPT.</p>
-    <div class="setting-section"><h3>Remove your data</h3><p class="muted">Erase this Safari profile's chats, drafts and settings, plus all Safari Chat accounts saved on this Mac. Active tasks stop. Run this in each profile before uninstalling.</p><button class="secondary" id="erase-data-button">Erase local data…</button><button class="secondary" id="finish-removal-button" hidden>Open companion app to finish removal ↗</button><p id="cleanup-result" class="muted" role="status" hidden></p></div>
+    </details>
+    <div class="setting-section settings-links"><button id="export-button">Export chat as Markdown</button><button id="signout-button">Sign out</button></div>
+    <details class="setting-section" id="data-section"><summary>Remove your data</summary>
+      <p class="muted">Erase this profile’s chats, drafts and settings, plus all Safari Chat accounts saved on this Mac. Active tasks stop. Run cleanup in each profile before uninstalling.</p>
+      <button class="secondary" id="erase-data-button">Erase local data…</button><button class="secondary" id="finish-removal-button" hidden>Open companion app to finish removal ↗</button><p id="cleanup-result" class="muted" role="status" hidden></p>
+    </details>
+    <div class="sheet-footer"><p id="settings-status" class="muted" role="status"></p><button class="primary" data-close="settings-dialog">Done</button><p class="muted">Safari Chat is an independent companion for ChatGPT.</p></div>
   </dialog>
 </body>
 </html>

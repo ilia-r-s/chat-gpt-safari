@@ -13,7 +13,9 @@ To preview the interface without signing (Safari with Add Temporary Extension):
 1. In Safari Settings > Advanced, enable Show features for web developers.
 2. In Developer settings, choose Add Temporary Extension and select this repo's
    extension folder. Allow unsigned extensions when prompted.
-3. Enable Safari Chat and open its toolbar panel on a website.
+3. Enable Safari Chat and click its toolbar button on a website. Chat docks on
+   the right in that tab. If the toolbar shows !, hover over it for the reason
+   and check the extension's access to that website.
 Temporary extensions cannot use this app's native messaging. Connect account
 shows setup instructions; sign-in, inference, and native cleanup need the
 packaged app and its embedded extension. Adding the folder does not install the
@@ -31,7 +33,8 @@ To test the complete extension:
 5. Open Safari > Settings > Extensions and enable Safari Chat.
 6. Open Safari Chat from the toolbar on a website. Choose Continue with ChatGPT
    to sign in through your browser, or add an API-key connection in the Mac app.
-   Find your account, model and appearance in Settings in the panel header.
+   Choose model and effort above the composer. The approval selector beside +
+   offers automatic website access. Manage accounts and website rules in Settings.
 
 If an older preview opens safarichat://connect and Safari says the address is
 invalid, reload the temporary extension after updating the repo. Current builds

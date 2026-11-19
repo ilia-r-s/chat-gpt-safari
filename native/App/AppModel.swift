@@ -10,9 +10,10 @@ final class AppModel: ObservableObject {
     private var generation = "local"
     @Published var busy = false
     @Published var message = ""
-    @Published var extensionEnabled = false
+    @Published var extensionEnabled: Bool?
     @Published var apiKey = ""
     @Published var showAPIKey = false
+    @Published var keyEntryRequest = 0
     private var signInTask: Task<Void, Never>?
     private var listener: LoopbackListener?
     private var preparingRemoval = false
@@ -24,7 +25,7 @@ final class AppModel: ObservableObject {
         do { let vault = try CredentialStore.read(); accounts = vault.accounts; activeID = vault.activeID; generation = vault.generation }
         catch { message = error.localizedDescription }
         SFSafariExtensionManager.getStateOfSafariExtension(withIdentifier: Configuration.extensionID) { [weak self] state, _ in
-            Task { @MainActor in self?.extensionEnabled = state?.isEnabled ?? false }
+            Task { @MainActor in self?.extensionEnabled = state?.isEnabled }
         }
     }
 
@@ -89,6 +90,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func openKeyEntry() {
+        guard !busy, !preparingRemoval else { return }
+        showAPIKey = true
+        keyEntryRequest += 1
+    }
+
     func connectAPIKey(_ input: String, name: String, replacing id: String?) {
         let key = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard key.hasPrefix("sk-"), key.count >= 20, key.count < 512, !key.contains(where: \.isWhitespace) else { message = "Enter a valid OpenAI API key."; return }
@@ -108,6 +115,7 @@ final class AppModel: ObservableObject {
                     guard vault.generation == original.generation else { throw ChatError.message("The selected account changed while connecting. Please try again.") }
                     try vault.connectKey(key, name: name, replacing: id)
                 }
+                apiKey = ""; showAPIKey = false
                 refresh(); message = id == nil ? "API key connected. This connection has its own chat history." : "Key replaced. This connection’s chat history is available."
                 AccountEvents.notify(Configuration.extensionID)
             } catch { message = error.localizedDescription }

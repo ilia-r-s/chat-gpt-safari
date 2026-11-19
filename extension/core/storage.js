@@ -63,11 +63,15 @@ export function prepareChat(all, chat, retainID) {
   return { value, remove };
 }
 
-export async function saveChat(storage, chat) {
-  const { value, remove, unchanged } = prepareChat(await storage.get(null), chat);
-  if (unchanged) return value;
+export async function saveChat(storage, chat, activePointer) {
+  const all = await storage.get(null);
+  const { value, remove, unchanged } = prepareChat(all, chat);
+  const pointer = activePointer && all[activePointer];
+  const followCopy = value.id !== chat.id && pointer && pointer.id === chat.id && pointer.account === chat.account && !all[`composer:${chat.id}`];
+  if (unchanged && !followCopy) return value;
   if (remove.length) await storage.remove(remove);
-  await storage.set({ [chatKey(value.id)]: value });
+  await storage.set({ [chatKey(value.id)]: value,
+    ...(followCopy ? { [activePointer]: { ...pointer, id: value.id, updated: Date.now() } } : {}) });
   return value;
 }
 

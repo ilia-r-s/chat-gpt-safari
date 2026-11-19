@@ -1,3 +1,4 @@
+import { anchorPopover } from "./popover.js";
 import { textPrefix } from "../core/context.js";
 
 const $ = id => document.getElementById(id);
@@ -21,16 +22,7 @@ export async function readTextFiles(files, limit) {
 
 export function setupAttachments({ state, add, readPage, listTabs, report }) {
   const menu = $("add-menu"), trigger = $("add-button");
-  const closeMenu = () => { if (menu.matches(":popover-open")) menu.hidePopover(); };
-  const positionMenu = () => {
-    const rect = trigger.getBoundingClientRect();
-    menu.style.left = `${Math.max(12, Math.min(rect.left - 12, innerWidth - Math.min(410, innerWidth - 24) - 12))}px`;
-    menu.style.bottom = `${Math.max(12, innerHeight - rect.top + 8)}px`;
-    menu.style.maxHeight = `${Math.max(140, Math.min(460, rect.top - 20))}px`;
-  };
-  menu.addEventListener("beforetoggle", event => { if (event.newState === "open") positionMenu(); });
-  menu.addEventListener("toggle", () => { trigger.setAttribute("aria-expanded", String(menu.matches(":popover-open"))); });
-  window.addEventListener("resize", () => { if (menu.matches(":popover-open")) positionMenu(); });
+  const closeMenu = anchorPopover(menu, trigger, 306);
   const run = callback => async () => {
     const owner = state().owner;
     closeMenu();

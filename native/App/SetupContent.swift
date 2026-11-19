@@ -31,6 +31,7 @@ struct SetupAccount: Identifiable {
     let isSelected: Bool
     let isAPIKey: Bool
     var needsKey = false
+    var canChat = true
 }
 
 enum SetupAction {
@@ -42,51 +43,68 @@ struct SetupContent: View {
     let accounts: [SetupAccount]
     let busy: Bool
     let message: String
-    let extensionEnabled: Bool
+    let extensionEnabled: Bool?
     @Binding var apiKey: String
     @Binding var showAPIKey: Bool
     @Binding var appearance: AppAppearance
+    var keyEntryRequest = 0
     let perform: (SetupAction) -> Void
+    @FocusState private var keyFocused: Bool
     @State private var keyName = ""
     @State private var replacing: String?
     @Environment(\.colorScheme) private var colorScheme
     private var palette: SetupPalette { SetupPalette(dark: colorScheme == .dark) }
     private var hasSelection: Bool { accounts.contains(where: \.isSelected) }
 
+    private var hasChatAccount: Bool { accounts.contains { $0.isSelected && $0.canChat } }
+    private var setupTitle: String {
+        if showAPIKey { return replacing == nil ? "Connect an API key" : "Replace an API key" }
+        if !hasChatAccount { return hasSelection ? "Enable chat for your account" : "Connect your account" }
+        return extensionEnabled == true ? "Open side chat in Safari" : "Enable Safari Chat in Safari"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(palette.line).frame(height: 1)
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(hasSelection ? "Accounts and Safari" : "Set up Safari Chat")
-                            .font(.system(size: 27, weight: .semibold)).tracking(-0.6)
-                        Text(hasSelection && extensionEnabled ? "Open side chat from the Safari toolbar or press ⌘⇧. on a website." : "Connect an account and enable the extension to chat beside a webpage.")
-                            .font(.system(size: 13)).foregroundStyle(palette.muted).lineSpacing(4)
-                    }.padding(.vertical, 4)
-                    accountCard
-                    safariCard
+                    Text(setupTitle).font(.system(size: 27, weight: .semibold)).tracking(-0.7)
+                    if !message.isEmpty {
+                        Label { Text(message).textSelection(.enabled).fixedSize(horizontal: false, vertical: true) }
+                            icon: { Image(systemName: "info.circle") }
+                            .font(.system(size: 12)).foregroundStyle(palette.muted)
+                    }
+                    if hasChatAccount && !showAPIKey {
+                        safariCard
+                        accountCard
+                    } else {
+                        accountCard
+                        safariCard
+                    }
                     localData
-                }.padding(28).frame(maxWidth: 680)
+                }.frame(maxWidth: 620, alignment: .leading).padding(.horizontal, 28).padding(.vertical, 20)
                     .frame(maxWidth: .infinity)
             }
-            Rectangle().fill(palette.line).frame(height: 1)
+            Divider()
             footer
-        }.foregroundStyle(palette.text).tint(palette.text).background(palette.background)
+        }.foregroundStyle(palette.text).tint(palette.text).background(palette.surface)
             .background(WindowAppearance(appearance: appearance))
             .frame(minWidth: 520, minHeight: 560)
+            .onChange(of: showAPIKey) { _, expanded in
+                if !expanded && apiKey.isEmpty { replacing = nil; keyName = "" }
+            }
+            .onChange(of: keyEntryRequest) { _, _ in
+                if replacing != nil { editKey(nil) }
+                keyFocused = true
+            }
     }
 
     private var header: some View {
         HStack(spacing: 12) {
             Image(nsImage: appIcon).resizable().interpolation(.high)
-                .frame(width: 42, height: 42)
+                .frame(width: 26, height: 26)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Safari Chat").font(.system(size: 15, weight: .semibold))
-                Text("Account & setup").font(.system(size: 11)).foregroundStyle(palette.muted)
-            }
+            Text("Safari Chat").font(.system(size: 15, weight: .semibold))
             Spacer()
             Menu {
                 Picker("App appearance", selection: $appearance) {
@@ -97,21 +115,13 @@ struct SetupContent: View {
                     .font(.system(size: 12))
             }.menuStyle(.borderlessButton).fixedSize()
                 .help("Appearance for this app").accessibilityLabel("App appearance: \(appearance.title)")
-        }.padding(.horizontal, 28).padding(.top, 22).padding(.bottom, 20)
+        }.padding(.horizontal, 28).padding(.top, 22).padding(.bottom, 10)
             .background(palette.surface)
     }
 
     private var accountCard: some View {
-        card("Account", symbol: "person.crop.circle", status: hasSelection ? "Saved on this Mac" : "Sign in") {
-            if !message.isEmpty {
-                HStack(alignment: .top, spacing: 9) {
-                    Image(systemName: "info.circle").accessibilityHidden(true)
-                    Text(message).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                }.font(.system(size: 12)).lineSpacing(3).padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(palette.soft, in: RoundedRectangle(cornerRadius: 9))
-                    .accessibilityLabel("Status: \(message)")
-            }
+        section("Accounts", symbol: "person.crop.circle") {
+            if showAPIKey { keyForm }
             if !accounts.isEmpty {
                 VStack(spacing: 8) {
                     ForEach(accounts) { account in
@@ -131,7 +141,7 @@ struct SetupContent: View {
                             }.buttonStyle(.plain).disabled(busy)
                                 .accessibilityLabel("\(account.title), \(account.isSelected ? "selected" : "select account")")
                             if account.isAPIKey {
-                                Button("Replace key") { editKey(account.id) }.buttonStyle(SetupButtonStyle()).disabled(busy)
+                                Button(account.needsKey ? "Reconnect" : "Replace key") { editKey(account.id) }.buttonStyle(SetupButtonStyle()).disabled(busy)
                             } else {
                                 Button("Reconnect") { perform(.reconnect(account.id)) }
                                     .buttonStyle(SetupButtonStyle()).disabled(busy)
@@ -150,31 +160,36 @@ struct SetupContent: View {
                     Button("Sign out") { perform(.signOut) }.buttonStyle(SetupButtonStyle())
                 }
             }
-            Text("Sign in through your browser. Eligible accounts can authorize ChatGPT plan usage. Existing ChatGPT chats stay in ChatGPT.")
+            Text("Sign in through your browser to use an eligible ChatGPT plan. Each connection has its own local chats.")
                 .font(.system(size: 12)).foregroundStyle(palette.muted).lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
-            DisclosureGroup("API key connections", isExpanded: $showAPIKey) {
-                VStack(alignment: .leading, spacing: 9) {
-                    if let account = accounts.first(where: { $0.id == replacing }) {
-                        Text("Replace the key for \(account.title) to keep its chats and drafts.")
-                        Button("Add a separate connection") { editKey(nil) }.buttonStyle(.link).disabled(busy)
-                    } else {
-                        TextField("Connection name (optional)", text: $keyName).textFieldStyle(.roundedBorder).disabled(busy)
-                    }
-                    HStack(spacing: 10) {
-                        SecureField("OpenAI API key", text: $apiKey).textFieldStyle(.plain)
-                            .padding(10).background(palette.soft, in: RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(palette.line))
-                            .disabled(busy).onSubmit { if !busy && !apiKey.isEmpty { submitKey() } }
-                        Button(replacing == nil ? "Connect" : "Replace key") { submitKey() }
-                            .buttonStyle(SetupButtonStyle()).disabled(busy || apiKey.isEmpty)
-                    }
-                    Text("New connections keep separate chat histories. Keys are stored in macOS Keychain and use API billing.")
-                        .font(.system(size: 11)).foregroundStyle(palette.muted)
-                }.padding(.top, 10)
-            }.font(.system(size: 12))
+            if !showAPIKey { keyForm }
 
         }
+    }
+
+    private var keyForm: some View {
+        DisclosureGroup("Use an OpenAI API key", isExpanded: $showAPIKey) {
+            VStack(alignment: .leading, spacing: 9) {
+                if let account = accounts.first(where: { $0.id == replacing }) {
+                    Text("Replace the key for \(account.title) to keep its chats and drafts.")
+                    Button("Add a separate connection") { editKey(nil) }.buttonStyle(.link).disabled(busy)
+                } else {
+                    TextField("Connection name (optional)", text: $keyName).textFieldStyle(.roundedBorder).disabled(busy)
+                }
+                HStack(spacing: 10) {
+                    SecureField("OpenAI API key", text: $apiKey).textFieldStyle(.plain).focused($keyFocused)
+                        .onAppear { keyFocused = true }
+                        .padding(10).background(palette.soft, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(palette.line))
+                        .disabled(busy).onSubmit { if !busy && !apiKey.isEmpty { submitKey() } }
+                    Button(replacing == nil ? "Connect" : "Replace key") { submitKey() }
+                        .buttonStyle(SetupButtonStyle()).disabled(busy || apiKey.isEmpty)
+                }
+                Text("Keys are stored in macOS Keychain. Requests use your OpenAI API billing account.")
+                    .font(.system(size: 11)).foregroundStyle(palette.muted)
+            }.padding(.top, 10)
+        }.font(.system(size: 12))
     }
 
     private func editKey(_ id: String?) {
@@ -186,28 +201,33 @@ struct SetupContent: View {
     }
 
     private var safariCard: some View {
-        card("Safari extension", symbol: "safari", status: extensionEnabled ? "Enabled" : "Set up") {
-            Text(extensionEnabled ? "Click Safari Chat in the Safari toolbar on a website to start a conversation." : "Open Safari settings, choose Extensions, and turn on Safari Chat.")
-                .font(.system(size: 12)).foregroundStyle(palette.muted).lineSpacing(3)
-                .fixedSize(horizontal: false, vertical: true)
-            Button { perform(.safariSettings) } label: {
-                HStack(spacing: 10) { Text("Open Safari Settings"); Image(systemName: "arrow.up.right").font(.system(size: 10)) }
-            }.buttonStyle(SetupButtonStyle())
-            Text("You can quit this app. Safari opens it when sign-in is needed.")
-                .font(.system(size: 11)).foregroundStyle(palette.muted)
-                .fixedSize(horizontal: false, vertical: true)
+        section("Safari extension", symbol: "safari") {
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(extensionEnabled.map { $0 ? "Enabled in Safari" : "Extension is off" } ?? "Check extension access")
+                        .font(.system(size: 13, weight: .medium))
+                    Text(extensionEnabled == true
+                         ? "Open a website and click Safari Chat in the toolbar, or press ⌘⇧. to open side chat."
+                         : "In Safari Settings, select Extensions and enable Safari Chat.")
+                        .font(.system(size: 12)).foregroundStyle(palette.muted).fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Button(extensionEnabled == true ? "Manage in Safari ↗" : "Open Safari Settings ↗") { perform(.safariSettings) }
+                    .buttonStyle(SetupButtonStyle(prominent: hasChatAccount && extensionEnabled != true))
+            }
         }
     }
 
     private var localData: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text("Local data").font(.system(size: 12, weight: .semibold))
-            Text("For chats and drafts, open the chat panel’s Settings → Erase local data. Remove saved accounts and app preferences here.")
-                .font(.system(size: 11)).foregroundStyle(palette.muted).lineSpacing(3)
-                .fixedSize(horizontal: false, vertical: true)
-            Button("Erase native data and quit…") { perform(.eraseData) }
-                .buttonStyle(SetupButtonStyle()).disabled(busy)
-        }.padding(.horizontal, 4).padding(.top, 4)
+        DisclosureGroup("Local data") {
+            VStack(alignment: .leading, spacing: 9) {
+                Text("To remove chats and website rules, open Remove your data in the side chat’s Settings. This app can also erase saved accounts and app preferences.")
+                    .font(.system(size: 12)).foregroundStyle(palette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Erase native data and quit…") { perform(.eraseData) }
+                    .buttonStyle(SetupButtonStyle()).disabled(busy)
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+        }.font(.system(size: 13, weight: .medium))
     }
 
     private var footer: some View {
@@ -222,20 +242,12 @@ struct SetupContent: View {
             .background(palette.surface)
     }
 
-    private func card<Content: View>(_ title: String, symbol: String, status: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 15) {
-            HStack(spacing: 9) {
-                Image(systemName: symbol).font(.system(size: 18)).accessibilityHidden(true)
-                Text(title).font(.system(size: 14, weight: .semibold))
-                Spacer(minLength: 8)
-                Text(status).font(.system(size: 10, weight: .medium)).foregroundStyle(palette.muted)
-                    .padding(.horizontal, 9).padding(.vertical, 5)
-                    .background(palette.soft, in: Capsule())
-            }
+    private func section<Content: View>(_ title: String, symbol: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Divider()
+            Label(title, systemImage: symbol).font(.system(size: 14, weight: .semibold))
             content()
-        }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
-            .background(palette.surface, in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(palette.line))
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -249,16 +261,15 @@ private struct SetupButtonStyle: ButtonStyle {
         configuration.label.font(.system(size: 12, weight: .medium))
             .padding(.horizontal, 13).padding(.vertical, 10)
             .foregroundStyle(prominent ? palette.surface : palette.text)
-            .background(prominent ? palette.text : palette.soft, in: RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(prominent ? .clear : palette.line))
+            .background(prominent ? palette.text : palette.soft, in: Capsule())
+            .overlay(Capsule().strokeBorder(prominent ? .clear : palette.line))
             .opacity(!isEnabled ? 0.4 : configuration.isPressed ? 0.7 : 1)
     }
 }
 
 private struct SetupPalette {
     let dark: Bool
-    var background: Color { color(dark ? 0x212121 : 0xf7f7f7) }
-    var surface: Color { color(dark ? 0x303030 : 0xffffff) }
+    var surface: Color { color(dark ? 0x1b1b1b : 0xffffff) }
     var text: Color { color(dark ? 0xececec : 0x202020) }
     var muted: Color { color(dark ? 0xb4b4b4 : 0x686868) }
     var soft: Color { color(dark ? 0x3a3a3a : 0xf5f5f5) }

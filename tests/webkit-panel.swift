@@ -28,9 +28,10 @@ window.browser = { runtime: {
   id: "webkit-fixture", onMessage: { addListener() {} },
   sendMessage: async ({type, settings, draft}) => {
     let value;
-    if (type === "bootstrap") value = { prefs, auth: { account: "fixture", label: "Fixture account", generation: "session", connected: true, canInfer: true }, models: [{id:"fixture", name:"Fixture"}] };
+    if (type === "bootstrap") value = { prefs, auth: { account: "fixture", label: "Fixture account", generation: "session", connected: true, canInfer: true }, models: [{id:"fixture", name:"Fixture", reasoningEfforts:["low","high"]}] };
     if (type === "tabs.list") value = [{id: 1, title: "Travel notes", url: "https://example.org/notes"}];
     if (type === "context.read") { reads++; value = { kind: "page", key: "notes", tabId: 1, title: "Travel notes", text: "Arrive at noon." }; }
+    if (type === "access.change") value = { mode: "auto", allowed: [], blocked: [] };
     if (type === "settings.save") value = Object.assign(prefs, settings);
     if (type === "draft.save") value = {...draft, revision:"saved"};
     return {ok:true, value};
@@ -54,7 +55,10 @@ addEventListener("load", async () => {
     await wait(() => prompt.value === "Compare " && $check("attachments").textContent.includes("Travel notes"));
     if (reads !== 1) throw Error("Unexpected number of page reads");
     $check("add-button").click(); await wait(() => $check("add-menu").matches(":popover-open")); $check("add-menu").hidePopover();
-    $check("actions-guidance").click(); await wait(() => $check("settings-dialog").open);
+    if (!$check("model").getClientRects().length || !$check("effort").getClientRects().length) throw Error("Missing main-screen response settings");
+    $check("actions-guidance").click(); await wait(() => $check("access-menu").matches(":popover-open"));
+    $check("auto-mode").click(); await wait(() => $check("mode-label").textContent === "Approve for me");
+    $check("settings-button").click(); await wait(() => $check("settings-dialog").open);
     $check("theme-setting").value = "dark"; $check("theme-setting").dispatchEvent(new Event("change"));
     await wait(() => getComputedStyle(document.body).backgroundColor === "rgb(27, 27, 27)");
     report("passed");

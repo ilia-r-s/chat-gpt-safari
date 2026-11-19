@@ -9,17 +9,21 @@ export async function testPanelMount(browser, origin) {
     globalThis.browser = { runtime: {
       id: 'dock-test', getURL: name => `${origin}/${name}`,
       onMessage: { addListener: listener => { globalThis.__mountMessage = listener; } },
-      sendMessage: async message => ({ ok: true, value: message.type === 'bootstrap' ? {
+      sendMessage: async message => {
+        if (message.type === 'panel.present') await parent.__mountMessage({ type: 'panel.ready', token: message.dockToken }, { id: 'dock-test' });
+        if (message.type === 'dock.dismiss') await globalThis.__mountMessage({ type: 'panel.close' }, { id: 'dock-test' });
+        return { ok: true, value: message.type === 'bootstrap' ? {
         prefs: { theme: 'light', model: 'test-model', pageChars: 12000, inputChars: 48000, historyTurns: 8, maxToolRounds: 6, desktopControl: false },
-        auth: { connected: true, canInfer: true, account: 'dock-test', label: 'Test account' }, models: [{ id: 'test-model', name: 'Test model', reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] }],
-      } : undefined }),
+        auth: { connected: true, canInfer: true, account: 'dock-test', generation: 'dock-session', label: 'Test account' }, models: [{ id: 'test-model', name: 'Test model', reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] }],
+        } : undefined };
+      },
     } };
   };
   await page.addInitScript(installBrowser, { origin });
-  await page.goto(`${origin}/__dock_fixture__`);
+  await page.goto(`${origin}/__workflow/one`);
   await page.setContent(`<!doctype html><html style="padding-right:0px;color:rgb(20,20,20)"><head><style>
     * { box-sizing:border-box } body { margin:0; font:16px system-ui; color:#202020; background:#f5f5f5 }
-    #site { width:100vw } header { position:fixed; left:0; top:0; width:100%; height:68px; padding:22px 32px; background:white; border-bottom:1px solid #ddd }
+    #site { width:100vw; overflow-x:clip } header { position:fixed; left:0; top:0; width:100%; height:68px; padding:22px 32px; background:white; border-bottom:1px solid #ddd }
     main { padding:110px 48px 48px; min-height:1900px } h1 { font-size:36px; letter-spacing:-1px } p { max-width:650px; line-height:1.7 }
     .cards { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:20px; margin-top:32px }
     article { padding:24px; background:white; border:1px solid #ddd; border-radius:14px; min-height:180px }
@@ -30,15 +34,29 @@ export async function testPanelMount(browser, origin) {
     <label>Your draft <input id="draft" value="Keep this text"></label><div class="cards"><article>Research</article><article>Planning</article><article>Writing</article></div>
     </main><button id="floating">Page help</button></div></body></html>`);
   await page.evaluate(installBrowser, { origin });
+  // Observe the fixture's closed shadow root so Retry and Close can be exercised
+  // with trusted pointer input, including when the panel document never loads.
+  await page.evaluate(() => {
+    const attach = Element.prototype.attachShadow;
+    Element.prototype.attachShadow = function(init) {
+      const shadow = attach.call(this, init);
+      if (this.id === 'safari-chat-host') window.dockShadow = shadow;
+      return shadow;
+    };
+  });
   const source = await readFile('extension/content/mount.js', 'utf8');
   await page.evaluate(source);
   await page.locator('#draft').focus();
   await page.locator('#floating').evaluate(button => button.addEventListener('click', () => { window.pageClicks = (window.pageClicks ?? 0) + 1; }));
   const initial = await page.evaluate(() => ({ root: document.documentElement.style.cssText, body: document.body.style.cssText, site: document.getElementById('site').style.cssText, header: document.querySelector('header').style.cssText, floating: document.getElementById('floating').style.cssText }));
-  const message = type => page.evaluate(type => globalThis.__mountMessage({ type, url: browser.runtime.getURL('panel/panel.html?tab=1') }, { id: browser.runtime.id }), type);
+  const message = type => page.evaluate(type => globalThis.__mountMessage({ type, token: 'test-grant', url: browser.runtime.getURL('panel/panel.html?tab=1') }, { id: browser.runtime.id }), type);
   await assert.rejects(page.evaluate(() => globalThis.__mountMessage({ type: 'panel.show', url: 'https://other.example/panel.html' }, { id: browser.runtime.id })), /Invalid panel URL/);
   assert.equal(await page.evaluate(() => globalThis.__mountMessage({ type: 'panel.show', url: browser.runtime.getURL('panel/panel.html') }, { id: 'another-extension' })), undefined);
   assert.equal((await message('panel.show')).ok, true);
+  assert.ok(await page.evaluate(() => {
+    const frame = window.dockShadow.querySelector('iframe');
+    return frame.getAttribute('aria-label') === 'Safari Chat' && !frame.hasAttribute('title');
+  }), 'the frame has an accessible name without a tooltip across the conversation');
   const panel = page.frames().find(frame => frame.url().includes('/panel/panel.html')) ?? await page.waitForEvent('framenavigated', { predicate: frame => frame.url().includes('/panel/panel.html') });
   await panel.waitForFunction(() => document.getElementById('account-label')?.textContent === 'Test account');
   const bounds = () => page.evaluate(() => {
@@ -123,11 +141,48 @@ export async function testPanelMount(browser, origin) {
   await message('panel.show');
   assert.ok(await page.evaluate(() => document.body.getBoundingClientRect().right <= document.getElementById('safari-chat-host').getBoundingClientRect().left + 1), 'fixed body layouts also leave room for chat');
   await page.locator('#safari-chat-host').evaluate(host => host.remove());
-  await page.waitForFunction(() => document.documentElement.style.paddingRight === '8px');
+  await page.waitForFunction(() => globalThis.__safariChatPageRight === undefined);
   assert.equal(await page.evaluate(() => document.body.style.position), 'fixed', 'restore the website fixed-body layout');
   await page.setViewportSize({ width: 640, height: 700 });
-  assert.equal((await message('panel.show')).standalone, true, 'narrow windows use a standalone chat instead of covering the website');
-  assert.equal(await page.locator('#safari-chat-host').count(), 0);
+  assert.equal((await message('panel.show')).ok, true);
+  const narrow = page.frames().find(frame => frame.url().includes('/panel/panel.html')) ?? await page.waitForEvent('framenavigated', { predicate: frame => frame.url().includes('/panel/panel.html') });
+  await narrow.waitForFunction(() => document.getElementById('account-label')?.textContent === 'Test account');
+  await narrow.locator('#prompt').fill('Present beside the page');
+  for (const width of [640, 500, 390]) {
+    await page.setViewportSize({ width, height: 700 }); await waitWidth(width / 2);
+    const { panel, site, floating } = await bounds();
+    assert.equal(panel.right, width); assert.ok(site.right <= panel.left + 1 && floating.right <= panel.left + 1);
+    assert.equal(await narrow.locator('#prompt').inputValue(), 'Present beside the page');
+    assert.ok(await narrow.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await narrow.getByRole('button', { name: 'Settings', exact: true }).click();
+    await narrow.getByRole('button', { name: 'Close settings' }).click();
+    if (width === 640) await page.screenshot({ path: 'build/screenshots/panel-narrow-docked.png' });
+  }
+  await message('panel.close');
+
+  const panelURL = origin + '/panel/panel.html?tab=1';
+  const status = selector => page.evaluateHandle(selector => window.dockShadow.querySelector(selector), selector);
+  const waitForRetry = () => page.waitForFunction(() => !window.dockShadow.querySelector('button:not(.close)').hidden);
+  const waitForChat = () => page.waitForFunction(() => window.dockShadow.querySelector('.load-status').hidden);
+  const held = Promise.withResolvers();
+  await page.route(panelURL, route => held.resolve(route), { times: 1 });
+  await message('panel.show');
+  const route = await held.promise;
+  await waitForRetry();
+  assert.equal(await page.locator('#safari-chat-host').count(), 1);
+  await route.continue(); await waitForChat();
+  await message('panel.close');
+
+  await page.route(panelURL, route => route.abort(), { times: 1 });
+  await message('panel.show'); await waitForRetry();
+  await (await status('.load-status button:not(.close)')).asElement().click();
+  await waitForChat();
+  await message('panel.close');
+  await page.route(panelURL, route => route.abort(), { times: 1 });
+  await message('panel.show');
+  await (await status('.load-status .close')).asElement().click();
+  await page.locator('#safari-chat-host').waitFor({ state: 'detached' });
+  assert.equal(page.context().pages().length, 1);
   assert.deepEqual(errors, []);
   await page.close();
 }

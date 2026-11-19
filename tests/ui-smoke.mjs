@@ -9,7 +9,9 @@ import { pathToFileURL } from "node:url";
 import { snapshotPage, actOnPage } from "../extension/content/page.js";
 import { testPageInteractions } from "./page-interactions.mjs";
 import { testGalleryInteractions } from "./gallery-interactions.mjs";
+import { testSideChatIntegration, testDockWorkflow } from "./side-chat-integration.mjs";
 import { testBrowserAgent } from "./browser-agent.mjs";
+import { testWebKitDock } from "./webkit-dock.mjs";
 import { testPanelMount } from "./panel-mount.mjs";
 import { testComposerFeatures } from "./composer-features.mjs";
 
@@ -18,7 +20,11 @@ if (!modulePath) throw new Error("Set SAFARI_CHAT_PLAYWRIGHT to an existing play
 const { chromium } = await import(pathToFileURL(modulePath).href);
 const root = path.resolve("extension");
 const server = createServer(async (request, response) => {
-  if (request.url === "/__dock_fixture__") { response.setHeader("Content-Type", "text/html"); response.end("<!doctype html><title>Dock test</title>"); return; }
+  if (request.url.startsWith("/__workflow/")) {
+    const step = request.url.endsWith("/three") ? "Three" : request.url.endsWith("/two") ? "Two" : "One";
+    response.setHeader("Content-Type", "text/html");
+    response.end(`<!doctype html><title>Step ${step}</title><style>*{box-sizing:border-box}body{margin:0}main{width:100vw;height:230vh;padding:75px 24px}header{position:fixed;inset:0 0 auto;width:100vw}button{position:fixed;right:16px;bottom:16px}@media(max-width:1050px){main{display:grid;align-content:start;gap:16px}}</style><header>Workflow</header><main>Workflow step ${step}<a href="/__workflow/three">Continue</a></main><button>Page help</button>`); return;
+  }
   const filename = path.resolve(root, `.${new URL(request.url, "http://localhost").pathname}`);
   if (!filename.startsWith(root + path.sep)) { response.writeHead(403).end(); return; }
   try {
@@ -49,10 +55,10 @@ try {
         if (message.type === "auth.check") value = { generation: account };
         if (message.type === "bootstrap") value = globalThis.__companionError
           ? { prefs, auth: { connected: false, error: globalThis.__companionError }, models: [] }
-          : { prefs, auth: { connected: true, canInfer: true, account, generation: account, label: account === "test-account" ? "Test account" : "Other account" }, models: [{ id: "test-model", name: "Test model", reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] }, { id: "basic-model", name: "Basic model", reasoningEfforts: [] }], activeChat: sessions[account] };
-        if (message.type === "auth.open" || message.type === "auth.signin") {
+          : { prefs, auth: { connected: true, canInfer: true, account, generation: account, label: account === "test-account" ? "Test account" : "Other account" }, models: [{ id: "test-model", name: "Test model", reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] }, { id: "basic-model", name: "Basic model", reasoningEfforts: [] }], activeChat: sessions[account], access: state.access?.[account] };
+        if (["auth.open", "auth.signin", "auth.apikey"].includes(message.type)) {
           if (globalThis.__companionError) return { ok: false, error: globalThis.__companionError };
-          globalThis.__companionOpened = true; globalThis.__signInStarted = message.type === "auth.signin"; value = { ok: true };
+          globalThis.__companionOpened = true; globalThis.__companionRoute = message.type; globalThis.__signInStarted = message.type === "auth.signin"; value = { ok: true };
         }
         if (message.type === "tabs.list") value = [{ id: 1, title: "A useful page", url: "https://example.com/" }, { id: 2, title: "Guide", url: "https://example.com/guide" }, { id: 3, title: "Notes", url: "https://example.com/notes" }];
         if (message.type === "context.read") {
@@ -93,7 +99,7 @@ try {
           Object.assign(prefs, message.settings); value = { ...prefs };
           globalThis.__storageChange?.({ settings: { oldValue, newValue: { ...prefs } } }, "local");
         }
-        if (message.type === "panel.popout") { globalThis.__popout = message; value = { ok: true }; }
+        if (message.type === "panel.source") { globalThis.__returned = (globalThis.__returned ?? 0) + 1; value = { ok: true }; }
         if (message.type === "data.erase") { for (const store of [data, drafts, sessions]) for (const key of Object.keys(store)) delete store[key]; globalThis.__erased = true; value = { browserCleared: true, nativeCleared: true, failures: [] }; }
         value = structuredClone(value);
         if (message.type === "bootstrap" && globalThis.__holdBootstrap) {
@@ -133,14 +139,12 @@ try {
   const origin = `http://127.0.0.1:${server.address().port}`;
   await page.goto(`${origin}/panel/panel.html?tab=1`);
   await page.waitForFunction(() => document.getElementById("account-label").textContent === "Test account");
-  await page.locator("#settings-button").click();
   const effort = page.getByRole("combobox", { name: "Reasoning effort" });
   assert.equal(await effort.inputValue(), "auto");
   assert.deepEqual(await effort.locator("option").evaluateAll(options => options.map(option => option.value)), ["auto", "low", "medium", "high", "xhigh", "max"]);
   await effort.selectOption("high");
   await page.reload();
   await page.waitForFunction(() => document.getElementById("account-label").textContent === "Test account");
-  await page.locator("#settings-button").click();
   assert.equal(await effort.inputValue(), "high", "effort survives reopening the panel");
   await page.locator("#model").selectOption("basic-model");
   assert.equal(await page.locator("#effort-control").isVisible(), false);
@@ -148,6 +152,13 @@ try {
   await page.locator("#model").selectOption("test-model");
   assert.equal(await effort.inputValue(), "auto", "a model change cannot retain an unsupported effort");
   await effort.selectOption("high");
+  await page.locator("#settings-button").click();
+  await page.getByText("Context and usage", { exact: true }).click();
+  for (const [id, key, value] of [["page-setting", "pageChars", 6000], ["budget-setting", "inputChars", 96000], ["turns-setting", "historyTurns", 16]]) {
+    await page.locator("#" + id).selectOption(String(value));
+    await page.waitForFunction(([key, value]) => JSON.parse(sessionStorage.getItem("fixture")).prefs[key] === value, [key, value]);
+  }
+  await page.getByText("Context and usage", { exact: true }).click();
   const appearance = page.getByLabel("Appearance", { exact: true });
   await page.evaluate(() => { globalThis.__settingsDelay = 150; });
   for (const theme of ["dark", "light", "system"]) {
@@ -204,7 +215,9 @@ try {
   await page.evaluate(() => { delete globalThis.__companionError; });
   await page.getByRole("button", { name: "Try opening app again" }).click();
   await page.locator("#companion-dialog").waitFor({ state: "hidden" });
-  assert.equal(await page.evaluate(() => globalThis.__companionOpened), true);
+  assert.equal(await page.evaluate(() => globalThis.__companionRoute), "auth.signin");
+  await page.locator("#api-key-button").click();
+  assert.equal(await page.evaluate(() => globalThis.__companionRoute), "auth.apikey");
   await page.locator("#connect-button").click();
   assert.equal(await page.evaluate(() => globalThis.__signInStarted), true, "sign-in starts from the panel without opening a separate account-picker step");
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
@@ -270,7 +283,8 @@ try {
   await page.getByRole("button", { name: "Stop response" }).waitFor({ state: "visible" });
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   assert.equal(await effort.isDisabled(), true, "effort cannot change during a response");
-  assert.equal(await page.getByRole("button", { name: "Save settings" }).isDisabled(), true);
+  assert.equal(await page.getByRole("button", { name: "Done", exact: true }).isEnabled(), true, "settings can be dismissed while streaming");
+  assert.equal(await page.getByRole("button", { name: "Sign out", exact: true }).isDisabled(), true);
   await appearance.selectOption("dark");
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark", "appearance can change during a response");
   await page.getByRole("button", { name: "Close settings", exact: true }).click();
@@ -322,25 +336,23 @@ try {
   await page.getByRole("searchbox", { name: "Search chats" }).fill("Summarize this page.");
   await page.locator("#history-list .list-row > button:first-child").first().click();
   await page.waitForFunction(() => document.getElementById("prompt").value === "An unsent follow-up");
-  await page.locator("#open-tab-button").click();
-  assert.equal((await page.evaluate(() => globalThis.__popout)).chatId, originalId);
+  await page.getByRole("button", { name: "Return to source tab", exact: true }).click();
+  assert.equal(await page.evaluate(() => globalThis.__returned), 1);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByLabel("Appearance", { exact: true }).selectOption("dark");
-  await page.getByRole("button", { name: "Save settings" }).click();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
   assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), "rgb(27, 27, 27)");
   await page.screenshot({ path: "build/screenshots/panel-dark-chat.png" });
   await page.getByRole("button", { name: "Recent chats", exact: true }).click();
   await page.locator("#history-list .list-row > button:first-child").first().waitFor();
   await page.getByRole("button", { name: "Close recent chats" }).click();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.locator("#popout-button").click();
-  assert.equal((await page.evaluate(() => globalThis.__popout)).tabId, 1);
   await page.setViewportSize({ width: 320, height: 640 });
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
   assert.equal(overflow, false, "small panel must not overflow horizontally");
   await page.screenshot({ path: "build/screenshots/panel-small.png" });
   await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByText("Remove your data", { exact: true }).click();
   page.once("dialog", dialog => dialog.dismiss());
   await page.getByRole("button", { name: "Erase local data" }).click();
   assert.equal(await page.evaluate(() => globalThis.__erased), undefined, "cancelling cleanup must preserve stored data");
@@ -369,12 +381,15 @@ try {
   await testPageInteractions(browser);
   await testGalleryInteractions(browser);
   await testBrowserAgent(browser, origin);
+  await testSideChatIntegration(browser, origin);
   await testPanelMount(browser, origin);
+  await testDockWorkflow(browser, origin);
   if (process.env.SAFARI_CHAT_WEBKIT === "1") {
     const { stdout } = await promisify(execFile)("swift", ["-module-cache-path", path.resolve(".cache/swift"), "tests/webkit-panel.swift", `${origin}/panel/panel.html?tab=1`], { timeout: 90000 });
     process.stdout.write(stdout);
+    await testWebKitDock(origin);
   }
-  console.log("UI smoke passed: unified chat/browser tools, attachment menu, files, searchable tabs, web-search controls/citations, companion setup, streaming/cancellation, effort selection, escaped output, draft/account isolation, edit/retry, themes, narrow layout, cleanup barriers, page actions, transformed galleries, horizontal/RTL scroll areas, dock layout and panel resizing.");
+  console.log("UI smoke passed: chat and browser tools, composer settings, approvals, account isolation, page actions, galleries, narrow layout and multi-page workflows.");
 } finally {
   await browser?.close(); await new Promise(resolve => server.close(resolve));
 }

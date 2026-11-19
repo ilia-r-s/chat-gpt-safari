@@ -5,12 +5,12 @@ const modules = Object.create(null);
 // core/models.js
 modules["core/models.js"] = (() => {
 const EFFORTS = Object.freeze(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const EFFORT_LABELS = Object.freeze({ auto: "Auto", none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" });
+const EFFORT_LABELS = Object.freeze({ auto: "Model default", none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" });
 
-// Public model docs checked 2026-11-17. Explicit catalog capabilities take
+// Public model docs checked 2026-11-19. Explicit catalog capabilities take
 // precedence; do not infer support for unknown variants from a family prefix.
 const documented = Object.fromEntries([
-  [["gpt-6.1-sol", "gpt-6-astra"], ["low", "medium", "high", "xhigh", "max"]],
+  [["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-astra"], ["low", "medium", "high", "xhigh", "max"]],
   [["gpt-6-sol", "gpt-6-luna", "gpt-5.6", "gpt-5.6-sol"], ["none", "low", "medium", "high", "xhigh", "max"]],
   [["gpt-5.5", "gpt-5.4", "gpt-5.2"], ["none", "low", "medium", "high", "xhigh"]],
   [["gpt-5.1"], ["none", "low", "medium", "high"]],
@@ -39,7 +39,7 @@ function modelCatalog(data) {
 function resolveEffort(model, value = "auto") {
   if (value === "auto") return undefined;
   if (!EFFORTS.includes(value) || !model?.reasoningEfforts?.includes(value)) {
-    throw new Error("This reasoning effort is not available for the selected model. Choose Auto or refresh the model list.");
+    throw new Error("This reasoning effort is not available for the selected model. Choose Model default or reload the model list.");
   }
   return value;
 }
@@ -277,11 +277,15 @@ function prepareChat(all, chat, retainID) {
   return { value, remove };
 }
 
-async function saveChat(storage, chat) {
-  const { value, remove, unchanged } = prepareChat(await storage.get(null), chat);
-  if (unchanged) return value;
+async function saveChat(storage, chat, activePointer) {
+  const all = await storage.get(null);
+  const { value, remove, unchanged } = prepareChat(all, chat);
+  const pointer = activePointer && all[activePointer];
+  const followCopy = value.id !== chat.id && pointer && pointer.id === chat.id && pointer.account === chat.account && !all[`composer:${chat.id}`];
+  if (unchanged && !followCopy) return value;
   if (remove.length) await storage.remove(remove);
-  await storage.set({ [chatKey(value.id)]: value });
+  await storage.set({ [chatKey(value.id)]: value,
+    ...(followCopy ? { [activePointer]: { ...pointer, id: value.id, updated: Date.now() } } : {}) });
   return value;
 }
 
@@ -317,7 +321,7 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
     return (element.getAttribute("aria-label") || labelled || element.labels?.[0]?.innerText || element.getAttribute("placeholder") || (!field && element.innerText) || element.name || element.tagName).trim().slice(0, 120);
   };
   const sensitive = /password|passcode|credit.?card|debit.?card|card.?number|\bcc[-_](number|csc|exp|name)|\bcvc\b|\bcvv\b|security.?code|verification.?code|one.?time|\botp\b|secret|token/i;
-  const signature = (element, ignoreSelection = false) => JSON.stringify([element.tagName, element.type, element.name, element.getAttribute("role"), element.getAttribute("href"), element.getAttribute("target"), element.getAttribute("download"), element.form?.action, element.form?.method, element.getAttribute("formaction"), element.getAttribute("aria-controls"), ignoreSelection ? null : element.getAttribute("aria-selected"), element.getAttribute("aria-orientation")]);
+  const signature = (element, ignoreSelection = false) => JSON.stringify([element.tagName, element.type, element.name, element.getAttribute("role"), element.getAttribute("href"), element.closest("a[href]")?.href, element.getAttribute("target"), element.getAttribute("download"), element.form?.action, element.form?.method, element.getAttribute("formaction"), element.formAction, element.getAttribute("aria-controls"), ignoreSelection ? null : element.getAttribute("aria-selected"), element.getAttribute("aria-orientation")]);
   const scrollDirections = element => {
     const style = getComputedStyle(element);
     return [
@@ -331,7 +335,7 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
     for (let parent = element, depth = 0; parent && depth < 8 && checkedAreas.size < 500; parent = parent.parentElement, depth++) {
       if (checkedAreas.has(parent)) break;
       checkedAreas.add(parent);
-      if (parent === document.scrollingElement || parent === document.body) continue;
+      if (parent === document.scrollingElement || (parent === document.body && !Number.isFinite(globalThis.__safariChatPageRight))) continue;
       if (scrollDirections(parent).length) {
         if (scrollAreas.size < 10) scrollAreas.add(parent);
       }
@@ -467,7 +471,14 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
         options.push(item);
       }
     }
-    add(element, label, { actions, ...(element.getAttribute("role") === "tab" ? { role: "tab", selected: element.getAttribute("aria-selected") === "true" } : {}), ...(element.type ? { type: element.type } : {}), ...(element.required ? { required: true } : {}), ...(options ? { options, optionsTruncated: element.options.length > options.length } : {}) });
+    const destination = element.closest("a[href]")?.href || (["submit", "image"].includes(element.type) && element.form
+      ? (element.hasAttribute("formaction") ? element.formAction : element.form.action) : null);
+    let destinationHost;
+    if (destination && URL.canParse(destination)) {
+      const target = new URL(destination);
+      if (target.hostname && target.hostname !== location.hostname) destinationHost = target.hostname;
+    }
+    add(element, label, { actions, ...(destinationHost ? { destinationHost } : {}), ...(element.getAttribute("role") === "tab" ? { role: "tab", selected: element.getAttribute("aria-selected") === "true" } : {}), ...(element.type ? { type: element.type } : {}), ...(element.required ? { required: true } : {}), ...(options ? { options, optionsTruncated: element.options.length > options.length } : {}) });
   }
   // Image-only strips have no text or clickable descendants to discover them.
   let media = 0;
@@ -496,7 +507,7 @@ function actOnPage(operation, elementId, text, expectedURL, { direction, checked
     const field = element.matches("input,textarea,select") || element.isContentEditable;
     return (element.getAttribute("aria-label") || labelled || element.labels?.[0]?.innerText || element.getAttribute("placeholder") || (!field && element.innerText) || element.name || element.tagName).trim().slice(0, 120);
   };
-  const signature = (element, ignoreSelection = false) => JSON.stringify([element.tagName, element.type, element.name, element.getAttribute("role"), element.getAttribute("href"), element.getAttribute("target"), element.getAttribute("download"), element.form?.action, element.form?.method, element.getAttribute("formaction"), element.getAttribute("aria-controls"), ignoreSelection ? null : element.getAttribute("aria-selected"), element.getAttribute("aria-orientation")]);
+  const signature = (element, ignoreSelection = false) => JSON.stringify([element.tagName, element.type, element.name, element.getAttribute("role"), element.getAttribute("href"), element.closest("a[href]")?.href, element.getAttribute("target"), element.getAttribute("download"), element.form?.action, element.form?.method, element.getAttribute("formaction"), element.formAction, element.getAttribute("aria-controls"), ignoreSelection ? null : element.getAttribute("aria-selected"), element.getAttribute("aria-orientation")]);
   const reference = state.refs.get(elementId);
   const element = reference?.element;
   const pageScroll = operation === "scroll" && !elementId;
@@ -536,7 +547,7 @@ function actOnPage(operation, elementId, text, expectedURL, { direction, checked
       if (next < 0 || next >= tabs.length) return { ok: true, operation, moved: false, message: "This gallery is at its first or last item. Scroll in the other direction." };
       const control = tabs[next].element;
       const rect = control.getBoundingClientRect();
-      if (control.matches(":disabled,[aria-disabled='true']") || control.closest("[hidden],[inert],[aria-hidden='true']") || !control.getClientRects().length || rect.width === 0 || rect.height === 0 || rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth) || getComputedStyle(control).visibility !== "visible") throw new Error("The next gallery control is not available. Read the page again.");
+      if (control.matches(":disabled,[aria-disabled='true']") || control.closest("[hidden],[inert],[aria-hidden='true'],#safari-chat-host") || !control.getClientRects().length || rect.width === 0 || rect.height === 0 || rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth) || getComputedStyle(control).visibility !== "visible") throw new Error("The next gallery control is not available. Read the page again.");
       let depth = 0;
       for (let parent = control; parent; parent = parent.parentElement) {
         const style = getComputedStyle(parent), clip = parent.getBoundingClientRect();
@@ -564,8 +575,12 @@ function actOnPage(operation, elementId, text, expectedURL, { direction, checked
   }
   element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
   if (operation === "click") {
-    const link = element.closest("a[href]");
-    if (link && !/^https?:$/.test(new URL(link.href).protocol)) throw new Error("Only ordinary web links can be opened.");
+    const destination = element.closest("a[href]")?.href || (["submit", "image"].includes(element.type) && element.form
+      ? (element.hasAttribute("formaction") ? element.formAction : element.form.action) : null);
+    if (destination) {
+      const url = new URL(destination);
+      if (!/^https?:$/.test(url.protocol) || url.username || url.password) throw new Error("Only ordinary web links can be opened.");
+    }
     element.click();
     return { ok: true, operation, label, message: "Click dispatched. Read the page again to verify the outcome." };
   }
@@ -611,10 +626,144 @@ function actOnPage(operation, elementId, text, expectedURL, { direction, checked
 return {snapshotPage, actOnPage};
 })();
 
+// core/tab-navigation.js
+modules["core/tab-navigation.js"] = (() => {
+async function readyTab(api, tabId, signal, committed = () => true, timeoutMessage = "The page is still loading. Read this same tab again after it finishes.") {
+  signal.throwIfAborted();
+  const tab = await api.tabs.get(tabId);
+  signal.throwIfAborted();
+  const ready = value => value.status !== "loading" && committed(value);
+  if (ready(tab)) return tab;
+  return new Promise((resolve, reject) => {
+    let done = false, poll;
+    const finish = (error, value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer); clearTimeout(poll);
+      api.tabs.onUpdated?.removeListener(updated); api.tabs.onRemoved?.removeListener(removed); signal.removeEventListener("abort", aborted);
+      error ? reject(error) : resolve(value);
+    };
+    const updated = (id, change, value) => { if (id === tabId && change.status !== "loading" && value && ready(value)) finish(null, value); };
+    const removed = id => { if (id === tabId) finish(new Error("The tab was closed while loading.")); };
+    const aborted = () => finish(signal.reason);
+    const timer = setTimeout(() => finish(new Error(timeoutMessage)), 10000);
+    api.tabs.onUpdated?.addListener(updated); api.tabs.onRemoved?.addListener(removed); signal.addEventListener("abort", aborted, { once: true });
+    // A website permission change can reveal a URL without a navigation event.
+    const check = async () => {
+      try {
+        const value = await api.tabs.get(tabId);
+        if (done) return;
+        if (ready(value)) finish(null, value);
+        else poll = setTimeout(check, 250);
+      } catch (error) { finish(error); }
+    };
+    if (signal.aborted) aborted(); else check();
+  });
+}
+
+async function watchNavigation(api, tabId, previousURL, signal, dispatch, navigationRequested) {
+  signal.throwIfAborted();
+  if (!api.tabs.onUpdated) return dispatch();
+  // Collect tab events before dispatch. A fast redirect can already have
+  // returned to the original URL by the time Safari acknowledges the action.
+  let started = false, finished = false, wake, timer;
+  const updated = (id, change) => {
+    if (id !== tabId || (!change.status && !change.url)) return;
+    started = true;
+    if (change.status) finished = change.status === "complete";
+    wake?.();
+  };
+  api.tabs.onUpdated.addListener(updated);
+  try {
+    let result, lostDocument;
+    try { result = await dispatch(); }
+    catch (error) {
+      if (navigationRequested || !/context was destroyed|frame (?:was )?removed|document (?:was )?unloaded|page did not confirm/i.test(error.message)) throw error;
+      lostDocument = error;
+    }
+    // Link default actions run after the click handler returns. Give Safari a
+    // short opportunity to report navigation even when injection succeeded.
+    if (!started && !navigationRequested) await new Promise(resolve => { wake = resolve; timer = setTimeout(resolve, 300); });
+    signal.throwIfAborted();
+    if (started || navigationRequested) await readyTab(api, tabId, signal, tab => finished || tab.url !== previousURL);
+    if (lostDocument) {
+      if (!started) throw lostDocument;
+      return { navigationObserved: true, message: "The tab navigated during the click. Read the new page to verify the result before taking another action." };
+    }
+    return result;
+  } finally { clearTimeout(timer); api.tabs.onUpdated.removeListener(updated); }
+}
+
+return {readyTab, watchNavigation};
+})();
+
+// core/website-access.js
+modules["core/website-access.js"] = (() => {
+const { safeWebURL } = modules["core/context.js"];
+// Website grants belong to one connection in one Safari profile.
+const accessKey = account => `website-access:${account}`;
+
+function websiteHost(input) {
+  if (typeof input !== "string" || !input.trim() || /[\s/@?#*\\]/.test(input.trim())) return null;
+  try {
+    const raw = input.trim();
+    if (raw.includes(":") && !(raw.startsWith("[") && raw.endsWith("]"))) return null;
+    const host = new URL(`https://${raw}`).hostname.replace(/\.$/, "");
+    return host && host.length <= 253 ? host : null;
+  } catch { return null; }
+}
+
+// WebExtension host patterns scope by scheme and hostname, across ports.
+function sitePermissionPattern(value) {
+  const safe = safeWebURL(value);
+  if (!safe) return null;
+  const url = new URL(safe);
+  return websiteHost(url.hostname) ? url.protocol + "//" + url.hostname + "/*" : null;
+}
+
+async function readWebsiteAccess(storage, account) {
+  const key = accessKey(account);
+  const value = (await storage.get(key))[key];
+  return { mode: value?.mode === "auto" ? "auto" : "ask",
+    allowed: Array.isArray(value?.allowed) ? value.allowed : [],
+    blocked: Array.isArray(value?.blocked) ? value.blocked : [] };
+}
+
+function changeWebsiteAccess(access, change) {
+  if (change?.mode === "ask" || change?.mode === "auto") return { ...access, mode: change.mode };
+  const url = safeWebURL(change?.host);
+  const host = websiteHost(url ? new URL(url).hostname : change?.host);
+  if (!host || !["allow", "block", "remove"].includes(change.rule)) throw new Error("Enter a website host, such as example.com.");
+  const allowed = access.allowed.filter(item => item !== host);
+  const blocked = access.blocked.filter(item => item !== host);
+  if (change.rule !== "remove") {
+    if (allowed.length + blocked.length >= 200) throw new Error("Remove a saved website before adding another.");
+    (change.rule === "allow" ? allowed : blocked).push(host);
+  }
+  return { mode: access.mode, allowed, blocked };
+}
+
+function visibleWebsite(url, access) {
+  const safe = safeWebURL(url);
+  return !!safe && !access?.blocked.includes(websiteHost(new URL(safe).hostname));
+}
+
+// A tab listing spans websites. Only all-sites access can authorize it automatically.
+function allowsAction(access, hosts) {
+  const blocked = hosts.find(host => access.blocked.includes(websiteHost(host)));
+  if (blocked) throw new Error(`Browser access to ${blocked} is blocked in Website access settings.`);
+  return access.mode === "auto" || (hosts.length > 0 && hosts.every(host => access.allowed.includes(websiteHost(host))));
+}
+
+return {accessKey, websiteHost, sitePermissionPattern, readWebsiteAccess, changeWebsiteAccess, visibleWebsite, allowsAction};
+})();
+
 // core/browser-tools.js
 modules["core/browser-tools.js"] = (() => {
 const { snapshotPage, actOnPage } = modules["content/page.js"];
+const { readyTab, watchNavigation } = modules["core/tab-navigation.js"];
 const { publicURL, safeWebURL } = modules["core/context.js"];
+const { allowsAction, sitePermissionPattern, visibleWebsite } = modules["core/website-access.js"];
 function scriptResult(results, fallback) {
   const injection = results?.[0];
   if (injection?.error != null) {
@@ -631,73 +780,137 @@ async function readTab(api, tabId, limit, { viewportOnly = false, selectionOnly 
   const url = expectedURL ?? (await api.tabs.get(tabId)).url;
   if (url && !safeWebURL(url)) throw new Error("Safari protects this page. Open an ordinary website to attach it.");
   const results = await api.scripting.executeScript({ target: { tabId }, func: snapshotPage, args: [limit, viewportOnly, selectionOnly, url ?? null] });
-  return scriptResult(results, "Could not read this page. Allow the extension on this website in Safari.");
+  return scriptResult(results, "Could not read this page. Check that the tab finished loading and read it again.");
 }
 
-async function readyTab(api, tabId, signal) {
-  signal.throwIfAborted();
-  const tab = await api.tabs.get(tabId);
-  signal.throwIfAborted();
-  if (tab.status !== "loading" || !api.tabs.onUpdated) return tab;
-  return new Promise((resolve, reject) => {
-    const finish = (error, value) => {
-      clearTimeout(timer); api.tabs.onUpdated.removeListener(updated); api.tabs.onRemoved?.removeListener(removed); signal.removeEventListener("abort", aborted);
-      error ? reject(error) : resolve(value);
-    };
-    const updated = (id, change, value) => { if (id === tabId && change.status === "complete") finish(null, value); };
-    const removed = id => { if (id === tabId) finish(new Error("The tab was closed while loading.")); };
-    const aborted = () => finish(signal.reason);
-    const timer = setTimeout(() => finish(new Error("The page is still loading. Wait for it to finish, then try again.")), 10000);
-    api.tabs.onUpdated.addListener(updated); api.tabs.onRemoved?.addListener(removed); signal.addEventListener("abort", aborted, { once: true });
-    // Recheck after subscribing so a completion between get() and addListener() is not lost.
-    api.tabs.get(tabId).then(value => { if (value.status !== "loading") finish(null, value); }, error => finish(error));
-    if (signal.aborted) aborted();
-  });
+async function sourceWindowId(api, tabId) {
+  if (!Number.isInteger(tabId)) return undefined;
+  try {
+    const { windowId } = await api.tabs.get(tabId);
+    if (Number.isInteger(windowId)) return windowId;
+  }
+  catch { throw new Error("The source tab was closed. Open Safari Chat from the window you want to use."); }
+  throw new Error("Safari could not identify the source window. Open Safari Chat from the website again.");
 }
 
-function createBrowserTools({ api, pageChars, approve, verifySession, initialTabs = [], defaultTabId = null, protectedTabId = null }) {
+function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verifySession, readAccess, initialTabs = [], defaultTabId = null, protectedTabId = null }) {
   const readableTabs = new Map(initialTabs.filter(tab => Number.isInteger(tab.id) && safeWebURL(tab.url)).map(tab => [tab.id, new URL(tab.url).origin]));
+  // A requested destination is a hint for Safari's permission sheet, never proof
+  // of the live tab's URL or a grant to share its contents.
+  const destinations = new Map(), declinedSites = new Set();
   const snapshots = new Map();
+  async function authorize(details, hosts, signal, sharedRead = false, siteOrigin = null) {
+    const automatic = readAccess && allowsAction(await readAccess(), hosts);
+    signal.throwIfAborted();
+    const pattern = siteOrigin && sitePermissionPattern(siteOrigin);
+    let choice;
+    if (siteOrigin) {
+      if (!requestSiteAccess) throw new Error("Allow Safari Chat to access " + hosts[0] + " in Safari website settings, then read the existing tab.");
+      if (verifySession) await verifySession();
+      signal.throwIfAborted();
+      try {
+        await requestSiteAccess(siteOrigin, signal);
+        signal.throwIfAborted();
+        if (!await api.permissions.contains({ origins: [pattern] })) throw new Error("Safari did not grant access to " + hosts[0] + ".");
+      } catch (error) { declinedSites.add(pattern); throw error; }
+      choice = "once";
+    } else if (!sharedRead && !automatic) choice = await approve({ ...details, hosts }, signal);
+    return {
+      // A temporary read grant lasts for this tab/origin in this request.
+      // Re-evaluate persistent grants on every read so revocation takes effect.
+      rememberRead: sharedRead || (!automatic && choice !== "site" && choice !== "all"),
+      async verify() {
+        const latest = await readAccess?.();
+        if (latest && !allowsAction(latest, hosts) && (automatic || choice === "site" || choice === "all") && !sharedRead) {
+          throw new Error("Website access changed. Request this action again.");
+        }
+        if (pattern && !await api.permissions.contains({ origins: [pattern] })) throw new Error("Safari website permission changed. Read the existing tab again.");
+        if (verifySession) await verifySession();
+        signal.throwIfAborted();
+        return latest;
+      },
+    };
+  }
+  async function readPage(tabId, signal) {
+    const hint = destinations.get(tabId) ?? readableTabs.get(tabId);
+    const committed = tab => !hint || tab.url !== "about:blank";
+    let tab = await readyTab(api, tabId, signal, committed);
+    let url = safeWebURL(tab.url), grant;
+    const visibleTab = () => readyTab(api, tabId, signal, current => !!current.url && current.url !== "about:blank",
+      "Safari still hides the address of this tab. It may have redirected. Check website access for the site shown in that tab.");
+    const readGrant = (address, askSafari = false) => {
+      const { hostname, origin } = new URL(address);
+      if (declinedSites.has(sitePermissionPattern(origin))) throw new Error("Website access to " + hostname + " was declined for this task. Do not request it again.");
+      return authorize({ operation: "read", title: "Read this page?", detail: publicURL(address) },
+        [hostname], signal, readableTabs.get(tabId) === origin, askSafari ? origin : null);
+    };
+    if (!tab.url && hint && api.permissions?.contains) {
+      const pattern = sitePermissionPattern(hint);
+      if (!pattern) throw new Error("Safari cannot request website access for this address.");
+      if (!await api.permissions.contains({ origins: [pattern] })) grant = await readGrant(hint, true);
+      tab = await visibleTab();
+      url = safeWebURL(tab.url);
+      if (grant && (!url || new URL(url).origin !== hint)) throw new Error("The tab changed websites during the permission request. Read this same tab again to review its current site.");
+    }
+    if (!url) throw new Error(tab.url ? "Safari protects this page. Choose an HTTP or HTTPS website." : "Safari has not exposed this tab's address. Check Safari Chat's website access for the site in that tab.");
+    const origin = new URL(url).origin;
+    const requestedAccess = !!grant;
+    grant ??= await readGrant(url);
+    await grant.verify();
+    const capture = () => readTab(api, tabId, pageChars, { viewportOnly: true, expectedURL: url });
+    let page;
+    try { page = await capture(); } catch (error) {
+      // A tab's address may still be visible when Safari rejects injection.
+      // Recover a permission failure once, without replaying a browser mutation.
+      if (requestedAccess || !requestSiteAccess || !api.permissions?.contains ||
+          !/permission|does not have access|access (?:was |is )?denied|cannot access contents/i.test(error.message)) throw error;
+      signal.throwIfAborted();
+      const pattern = sitePermissionPattern(origin);
+      if (!pattern || await api.permissions.contains({ origins: [pattern] })) throw error;
+      const current = await api.tabs.get(tabId);
+      if (current.url && current.url !== url) throw new Error("The tab navigated before the read. Read this same tab again.");
+      grant = await readGrant(url, true);
+      if ((await visibleTab()).url !== url) throw new Error("The tab navigated during the permission request. Read this same tab again.");
+      await grant.verify();
+      page = await capture();
+    }
+    signal.throwIfAborted();
+    if (readAccess) await grant.verify();
+    if (new URL(page.url).origin !== origin) throw new Error("The tab changed websites while reading. Request permission for the new page.");
+    if (grant.rememberRead) readableTabs.set(tabId, origin);
+    snapshots.set(tabId, { url: page.url, elements: page.elements });
+    return { ...page, url: publicURL(page.url), tabId };
+  }
   return async function execute(args, signal) {
     const { operation, tabId: requestedTab, elementId, url, text, direction, checked } = args ?? {};
     const tabId = requestedTab ?? defaultTabId;
     if (!["read", "click", "fill", "select", "set_checked", "scroll", "navigate", "open_tab", "close_tab", "list_tabs"].includes(operation)) throw new Error("Unknown browser action.");
     signal.throwIfAborted();
     if (operation === "list_tabs") {
-      await approve({ operation, title: "Share your open tabs?", detail: "This shares titles and website addresses of accessible tabs for this request." }, signal);
-      if (verifySession) await verifySession();
-      signal.throwIfAborted();
-      const tabs = await api.tabs.query({ currentWindow: true });
-      return tabs.filter(tab => safeWebURL(tab.url)).slice(0, 40).map(tab => ({ tabId: tab.id, title: (tab.title ?? "Untitled").slice(0, 160), url: publicURL(tab.url) }));
+      const grant = await authorize({ operation, title: "Share your open tabs?", detail: "Share the titles and addresses of accessible tabs in this window." }, [], signal);
+      const windowId = await sourceWindowId(api, defaultTabId);
+      await grant.verify();
+      const tabs = await api.tabs.query(Number.isInteger(windowId) ? { windowId } : { currentWindow: true });
+      const access = readAccess ? await grant.verify() : undefined;
+      return tabs.filter(tab => visibleWebsite(tab.url, access)).slice(0, 40).map(tab => ({ tabId: tab.id, title: (tab.title ?? "Untitled").slice(0, 160), url: publicURL(tab.url) }));
     }
     if (operation === "open_tab") {
       const target = safeWebURL(url);
       if (!target) throw new Error("Only HTTP and HTTPS URLs without credentials are allowed.");
-      await approve({ operation, title: "Open a new tab?", detail: target }, signal);
-      if (verifySession) await verifySession();
-      signal.throwIfAborted();
-      const tab = await api.tabs.create({ url: target, active: false });
-      return { ok: true, tabId: tab.id, url: publicURL(target), message: "Tab opened. Read it to continue; Safari may require website access first." };
+      const grant = await authorize({ operation, title: "Open a new tab?", detail: target }, [new URL(target).hostname], signal);
+      const windowId = await sourceWindowId(api, defaultTabId);
+      await grant.verify();
+      const tab = await api.tabs.create({ url: target, active: false, ...(Number.isInteger(windowId) ? { windowId } : {}) });
+      if (requestSiteAccess) destinations.set(tab.id, new URL(target).origin);
+      return { ok: true, tabId: tab.id, url: publicURL(target), message: "Tab opened. To inspect it, call read with this tabId." };
     }
     if (!Number.isInteger(tabId) || tabId < 0) throw new Error("A valid tab ID is required.");
-    if (["navigate", "close_tab"].includes(operation) && tabId === protectedTabId) throw new Error("This tab contains the chat panel. Open chat in its own tab before navigating or closing this page.");
-    const tab = operation === "read" ? await readyTab(api, tabId, signal) : await api.tabs.get(tabId);
+    if (tabId === protectedTabId) throw new Error("This tab contains Safari Chat. Choose a website tab.");
+    if (operation === "read") return readPage(tabId, signal);
+    const tab = await api.tabs.get(tabId);
     const currentURL = safeWebURL(tab.url);
-    if (!currentURL) throw new Error("Safari has not granted access to this tab. Open the extension on that website first.");
-    if (operation === "read") {
-      const origin = new URL(currentURL).origin;
-      if (readableTabs.get(tabId) !== origin) {
-        await approve({ operation, title: "Read this page?", detail: publicURL(currentURL) }, signal);
-        readableTabs.set(tabId, origin);
-      }
-      if (verifySession) await verifySession();
-      signal.throwIfAborted();
-      const page = await readTab(api, tabId, pageChars, { viewportOnly: true, expectedURL: currentURL });
-      signal.throwIfAborted();
-      if (new URL(page.url).origin !== origin) throw new Error("The tab changed websites while reading. Request permission for the new page.");
-      snapshots.set(tabId, { url: page.url, elements: page.elements });
-      return { ...page, url: publicURL(page.url), tabId };
-    }
+    if (!currentURL) throw new Error("Safari has not exposed a website address for this tab. Read the tab before trying this action.");
+    const hosts = [new URL(currentURL).hostname];
     const snapshot = snapshots.get(tabId);
     let detail;
     let target;
@@ -705,6 +918,7 @@ function createBrowserTools({ api, pageChars, approve, verifySession, initialTab
     if (operation === "navigate") {
       target = safeWebURL(url);
       if (!target) throw new Error("Only HTTP and HTTPS navigation is supported.");
+      if (new URL(target).hostname !== hosts[0]) hosts.push(new URL(target).hostname);
       detail = `${publicURL(currentURL)} \u2192 ${target}`;
     } else if (operation === "close_tab") detail = `${tab.title ?? "Tab"}\n${publicURL(currentURL)}\nUnsaved work in this tab may be lost.`;
     else {
@@ -718,23 +932,350 @@ function createBrowserTools({ api, pageChars, approve, verifySession, initialTab
       if (operation === "scroll" && ref?.directions && !ref.directions.includes(direction)) throw new Error("Use one of this area's listed scroll directions.");
       galleryScroll = operation === "scroll" && ref?.kind === "carousel";
       detail = `${publicURL(currentURL)}\n${ref?.label ?? "Page"}${["fill", "select"].includes(operation) ? `\n${text}` : ""}${operation === "scroll" ? `\n${galleryScroll ? "Advance gallery" : "Scroll"} ${direction}` : ""}${operation === "set_checked" ? `\n${checked ? "Check" : "Uncheck"}` : ""}`;
+      if (operation === "click" && ref.destinationHost && ref.destinationHost !== hosts[0]) {
+        hosts.push(ref.destinationHost);
+        detail += `\nDestination: ${ref.destinationHost}`;
+      }
     }
-    await approve({ operation, title: galleryScroll ? "Move this gallery?" : { click: "Click this element?", fill: "Enter this text?", select: "Choose this option?", set_checked: "Change this checkbox or radio option?", scroll: "Scroll this page or area?", navigate: "Navigate this tab?", close_tab: "Close this tab?" }[operation], detail }, signal);
+    const grant = await authorize({ operation, title: galleryScroll ? "Move this gallery?" : { click: "Click this element?", fill: "Enter this text?", select: "Choose this option?", set_checked: "Change this checkbox or radio option?", scroll: "Scroll this page or area?", navigate: "Navigate this tab?", close_tab: "Close this tab?" }[operation], detail }, hosts, signal);
     signal.throwIfAborted();
     // The user may navigate while an approval is visible; reject stale permission.
     const now = await api.tabs.get(tabId);
-    if (verifySession) await verifySession();
-    signal.throwIfAborted();
+    await grant.verify();
     if (now.url !== currentURL) throw new Error("The tab navigated while awaiting approval. Read it again.");
     snapshots.delete(tabId);
-    if (operation === "navigate") { readableTabs.delete(tabId); await api.tabs.update(tabId, { url: target }); return { ok: true, url: publicURL(target) }; }
-    if (operation === "close_tab") { readableTabs.delete(tabId); await api.tabs.remove(tabId); return { ok: true }; }
-    const result = await api.scripting.executeScript({ target: { tabId }, func: actOnPage, args: [operation, elementId, text, currentURL, { direction, checked }] });
-    return scriptResult(result, "The page did not confirm the action. Read it again before retrying.");
+    if (operation === "navigate") {
+      readableTabs.delete(tabId);
+      await watchNavigation(api, tabId, currentURL, signal, () => api.tabs.update(tabId, { url: target }), true);
+      if (requestSiteAccess) destinations.set(tabId, new URL(target).origin);
+      return { ok: true, url: publicURL(target) };
+    }
+    if (operation === "close_tab") { readableTabs.delete(tabId); destinations.delete(tabId); await api.tabs.remove(tabId); return { ok: true }; }
+    const dispatch = async () => scriptResult(await api.scripting.executeScript({ target: { tabId }, func: actOnPage, args: [operation, elementId, text, currentURL, { direction, checked }] }), "The page did not confirm the action. Read it again before retrying.");
+    return operation === "click" ? watchNavigation(api, tabId, currentURL, signal, dispatch, false) : dispatch();
   };
 }
 
-return {readTab, readyTab, createBrowserTools};
+return {readTab, sourceWindowId, createBrowserTools};
+})();
+
+// core/chat-dock.js
+modules["core/chat-dock.js"] = (() => {
+const storageKey = "chatDocks";
+const frameKeys = ["left", "top", "width", "height"];
+
+function sourceTabId(sender) {
+  const value = new URL(sender.url).searchParams.get("tab");
+  return value !== null && /^\d+$/.test(value) ? Number(value) : null;
+}
+
+class ChatDock {
+  constructor(api, panelURL) {
+    this.api = api;
+    this.panelURL = panelURL;
+    this.entries = {};
+    this.tail = Promise.resolve();
+  }
+  load() {
+    if (!this.loaded) this.loaded = this.restoreSession().catch(error => { this.loaded = null; throw error; });
+    return this.loaded;
+  }
+  async restoreSession() {
+    const store = this.api.storage.session;
+    const data = await store.get([storageKey, "chatWindows"]);
+    this.entries = data[storageKey] ?? {};
+    // Older sessions remembered a detached chat tab. The next toolbar click or
+    // source navigation should mount the dock, even if that tab is still open.
+    let migrated = false;
+    for (const entry of Object.values(this.entries)) {
+      if ("tab" in entry) { delete entry.tab; migrated = true; }
+    }
+    if (migrated) await this.save();
+    // A session upgraded from the paired-window build may still own a resize.
+    for (const group of data.chatWindows ?? []) {
+      const win = await this.api.windows.get(group.windowId).catch(() => null);
+      if (win?.state === "normal" && group.applied && group.original &&
+          frameKeys.every(key => Number.isFinite(group.original[key]) && Math.abs(win[key] - group.applied[key]) <= 2)) {
+        await this.api.windows.update(win.id, group.original);
+        if (group.state && group.state !== "normal") await this.api.windows.update(win.id, { state: group.state });
+      }
+    }
+    if (data.chatWindows) await store.remove("chatWindows");
+  }
+  serial(action) {
+    const next = this.tail.then(() => this.load()).then(action);
+    this.tail = next.catch(() => {});
+    return next;
+  }
+  save() {
+    const store = this.api.storage.session;
+    return Object.keys(this.entries).length ? store.set({ [storageKey]: this.entries }) : store.remove(storageKey);
+  }
+  panelURLMatches(url) { return typeof url === "string" && url.split(/[?#]/)[0] === this.panelURL; }
+  async owns(source, token) {
+    await this.load();
+    return !!token && this.entries[source]?.token === token;
+  }
+  async trusted(sender, token) {
+    if (sender.id !== this.api.runtime.id || !this.panelURLMatches(sender.url)) return false;
+    if (!sender.frameId) return !token && (!sender.tab?.url || this.panelURLMatches(sender.tab.url));
+    if (typeof token !== "string" || !token) return false;
+    const source = sourceTabId(sender);
+    if (source === null || source !== sender.tab?.id) return false;
+    await this.load();
+    return this.entries[source]?.token === token || this.closing?.[source] === token;
+  }
+  async mount(tab, entry, restore) {
+    if (tab.url && !/^https?:\/\//i.test(tab.url)) throw new Error("Safari protects this page. Open Safari Chat on a website.");
+    const url = this.panelURL + "?tab=" + tab.id;
+    try { await this.api.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/mount.js"] }); }
+    catch { throw new Error("Safari could not open the pane here. Check Safari Chat's access to this website and try again."); }
+    const reply = await this.api.tabs.sendMessage(tab.id, { type: "panel.show", url, token: entry.token, width: entry.width, restore }, { frameId: 0 }).catch(() => null);
+    if (!reply?.ok) throw new Error("Safari could not display the pane on this page. Reload the page and try again.");
+  }
+  open(tab, { restore = false } = {}) {
+    return this.serial(async () => {
+      if (this.closed || this.panelURLMatches(tab.url)) return;
+      let entry = this.entries[tab.id];
+      if (restore && !entry) return;
+      if (!entry) {
+        entry = this.entries[tab.id] = { token: crypto.randomUUID() };
+        await this.save();
+      }
+      await this.mount(tab, entry, restore);
+      return true;
+    });
+  }
+  width(source, token, width) {
+    return this.serial(async () => {
+      const entry = this.entries[source];
+      if (this.closed || !entry || entry.token !== token || (width !== null && (!Number.isInteger(width) || width < 1 || width > 840))) return;
+      if (width === null) delete entry.width; else entry.width = width;
+      await this.save();
+    });
+  }
+  dismiss(source, token, onDismiss) {
+    return this.serial(async () => {
+      if (!token || (this.entries[source]?.token !== token && this.closing?.[source] !== token)) return false;
+      onDismiss();
+      delete this.entries[source];
+      if (this.closing) delete this.closing[source];
+      await this.save();
+      await this.api.tabs.sendMessage(source, { type: "panel.close" }, { frameId: 0 }).catch(() => {});
+      return true;
+    });
+  }
+  removed(id) {
+    return this.serial(async () => {
+      if (this.closing) delete this.closing[id];
+      if (this.entries[id]) { delete this.entries[id]; await this.save(); }
+    });
+  }
+  clear() {
+    this.closed = true;
+    return this.serial(async () => {
+      this.closing ??= Object.fromEntries(Object.entries(this.entries).map(([id, entry]) => [id, entry.token]));
+      this.entries = {};
+      await this.save();
+      if ((await this.api.storage.session.get(storageKey))[storageKey]) throw new Error("Safari still contains dock records. Retry cleanup.");
+    });
+  }
+}
+
+return {sourceTabId, ChatDock};
+})();
+
+// core/chat-run.js
+modules["core/chat-run.js"] = (() => {
+// The background owns a single execution. A replacement panel subscribes to
+// its current output and approval; subscribing never issues a model/tool call.
+class ChatRun {
+  constructor(message, source, panelTab) {
+    this.id = crypto.randomUUID();
+    this.source = source;
+    this.panelTab = panelTab;
+    this.account = message.account;
+    this.generation = message.generation;
+    this.chat = { id: message.chatId, revision: message.revision, title: String(message.title || "New chat"), account: message.account, messages: message.messages };
+    this.controller = new AbortController();
+    this.ports = new Set();
+    this.state = new Map();
+    this.text = "";
+  }
+  matches(source, host, account, generation) {
+    return this.source === source && (source !== null || this.panelTab === host) && this.account === account && this.generation === generation;
+  }
+  abort(reason) { this.controller.abort(reason); }
+  release() {
+    this.ports.clear();
+    this.state.clear();
+    this.chat = null;
+    this.text = "";
+  }
+  attach(port, resume = false) {
+    this.ports.add(port);
+    if (resume) port.postMessage({ type: "resumed", chat: this.chat, text: this.text,
+      events: [...this.state.values(), ...(this.approval ? [this.approval.event] : [])] });
+  }
+  emit(event) {
+    if (event.type === "delta") this.text += event.text;
+    else if (event.type === "replace") this.text = event.text;
+    else if (["status", "activity", "context", "usage"].includes(event.type)) this.state.set(event.type, event);
+    for (const port of this.ports) {
+      try { port.postMessage(event); } catch { this.ports.delete(port); }
+    }
+  }
+  prompt(details, signal) {
+    return new Promise((resolve, reject) => {
+      signal.throwIfAborted();
+      const event = { type: "approval", id: crypto.randomUUID(), ...details };
+      const abort = () => { this.approval = null; reject(signal.reason); };
+      this.approval = { event, finish: choice => {
+        signal.removeEventListener("abort", abort);
+        this.approval = null;
+        this.emit({ type: "approval.answered", id: event.id });
+        if (choice) resolve(choice);
+        else if (event.siteOrigin) reject(new Error("Website access to " + new URL(event.siteOrigin).hostname + " was not granted. Leave the tab open and do not repeat the request."));
+        else reject(new Error("The user declined this action. Do not retry it."));
+      } };
+      signal.addEventListener("abort", abort, { once: true });
+      this.emit(event);
+    });
+  }
+  answer(message) {
+    if (!this.approval || this.approval.event.id !== message.id) return;
+    const scope = message.scope ?? "once";
+    this.approval.finish(message.allow === true && ["once", "site", "all"].includes(scope) && (!this.approval.event.siteOrigin || scope === "once") ? scope : null);
+  }
+}
+
+return {ChatRun};
+})();
+
+// core/drafts.js
+modules["core/drafts.js"] = (() => {
+const { boundedContexts, textPrefix } = modules["core/context.js"];
+const { chatKey, prepareChat } = modules["core/storage.js"];
+const bytes = value => new TextEncoder().encode(JSON.stringify(value)).length;
+const draftKey = id => `composer:${id}`;
+const sessionKey = (account, tabId) => `panel:${JSON.stringify([account, Number.isInteger(tabId) && tabId >= 0 ? tabId : null])}`;
+
+function boundedDraft(draft) {
+  const contexts = boundedContexts(draft.contexts);
+  const value = { id: draft.id, account: draft.account, text: String(draft.text ?? "").slice(0, 12000), contexts, updated: Date.now() };
+  // Leave room for the bounded chat history and extension settings within Safari's quota.
+  while (bytes(value) > 200000) {
+    const largest = [...contexts].sort((a, b) => b.text.length - a.text.length)[0];
+    if (!largest?.text.length) throw new Error("This draft is too large to save.");
+    largest.text = textPrefix(largest.text, Math.floor(largest.text.length / 2));
+    largest.truncated = true;
+  }
+  return value;
+}
+
+async function saveDraft(storage, draft, tabId) {
+  const value = boundedDraft(draft);
+  let key = draftKey(value.id);
+  const pointer = sessionKey(value.account, tabId);
+  const all = await storage.get(null);
+  const prior = all[key];
+  const chat = all[chatKey(value.id)];
+  if (prior?.sourceChatId) value.sourceChatId = prior.sourceChatId;
+  for (const old of [prior, chat]) {
+    if (old && old.account !== value.account) throw new Error("This chat belongs to a different account.");
+  }
+  if (!chat && (draft.chatRevision > 0 || (!prior && draft.revision))) throw new Error("This chat was removed. Start a new chat to keep this draft.");
+  const hasDraft = !!value.text || value.contexts.length > 0;
+  const revision = prior ? prior.revision ?? 1 : 0;
+  let copy;
+  if (draft.revision !== undefined && draft.revision !== revision) {
+    if (!hasDraft) return { ...value, revision: 0 }; // Another editor owns the stored text.
+    if (prior?.text === value.text && JSON.stringify(prior.contexts) === JSON.stringify(value.contexts)) return { ...prior, revision };
+    value.sourceChatId ??= value.id;
+    value.id = crypto.randomUUID(); key = draftKey(value.id);
+    if (chat) copy = prepareChat(all, { ...chat, id: value.id, revision: 0, title: chat.title.slice(0, 106) + " (draft copy)" }, chat.id);
+  }
+  value.revision = hasDraft ? crypto.randomUUID() : 0;
+  const entries = Object.entries(all);
+  const drafts = entries.filter(([name]) => name.startsWith("composer:") && name !== key).sort((a, b) => b[1].updated - a[1].updated);
+  if (value.id !== draft.id) drafts.sort(([a], [b]) => Number(b === draftKey(draft.id)) - Number(a === draftKey(draft.id)));
+  const sessions = entries.filter(([name]) => name.startsWith("panel:") && name !== pointer).sort((a, b) => b[1].updated - a[1].updated);
+  let used = hasDraft ? bytes(value) : 0;
+  const remove = hasDraft ? [] : [key];
+  drafts.forEach(([name, item], index) => {
+    used += bytes(item);
+    if (index >= (hasDraft ? 19 : 20) || used > 600000) remove.push(name);
+  });
+  remove.push(...sessions.slice(49).map(([name]) => name));
+  if (copy) remove.push(...copy.remove);
+  if (remove.length) await storage.remove(remove);
+  await storage.set({
+    ...(copy ? { [chatKey(value.id)]: copy.value } : {}),
+    ...(hasDraft ? { [key]: value } : {}),
+    [pointer]: { id: value.id, account: value.account, updated: value.updated },
+  });
+  return copy ? { ...value, chatRevision: copy.value.revision, title: copy.value.title } : value;
+}
+
+return {draftKey, sessionKey, boundedDraft, saveDraft};
+})();
+
+// core/frame-drafts.js
+modules["core/frame-drafts.js"] = (() => {
+const { boundedDraft, saveDraft } = modules["core/drafts.js"];
+// An iframe can disappear before its 300 ms disk-save timer fires. Take the
+// last edit in the background immediately, then use the ordinary revisioned
+// writer when the editor saves or its replacement opens.
+class FrameDrafts {
+  constructor() { this.pending = new Map(); this.recovered = new Map(); }
+  clear() { this.pending.clear(); this.recovered.clear(); }
+  changeSession(generation) {
+    for (const map of [this.pending, this.recovered]) {
+      for (const [key, item] of map) if (item.generation !== generation) map.delete(key);
+    }
+  }
+  receipt(source, msg) {
+    const record = this.recovered.get(msg.editor);
+    if (record && record.source === source && record.account === msg.draft.account && record.generation === msg.generation) return record.saved;
+  }
+  stage(source, msg) {
+    if (!Number.isInteger(source) || !/^[a-f0-9-]{36}$/i.test(msg.editor) || !msg.generation || !Number.isSafeInteger(msg.sequence) || this.receipt(source, msg)) return;
+    const old = this.pending.get(source);
+    if (old?.editor === msg.editor && old.sequence >= msg.sequence) return;
+    const value = boundedDraft(msg.draft);
+    const draft = { ...value, revision: msg.draft.revision, chatRevision: msg.draft.chatRevision };
+    this.pending.delete(source);
+    this.pending.set(source, { editor: msg.editor, sequence: msg.sequence, generation: msg.generation, draft, bytes: new TextEncoder().encode(JSON.stringify(draft)).length });
+    let size = 0, count = 0;
+    for (const [id, entry] of [...this.pending].reverse()) {
+      size += entry.bytes;
+      if (++count > 20 || size > 600000) this.pending.delete(id);
+    }
+  }
+  saved(source, msg, saved) {
+    const pending = this.pending.get(source);
+    if (!pending || pending.editor !== msg.editor || pending.generation !== msg.generation || pending.draft.id !== msg.draft.id) return;
+    if (pending.sequence <= msg.sequence) this.pending.delete(source);
+    else Object.assign(pending.draft, { id: saved.id, revision: saved.revision, chatRevision: saved.chatRevision ?? pending.draft.chatRevision });
+  }
+  async recover(storage, source, editor, auth, verify) {
+    for (let entry; (entry = this.pending.get(source));) {
+      if (entry.editor === editor || this.recovered.has(editor)) return;
+      if (entry.generation === auth.generation && entry.draft.account === auth.account) {
+        await verify();
+        if (entry !== this.pending.get(source)) continue;
+        const saved = await saveDraft(storage, entry.draft, source);
+        this.saved(source, entry, saved);
+        this.recovered.set(entry.editor, { source, generation: auth.generation, account: auth.account,
+          saved: { id: saved.id, revision: saved.revision, chatRevision: saved.chatRevision, contexts: [] } });
+        if (this.recovered.size > 32) this.recovered.delete(this.recovered.keys().next().value);
+      }
+      if (this.pending.get(source) === entry) this.pending.delete(source);
+    }
+  }
+}
+
+return {FrameDrafts};
 })();
 
 // core/sse.js
@@ -882,7 +1423,7 @@ const { citedOutput } = modules["core/citations.js"];
 const BROWSER_TOOL = {
   type: "namespace", name: "safari", description: "User-approved Safari operations. Read a page before acting on element IDs.",
   tools: [{
-    type: "function", name: "browser", description: "Use tabId null for the page where this chat was opened, or an explicit tab ID from attached context or list_tabs. Read the visible page before acting; use current element IDs and their listed actions. Each change needs approval. fill enters text without submitting. select chooses a native dropdown by exact value or unique label. set_checked changes a native checkbox/radio. scroll moves the page (elementId null), a listed scroll area, or a carousel using its navigation controls; use its listed directions. To move through other galleries, click a listed tab or next/previous control rather than an offer link. To open an offer the user chose, click its listed link or button. Read again after changes to verify outcomes. open_tab returns a new tab ID; read waits for loading. Safari may require website access. Unused fields must be null.", strict: true,
+    type: "function", name: "browser", description: "Use tabId null for the page where this chat was opened, or an explicit tab ID from attached context or list_tabs. Read the visible page before acting; use current element IDs and their listed actions. Website access follows the user's approval settings. fill enters text without submitting. select chooses a native dropdown by exact value or unique label. set_checked changes a native checkbox/radio. scroll moves the page (elementId null), a listed scroll area, or a carousel using its navigation controls; use its listed directions. To move through other galleries, click a listed tab or next/previous control rather than an offer link. To open an offer the user chose, click its listed link or button. Read again after changes to verify outcomes. To inspect a site in a new tab, call open_tab once, then read its returned tabId. The read waits for loading and handles Safari website permission in the current chat. Use its result before reporting whether the site was accessible. Unused fields must be null.", strict: true,
     parameters: { type: "object", additionalProperties: false, required: ["operation", "tabId", "elementId", "url", "text", "direction", "checked"], properties: {
       operation: { type: "string", enum: ["read", "click", "fill", "select", "set_checked", "scroll", "navigate", "open_tab", "close_tab", "list_tabs"] },
       tabId: { type: ["integer", "null"] }, elementId: { type: ["string", "null"] },
@@ -990,72 +1531,6 @@ class LocalData {
 return {LocalData};
 })();
 
-// core/drafts.js
-modules["core/drafts.js"] = (() => {
-const { boundedContexts, textPrefix } = modules["core/context.js"];
-const { chatKey, prepareChat } = modules["core/storage.js"];
-const bytes = value => new TextEncoder().encode(JSON.stringify(value)).length;
-const draftKey = id => `composer:${id}`;
-const sessionKey = (account, tabId) => `panel:${JSON.stringify([account, Number.isInteger(tabId) && tabId >= 0 ? tabId : null])}`;
-
-function boundedDraft(draft) {
-  const contexts = boundedContexts(draft.contexts);
-  const value = { id: draft.id, account: draft.account, text: String(draft.text ?? "").slice(0, 12000), contexts, updated: Date.now() };
-  // Leave room for the bounded chat history and extension settings within Safari's quota.
-  while (bytes(value) > 200000) {
-    const largest = [...contexts].sort((a, b) => b.text.length - a.text.length)[0];
-    if (!largest?.text.length) throw new Error("This draft is too large to save.");
-    largest.text = textPrefix(largest.text, Math.floor(largest.text.length / 2));
-    largest.truncated = true;
-  }
-  return value;
-}
-
-async function saveDraft(storage, draft, tabId) {
-  const value = boundedDraft(draft);
-  let key = draftKey(value.id);
-  const pointer = sessionKey(value.account, tabId);
-  const all = await storage.get(null);
-  const prior = all[key];
-  const chat = all[chatKey(value.id)];
-  for (const old of [prior, chat]) {
-    if (old && old.account !== value.account) throw new Error("This chat belongs to a different account.");
-  }
-  if (!chat && (draft.chatRevision > 0 || (!prior && draft.revision))) throw new Error("This chat was removed. Start a new chat to keep this draft.");
-  const hasDraft = !!value.text || value.contexts.length > 0;
-  const revision = prior ? prior.revision ?? 1 : 0;
-  let copy;
-  if (draft.revision !== undefined && draft.revision !== revision) {
-    if (!hasDraft) return { ...value, revision: 0 }; // Another editor owns the stored text.
-    if (prior?.text === value.text && JSON.stringify(prior.contexts) === JSON.stringify(value.contexts)) return { ...prior, revision };
-    value.id = crypto.randomUUID(); key = draftKey(value.id);
-    if (chat) copy = prepareChat(all, { ...chat, id: value.id, revision: 0, title: chat.title.slice(0, 106) + " (draft copy)" }, chat.id);
-  }
-  value.revision = hasDraft ? crypto.randomUUID() : 0;
-  const entries = Object.entries(all);
-  const drafts = entries.filter(([name]) => name.startsWith("composer:") && name !== key).sort((a, b) => b[1].updated - a[1].updated);
-  if (value.id !== draft.id) drafts.sort(([a], [b]) => Number(b === draftKey(draft.id)) - Number(a === draftKey(draft.id)));
-  const sessions = entries.filter(([name]) => name.startsWith("panel:") && name !== pointer).sort((a, b) => b[1].updated - a[1].updated);
-  let used = hasDraft ? bytes(value) : 0;
-  const remove = hasDraft ? [] : [key];
-  drafts.forEach(([name, item], index) => {
-    used += bytes(item);
-    if (index >= (hasDraft ? 19 : 20) || used > 600000) remove.push(name);
-  });
-  remove.push(...sessions.slice(49).map(([name]) => name));
-  if (copy) remove.push(...copy.remove);
-  if (remove.length) await storage.remove(remove);
-  await storage.set({
-    ...(copy ? { [chatKey(value.id)]: copy.value } : {}),
-    ...(hasDraft ? { [key]: value } : {}),
-    [pointer]: { id: value.id, account: value.account, updated: value.updated },
-  });
-  return copy ? { ...value, chatRevision: copy.value.revision, title: copy.value.title } : value;
-}
-
-return {draftKey, sessionKey, boundedDraft, saveDraft};
-})();
-
 // core/desktop.js
 modules["core/desktop.js"] = (() => {
 const { createBrowserTools } = modules["core/browser-tools.js"];
@@ -1154,16 +1629,22 @@ modules["background.js"] = (() => {
 const { buildInput, publicURL, safeWebURL } = modules["core/context.js"];
 const { normalizeSettings } = modules["core/config.js"];
 const { settings, saveChat, listChats, chatKey } = modules["core/storage.js"];
-const { readTab, createBrowserTools } = modules["core/browser-tools.js"];
+const { readTab, createBrowserTools, sourceWindowId } = modules["core/browser-tools.js"];
+const { ChatDock, sourceTabId } = modules["core/chat-dock.js"];
+const { ChatRun } = modules["core/chat-run.js"];
+const { FrameDrafts } = modules["core/frame-drafts.js"];
 const { runAgent } = modules["core/agent.js"];
 const { LocalData } = modules["core/local-data.js"];
 const { draftKey, sessionKey, saveDraft } = modules["core/drafts.js"];
 const { DesktopController } = modules["core/desktop.js"];
 const { modelCatalog, resolveEffort } = modules["core/models.js"];
+const { accessKey, allowsAction, changeWebsiteAccess, readWebsiteAccess, visibleWebsite } = modules["core/website-access.js"];
 const api = browser;
 const panelURL = api.runtime.getURL("panel/panel.html");
 const activeRuns = new Map();
-const dockedTabs = new Map();
+const dock = new ChatDock(api, panelURL);
+const recentResults = new Map();
+const frameDrafts = new FrameDrafts();
 const localData = new LocalData(api.storage.local);
 const modelRequests = new Set();
 let cleanupTask;
@@ -1182,9 +1663,11 @@ async function notifyAccountChange() {
   const auth = await native("auth.status").catch(() => ({}));
   if (notice !== accountNotice || localData.closed) return;
   catalogCache = null;
+  recentResults.clear();
   for (const run of activeRuns.values()) {
     if (!auth.generation || run.generation !== auth.generation) run.abort(new Error("The selected account changed."));
   }
+  frameDrafts.changeSession(auth.generation);
   for (const request of modelRequests) if (request.generation !== auth.generation) request.abort();
   const cancelled = desktop.cancelAll();
   await api.runtime.sendMessage({ type: "auth.changed", generation: auth.generation }).catch(() => {});
@@ -1209,7 +1692,12 @@ function connectNativeEvents() {
 connectNativeEvents();
 
 function isPanel(sender) {
-  return sender.id === api.runtime.id && typeof sender.url === "string" && sender.url.split(/[?#]/)[0] === panelURL;
+  return sender.id === api.runtime.id && dock.panelURLMatches(sender.url);
+}
+
+function ownedRun(sender, account, generation, chatId) {
+  const source = sourceTabId(sender);
+  return [...activeRuns.values()].find(run => run.matches(source, sender.tab?.id, account, generation) && (!chatId || run.chat.id === chatId));
 }
 
 async function native(type, extra = {}) {
@@ -1223,6 +1711,26 @@ async function native(type, extra = {}) {
 function checkSession(auth, account, generation) {
   if (!generation || generation !== auth.generation || account !== auth.account) throw new Error("Your account changed. Refresh the panel before continuing.");
   return auth;
+}
+
+function saveWebsiteAccess(account, generation, change, signal, hosts = []) {
+  return localData.write(async storage => {
+    const access = await readWebsiteAccess(storage, account);
+    allowsAction(access, hosts); // An inline approval cannot override a newly blocked host.
+    const updated = changeWebsiteAccess(access, change);
+    const auth = checkSession(await native("auth.status"), account, generation);
+    if (!auth.connected) throw new Error("Connect an account to manage website access.");
+    signal?.throwIfAborted();
+    await storage.set({ [accessKey(account)]: updated });
+    return updated;
+  });
+}
+
+async function checkCapture(account, url) {
+  const safe = safeWebURL(url);
+  if (!safe) throw new Error("Safari protects this page. Choose an accessible website.");
+  // Picking a source explicitly authorizes the excerpt, subject to saved blocks.
+  allowsAction(await readWebsiteAccess(api.storage.local, account), [new URL(safe).hostname]);
 }
 
 async function credential(auth) {
@@ -1247,15 +1755,16 @@ async function models(auth) {
   if (localData.closed) throw new Error("Local data is being erased.");
   const values = modelCatalog(data);
   controller.signal.throwIfAborted();
-  catalogCache = { generation: auth.generation, models: values, expires: Date.now() + 300000 };
+  catalogCache = values.length ? { generation: auth.generation, models: values, expires: Date.now() + 300000 } : null;
   return values;
   } finally { clearTimeout(timer); modelRequests.delete(controller); }
 }
 
 async function eraseLocalData() {
   localData.stop();
-  dockedTabs.clear();
+  frameDrafts.clear();
   catalogCache = null;
+  recentResults.clear();
   for (const run of activeRuns.values()) run.abort();
   for (const request of modelRequests) request.abort();
   await desktop.cancelAll();
@@ -1265,64 +1774,105 @@ async function eraseLocalData() {
   const failures = [];
   let browserCleared = false;
   let nativeCleared = false;
-  try { await localData.clear(); browserCleared = true; } catch (error) { failures.push(error.message); }
+  try { await dock.clear(); } catch (error) { failures.push(error.message); }
+  try { await localData.clear(); browserCleared = !failures.length; } catch (error) { failures.push(error.message); }
   try { await native("data.erase"); nativeCleared = true; } catch (error) { failures.push(error.message); }
   try { await api.contextMenus.removeAll(); } catch (error) { failures.push(`Could not remove the context menu: ${error.message}`); }
   return { browserCleared, nativeCleared, failures };
 }
 
-async function mountPanel(tabId, url) {
-  await api.scripting.executeScript({ target: { tabId }, files: ["content/mount.js"] });
-  return api.tabs.sendMessage(tabId, { type: "panel.show", url });
-}
-
 async function showPanel(tab, share = false, selection = "") {
-  if (!Number.isInteger(tab?.id)) return;
+  if (!Number.isInteger(tab?.id) || dock.panelURLMatches(tab.url) || localData.closed) return;
   if (share && !localData.closed) {
+    let auth;
     try {
-      const auth = await native("auth.status");
+      auth = await native("auth.status");
+      await checkCapture(auth.account, tab.url);
       const limit = (await settings(api.storage.local)).pageChars;
       const page = selection ? { text: selection, title: tab.title, url: tab.url } : await readTab(api, tab.id, limit, { expectedURL: tab.url });
       if (!safeWebURL(tab.url) || safeWebURL(page.url) !== safeWebURL(tab.url)) throw new Error("The page changed. Choose Ask Safari Chat on the page you want to share.");
       await localData.write(async storage => {
+        await checkCapture(auth.account, tab.url);
         checkSession(await native("auth.status"), auth.account, auth.generation);
         const kind = selection ? "selection" : "page", url = publicURL(page.url);
         await storage.set({ [`draft:${tab.id}`]: { kind, key: `${kind}:${tab.id}:${url}`, tabId: tab.id, text: page.text.slice(0, limit), title: page.title ?? "Page", url, truncated: !!page.truncated || page.text.length > limit, generation: auth.generation, created: Date.now() } });
       });
     } catch (error) {
-      if (!localData.closed) await localData.write(storage => storage.set({ [`draft:${tab.id}`]: { error: error.message, created: Date.now() } }));
+      if (!localData.closed) await localData.write(async storage => {
+        if (auth) checkSession(await native("auth.status"), auth.account, auth.generation);
+        await storage.set({ [`draft:${tab.id}`]: { error: error.message, ...(auth ? { generation: auth.generation } : {}), created: Date.now() } });
+      }).catch(() => {});
     }
   }
-  const url = `${panelURL}?tab=${tab.id}`;
-  try {
-    const result = await mountPanel(tab.id, url);
-    if (result?.standalone) await api.tabs.create({ url });
-    else if (result?.ok && !localData.closed) dockedTabs.set(tab.id, url);
-  } catch { await api.tabs.create({ url }); }
+  if (localData.closed) return;
+  await dock.open(tab);
   if (share) await api.runtime.sendMessage({ type: "context.available", tabId: tab.id }).catch(() => {});
 }
 
-api.action.onClicked.addListener(tab => showPanel(tab).catch(console.error));
+async function dockStatus(tabId, message = "") {
+  await Promise.allSettled([
+    api.action.setBadgeText?.({ tabId, text: message ? "!" : "" }),
+    api.action.setTitle?.({ tabId, title: message || "Open Safari Chat" }),
+  ]);
+}
+async function focusSource(panel) {
+  const source = sourceTabId(panel);
+  if (source === null) throw new Error("This chat has no source tab.");
+  let tab;
+  try {
+    tab = await api.tabs.update(source, { active: true });
+    if (!Number.isInteger(tab?.id)) tab = await api.tabs.get(source);
+  }
+  catch { throw new Error("The source tab is no longer available. Your chat is saved here."); }
+  if (Number.isInteger(tab.windowId)) await api.windows.update(tab.windowId, { focused: true });
+  return tab;
+}
+async function openFromSafari(tab, share = false, selection = "") {
+  if (!Number.isInteger(tab?.id)) return;
+  try {
+    if (!share && dock.panelURLMatches(tab.url)) tab = await focusSource(tab);
+    await showPanel(tab, share, selection);
+    await dockStatus(tab.id);
+  }
+  catch (error) { await dockStatus(tab.id, error.message); }
+}
+async function restoreDock(tab) {
+  try { if (await dock.open(tab, { restore: true })) await dockStatus(tab.id); }
+  catch (error) { await dockStatus(tab.id, error.message); }
+}
+async function dismissDock(source, token) {
+  const dismissed = await dock.dismiss(source, token, () => {
+    for (const run of activeRuns.values()) if (run.source === source) run.abort();
+  });
+  if (dismissed) await dockStatus(source);
+}
+api.action.onClicked.addListener(tab => openFromSafari(tab));
 api.runtime.onInstalled.addListener(() => {
   api.contextMenus.removeAll().then(() => {
     api.contextMenus.create({ id: "ask", title: "Ask Safari Chat", contexts: ["selection", "page"] });
   }).catch(console.error);
 });
 api.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === "ask") return showPanel(tab, true, info.selectionText).catch(console.error);
+  if (info.menuItemId === "ask") return openFromSafari(tab, true, info.selectionText);
 });
-api.tabs.onRemoved.addListener(tabId => { dockedTabs.delete(tabId); api.storage.local.remove(`draft:${tabId}`).catch(() => {}); });
-api.tabs.onUpdated?.addListener(async (tabId, change, tab) => {
-  const url = dockedTabs.get(tabId);
-  if (!url || localData.closed || change.status !== "complete" || !safeWebURL(tab.url)) return;
-  try {
-    await api.scripting.executeScript({ target: { tabId }, files: ["content/mount.js"] });
-    if (dockedTabs.get(tabId) === url && !localData.closed) await api.tabs.sendMessage(tabId, { type: "panel.show", url, restore: true });
-  } catch { /* Safari can withhold website access on the new page. */ }
+api.tabs.onRemoved.addListener(tabId => {
+  for (const run of activeRuns.values()) {
+    if (run.source === tabId || run.panelTab === tabId) run.abort(new Error("The chat or its source tab was closed."));
+  }
+  api.storage.local.remove(`draft:${tabId}`).catch(() => {});
+  frameDrafts.pending.delete(tabId);
+  return dock.removed(tabId).catch(console.error);
+});
+api.tabs.onUpdated.addListener((id, change, tab) => {
+  if (change.status === "complete" && tab && !localData.closed) return restoreDock(tab);
 });
 
 async function handleMessage(message, sender) {
-  if (!isPanel(sender)) throw new Error("Untrusted extension message.");
+  if (!await dock.trusted(sender, message.dockToken)) throw new Error("Untrusted chat panel.");
+  if (message.type === "panel.present") {
+    if (sender.frameId) await api.tabs.sendMessage(sender.tab.id, { type: "panel.ready", token: message.dockToken }, { frameId: 0 });
+    return true;
+  }
   if (message.type === "data.erase") {
     if (!cleanupTask) cleanupTask = eraseLocalData().finally(() => { cleanupTask = null; });
     return cleanupTask;
@@ -1335,15 +1885,38 @@ async function handleMessage(message, sender) {
       const prefs = await settings(api.storage.local);
       let auth;
       try { auth = await native("auth.status"); } catch (error) { auth = { connected: false, error: error.message }; }
-      let catalog = [];
-      let modelError;
-      if (auth.connected && auth.canInfer) try { catalog = await models(auth); } catch (error) { modelError = error.message; }
+      const source = sourceTabId(sender);
+      if (message.openEditor && auth.generation && frameDrafts.pending.has(source)) {
+        await localData.write(storage => frameDrafts.recover(storage, source, message.openEditor, auth, async () => checkSession(await native("auth.status"), auth.account, auth.generation)));
+      }
+      const cached = catalogCache?.generation === auth.generation && catalogCache?.expires > Date.now();
+      const catalog = auth.connected && auth.canInfer ? (cached ? catalogCache.models : null) : [];
       const pointer = sessionKey(auth.account ?? "local", message.tabId);
       const session = (await api.storage.local.get(pointer))[pointer];
       const key = `draft:${message.tabId}`;
       const hasContext = Number.isInteger(message.tabId) && !!(await api.storage.local.get(key))[key];
-      return { prefs, auth, models: catalog, modelError, activeChat: session?.id, hasContext };
+      const access = auth.connected ? await readWebsiteAccess(api.storage.local, auth.account) : undefined;
+      let run = ownedRun(sender, auth.account, auth.generation, message.chatId);
+      let draftChatId;
+      const editorId = message.chatId || session?.id;
+      if (activeRuns.size && editorId && editorId !== run?.chat.id) {
+        const key = draftKey(editorId), draft = (await api.storage.local.get(key))[key];
+        run = ownedRun(sender, auth.account, auth.generation, message.chatId);
+        if (draft?.account === auth.account && draft.sourceChatId) {
+          run ??= ownedRun(sender, auth.account, auth.generation, draft.sourceChatId);
+          if (run?.chat.id === draft.sourceChatId) draftChatId = editorId;
+        }
+      }
+      return { prefs, auth, models: catalog, activeChat: session?.id, hasContext, access, ...(run ? { run: { id: run.id, chatId: run.chat.id, draftChatId } } : {}) };
     }
+    case "models.list": {
+      const auth = checkSession(await native("auth.status"), message.account, message.generation);
+      if (!auth.connected || !auth.canInfer) throw new Error("Connect an account with model access first.");
+      const catalog = await models(auth);
+      checkSession(await native("auth.status"), message.account, message.generation);
+      return catalog;
+    }
+    case "access.change": return saveWebsiteAccess(message.account, message.generation, message.change);
     case "settings.save": {
       let prefs;
       await localData.write(async storage => {
@@ -1358,7 +1931,7 @@ async function handleMessage(message, sender) {
     }
     case "auth.open": await native("app.open"); return { ok: true };
     case "auth.check": return { generation: (await native("auth.status")).generation };
-    case "auth.signin": await native("auth.signin"); return { ok: true };
+    case "auth.signin": case "auth.apikey": await native(message.type); return { ok: true };
     case "auth.signout": {
       const result = await native("auth.signout", { generation: message.generation });
       await notifyAccountChange(); return result;
@@ -1369,17 +1942,32 @@ async function handleMessage(message, sender) {
       if (!item) return null;
       if (!item.error) checkSession(await native("auth.status"), message.account, message.generation);
       await storage.remove(key);
-      if (item.created <= Date.now() - 300000 || (!item.error && item.generation !== message.generation)) return null;
+      if (item.created <= Date.now() - 300000 || ((!item.error || item.generation) && item.generation !== message.generation)) return null;
+      if (!item.error) await checkCapture(message.account, item.url);
       const { created, generation, ...source } = item;
       return source;
     });
     case "context.read": {
       const prefs = await settings(api.storage.local);
-      const page = await readTab(api, message.tabId, prefs.pageChars, { selectionOnly: message.selection === true });
+      const auth = await native("auth.status");
+      checkSession(auth, auth.account, message.generation);
+      const tab = await api.tabs.get(message.tabId);
+      await checkCapture(auth.account, tab.url);
+      const page = await readTab(api, message.tabId, prefs.pageChars, { selectionOnly: message.selection === true, expectedURL: tab.url });
+      await checkCapture(auth.account, page.url);
+      checkSession(await native("auth.status"), auth.account, auth.generation);
       if (message.selection && !page.selection) throw new Error("Select a passage on the page first.");
       return { kind: message.selection ? "selection" : "page", key: `${message.selection ? "selection" : "page"}:${message.tabId}:${publicURL(page.url)}`, tabId: message.tabId, title: page.title, url: publicURL(page.url), text: message.selection ? page.selection : page.text, truncated: page.truncated };
     }
-    case "tabs.list": return (await api.tabs.query({ currentWindow: true })).filter(tab => safeWebURL(tab.url)).slice(0, 200).map(tab => ({ id: tab.id, title: (tab.title ?? "Untitled").slice(0, 160), url: publicURL(tab.url) }));
+    case "tabs.list": {
+      const auth = await native("auth.status");
+      checkSession(auth, auth.account, message.generation);
+      const windowId = await sourceWindowId(api, sourceTabId(sender));
+      const tabs = await api.tabs.query(Number.isInteger(windowId) ? { windowId } : { currentWindow: true });
+      const access = await readWebsiteAccess(api.storage.local, auth.account);
+      checkSession(await native("auth.status"), auth.account, auth.generation);
+      return tabs.filter(tab => visibleWebsite(tab.url, access)).slice(0, 200).map(tab => ({ id: tab.id, title: (tab.title ?? "Untitled").slice(0, 160), url: publicURL(tab.url) }));
+    }
     case "chats.list": { const auth = await native("auth.status"); checkSession(auth, auth.account, message.generation); return listChats(api.storage.local, auth.account); }
     case "chat.load": {
       const auth = await native("auth.status");
@@ -1395,11 +1983,20 @@ async function handleMessage(message, sender) {
       if (data && data.account !== (auth.account ?? "local")) throw new Error("This draft belongs to a different account.");
       return data && { ...data, revision: data.revision ?? 1 };
     }
+    case "draft.stage":
+      if (sender.frameId && /^[a-f0-9-]{36}$/i.test(message.draft?.id)) frameDrafts.stage(sourceTabId(sender), message);
+      return true;
     case "draft.save": return localData.write(async storage => {
       const auth = await native("auth.status");
       checkSession(auth, message.draft.account, message.generation);
       if (typeof message.draft.id !== "string" || !/^[a-f0-9-]{36}$/i.test(message.draft.id)) throw new Error("Invalid draft identifier.");
-      return saveDraft(storage, message.draft, message.tabId);
+      const source = sourceTabId(sender);
+      if (sender.frameId && message.tabId !== source) throw new Error("This draft belongs to another tab.");
+      const recovered = frameDrafts.receipt(source, message);
+      if (recovered) return recovered;
+      const saved = await saveDraft(storage, message.draft, message.tabId);
+      frameDrafts.saved(source, message, saved);
+      return saved;
     });
     case "chat.save": {
       return localData.write(async storage => {
@@ -1418,63 +2015,111 @@ async function handleMessage(message, sender) {
         await storage.remove([chatKey(message.id), draftKey(message.id), ...pointers]); return { ok: true };
       });
     }
-    case "panel.close": if (sender.tab?.id) { dockedTabs.delete(sender.tab.id); await api.tabs.sendMessage(sender.tab.id, { type: "panel.close" }).catch(() => {}); } return { ok: true };
-    case "panel.popout": {
-      const url = new URL(panelURL);
-      if (Number.isInteger(message.tabId)) url.searchParams.set("tab", message.tabId);
-      if (typeof message.chatId === "string" && /^[a-f0-9-]{36}$/i.test(message.chatId)) url.searchParams.set("chat", message.chatId);
-      await api.tabs.create({ url: url.href }); return { ok: true };
+    case "panel.close": {
+      if (sender.frameId) await dismissDock(sourceTabId(sender), message.dockToken);
+      else if (Number.isInteger(sender.tab?.id)) {
+        await api.tabs.remove(sender.tab.id);
+      }
+      return { ok: true };
+    }
+    case "panel.source": {
+      const tab = await focusSource(sender);
+      await openFromSafari(tab);
+      return { ok: true };
     }
     default: throw new Error("Unknown extension request.");
   }
 }
 
 api.runtime.onMessage.addListener((message, sender) => {
+  if (sender.id === api.runtime.id && !sender.frameId && Number.isInteger(sender.tab?.id) && !isPanel(sender) && !localData.closed) {
+    if (message.type === "dock.width") return dock.width(sender.tab.id, message.token, message.width);
+    if (message.type === "dock.dismiss") return dismissDock(sender.tab.id, message.token);
+    if (message.type === "dock.restore") return restoreDock(sender.tab);
+    if (message.type === "dock.removed") {
+      return dock.owns(sender.tab.id, message.token).then(owned => {
+        if (owned) return dockStatus(sender.tab.id, "This website removed the pane. Click Safari Chat to reopen it.");
+      });
+    }
+  }
   if (!isPanel(sender)) return;
   return handleMessage(message, sender).then(value => ({ ok: true, value })).catch(error => ({ ok: false, error: error.message }));
 });
 
 api.runtime.onConnect.addListener(port => {
   if (port.name !== "chat" || !isPanel(port.sender)) { port.disconnect(); return; }
-  let controller;
-  let approval;
-  let busy = false;
-  const emit = event => { try { port.postMessage(event); } catch { controller?.abort(); } };
-  port.onDisconnect.addListener(() => { controller?.abort(); approval?.reject(new Error("Panel closed.")); activeRuns.delete(port); });
+  let attached, dockToken, disconnected = false;
+  const source = sourceTabId(port.sender);
+  const host = port.sender.tab?.id;
+  port.onDisconnect.addListener(() => { disconnected = true; attached?.ports.delete(port); });
   port.onMessage.addListener(async message => {
-    if (localData.closed) { emit({ type: "data.erasing" }); return; }
-    if (message.type === "cancel") { controller?.abort(); return; }
-    if (message.type === "approval") {
-      if (approval && approval.id === message.id) {
-        const pending = approval; approval = null;
-        message.allow ? pending.resolve() : pending.reject(new Error("The user declined this action. Do not retry it."));
-      }
+    if (disconnected) return;
+    dockToken ??= message.dockToken;
+    if (!await dock.trusted(port.sender, dockToken)) { port.disconnect(); return; }
+    if (disconnected && message.type !== "run") return;
+    if (localData.closed) { port.postMessage({ type: "data.erasing" }); return; }
+    if (message.type === "cancel") { if (attached?.ports.has(port)) attached.abort(); return; }
+    if (message.type === "approval") { if (attached?.ports.has(port)) attached.answer(message); return; }
+    if (message.type === "resume") {
+      try {
+        checkSession(await native("auth.status"), message.account, message.generation);
+        if (localData.closed || disconnected) return;
+        const run = activeRuns.get(message.id);
+        if (run?.matches(source, host, message.account, message.generation) && run.chat.id === message.chatId) {
+          if (port.sender.frameId) run.panelTab = source;
+          attached = run; run.attach(port, true);
+        } else {
+          const recent = recentResults.get(message.id);
+          const own = recent && recent.source === source && (source !== null || recent.host === host) && recent.generation === message.generation && recent.account === message.account;
+          port.postMessage({ type: "run.ended", saved: own ? recent.saved : undefined, message: own ? recent.message : undefined });
+        }
+      } catch (error) { port.postMessage({ type: "run.ended", message: error.message }); }
       return;
     }
-    if (message.type !== "run" || busy) return;
-    busy = true;
-    controller = new AbortController();
-    controller.generation = message.generation;
-    activeRuns.set(port, controller);
+    if (message.type !== "run" || (attached && activeRuns.has(attached.id))) return;
+    const existing = ownedRun(port.sender, message.account, message.generation, message.chatId);
+    if (existing) {
+      try {
+        checkSession(await native("auth.status"), message.account, message.generation);
+        if (disconnected || localData.closed) return;
+        if (!activeRuns.has(existing.id)) port.postMessage({ type: "run.ended", saved: recentResults.get(existing.id)?.saved });
+        else if (existing.chat.revision === message.revision) { attached = existing; existing.attach(port, true); }
+        else port.postMessage({ type: "error", message: "This chat already has an active response. Reopen it to continue." });
+      } catch (error) { port.postMessage({ type: "error", message: error.message }); }
+      return;
+    }
+    const run = new ChatRun(message, source, host);
+    attached = run;
+    if (!disconnected) run.attach(port);
+    activeRuns.set(run.id, run);
+    const controller = run.controller;
+    const emit = event => run.emit(event);
     // A finite deadline also bounds abandoned network reads and approval prompts.
     const timer = setTimeout(() => controller.abort(new Error("This task timed out. Please try again.")), 300000);
     let runChat;
-    let partialText = "";
     let writing = false;
     const started = Date.now();
     let usedTools = false, workMs;
     const verifySession = async () => checkSession(await native("auth.status"), message.account, message.generation);
     const finish = (text, error = false) => localData.write(async storage => {
       await verifySession();
-      const saved = await saveChat(storage, { ...runChat, messages: [...runChat.messages, { role: "assistant", text, workMs, ...(error ? { error: true } : {}) }] });
+      const pointer = !run.ports.size && !frameDrafts.pending.has(source) ? sessionKey(run.account, source) : undefined;
+      const saved = await saveChat(storage, { ...runChat, messages: [...runChat.messages, { role: "assistant", text, workMs, ...(error ? { error: true } : {}) }] }, pointer);
       return { id: saved.id, title: saved.title, revision: saved.revision };
     });
-    const runEmit = event => { controller.signal.throwIfAborted(); if (event.type === "activity") usedTools = true; if (event.type === "delta") partialText += event.text; else if (event.type === "replace") partialText = event.text; emit(event); };
+    const runEmit = event => { controller.signal.throwIfAborted(); if (event.type === "activity") usedTools = true; emit(event); };
+    const terminal = event => {
+      if (!localData.closed && (event.saved || !controller.signal.aborted)) {
+        recentResults.set(run.id, { source, host, account: run.account, generation: run.generation, saved: event.saved, message: event.saveError || event.message });
+        if (recentResults.size > 16) recentResults.delete(recentResults.keys().next().value);
+      }
+      emit(event);
+    };
     try {
       const auth = await verifySession();
       if (!auth.connected || !auth.canInfer) throw new Error("Connect ChatGPT plan usage or an API key in the companion app first.");
       if (typeof message.chatId !== "string" || !/^[a-f0-9-]{36}$/i.test(message.chatId)) throw new Error("Invalid chat identifier. Start a new chat.");
-      runChat = { id: message.chatId, revision: message.revision, title: String(message.title || "New chat"), account: auth.account, messages: message.messages };
+      runChat = run.chat;
       const prefs = { ...await settings(api.storage.local), webSearch: message.webSearch === true };
       controller.signal.throwIfAborted();
       const requestedEffort = message.effort ?? "auto";
@@ -1482,35 +2127,36 @@ api.runtime.onConnect.addListener(port => {
       const effort = resolveEffort(selectedModel, requestedEffort);
       const built = buildInput(message.messages.filter(m => !m.error), prefs);
       emit({ type: "context", chars: built.chars, trimmed: built.trimmed });
-      const approve = (details, signal) => new Promise((resolve, reject) => {
-        signal.throwIfAborted();
-        const id = crypto.randomUUID();
-        const abort = () => { if (approval?.id === id) approval = null; reject(signal.reason); };
-        const finish = callback => value => { signal.removeEventListener("abort", abort); callback(value); };
-        approval = { id, resolve: finish(resolve), reject: finish(reject) };
-        signal.addEventListener("abort", abort, { once: true });
-        emit({ type: "approval", id, ...details });
-      });
+      const approve = async (details, signal) => {
+        const scope = await run.prompt(details, signal);
+        if (scope === "once") return scope;
+        if (scope === "site" && details.hosts.length !== 1) throw new Error("This action involves more than one website.");
+        const change = scope === "site" ? { host: details.hosts[0], rule: "allow" } : { mode: "auto" };
+        await saveWebsiteAccess(auth.account, auth.generation, change, signal, details.hosts);
+        return scope;
+      };
       const initialTabs = (message.messages.at(-1)?.contexts ?? []).map(c => ({ id: c.tabId, url: c.url }));
-      const source = new URL(port.sender.url).searchParams.get("tab");
-      const defaultTabId = source !== null && /^\d+$/.test(source) ? Number(source) : null;
-      const executeTool = createBrowserTools({ api, pageChars: prefs.pageChars, approve, verifySession: async () => {
+      const defaultTabId = sourceTabId(port.sender);
+      const requestSiteAccess = (siteOrigin, signal) => run.prompt({ operation: "read", siteOrigin,
+        title: "Read " + new URL(siteOrigin).hostname + "?",
+        detail: "Allow website access in Safari to let this chat read the open tab and continue." }, signal);
+      const executeTool = createBrowserTools({ api, pageChars: prefs.pageChars, approve, requestSiteAccess, readAccess: () => readWebsiteAccess(api.storage.local, auth.account), verifySession: async () => {
         try { await verifySession(); } catch (error) { controller.abort(error); throw error; }
-      }, initialTabs, defaultTabId, protectedTabId: message.embedded ? port.sender.tab?.id : null });
+      }, initialTabs, defaultTabId, protectedTabId: port.sender.frameId ? null : host });
       const result = await runAgent({ input: built.input, model: message.model, effort, settings: prefs, signal: controller.signal }, { credential: () => credential(auth), executeTool, emit: runEmit });
       controller.signal.throwIfAborted();
       writing = true;
       workMs = usedTools ? Date.now() - started : undefined;
-      emit({ type: "done", workMs, usage: result.usage, saved: await finish(result.text) });
+      terminal({ type: "done", workMs, usage: result.usage, saved: await finish(result.text) });
     } catch (error) {
       let saved, saveError;
       if (runChat && !localData.closed && !writing) {
-        try { saved = await finish(partialText || (controller.signal.aborted ? "Response stopped." : "No response received."), true); }
+        try { saved = await finish(run.text || (controller.signal.aborted ? "Response stopped." : "No response received."), true); }
         catch (failure) { saveError = failure.message; }
       }
-      emit({ type: controller.signal.aborted ? "cancelled" : "error", saved, saveError: saveError || (writing ? error.message : undefined), message: (controller.signal.aborted ? controller.signal.reason?.message : error?.message) ?? "The request could not finish." });
+      terminal({ type: controller.signal.aborted ? "cancelled" : "error", saved, saveError: saveError || (writing ? error.message : undefined), message: (controller.signal.aborted ? controller.signal.reason?.message : error?.message) ?? "The request could not finish." });
     } finally {
-      clearTimeout(timer); busy = false; approval = null; activeRuns.delete(port);
+      clearTimeout(timer); activeRuns.delete(run.id); run.release();
     }
   });
 });

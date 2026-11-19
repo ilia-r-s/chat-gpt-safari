@@ -46,8 +46,8 @@ root_group = obj("root-group", "PBXGroup", children=list(refs.values()) + [icon,
 common = {"SDKROOT": "macosx", "MACOSX_DEPLOYMENT_TARGET": "14.0", "SWIFT_VERSION": "5.0",
           "SAFARI_CHAT_BUNDLE_ID": "org.safarichat.app", "SAFARI_CHAT_GROUP_ID": "org.safarichat.shared",
           "CLANG_ENABLE_MODULES": "YES", "SWIFT_STRICT_CONCURRENCY": "complete", "ENABLE_HARDENED_RUNTIME": "YES",
-          "CODE_SIGN_STYLE": "Automatic", "GENERATE_INFOPLIST_FILE": "NO", "CURRENT_PROJECT_VERSION": "4",
-          "MARKETING_VERSION": "0.2.0", "COMBINE_HIDPI_IMAGES": "YES", "ENABLE_USER_SCRIPT_SANDBOXING": "YES"}
+          "CODE_SIGN_STYLE": "Automatic", "GENERATE_INFOPLIST_FILE": "NO", "CURRENT_PROJECT_VERSION": "9",
+          "MARKETING_VERSION": "0.3.4", "COMBINE_HIDPI_IMAGES": "YES", "ENABLE_USER_SCRIPT_SANDBOXING": "YES"}
 app_settings = {**common, "PRODUCT_BUNDLE_IDENTIFIER": "$(SAFARI_CHAT_BUNDLE_ID)", "PRODUCT_NAME": "Safari Chat",
                 "INFOPLIST_FILE": "native/App/Info.plist", "CODE_SIGN_ENTITLEMENTS": "native/App/App.entitlements",
                 "LD_RUNPATH_SEARCH_PATHS": ["$(inherited)", "@executable_path/../Frameworks"]}
