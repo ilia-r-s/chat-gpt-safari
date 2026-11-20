@@ -7,6 +7,26 @@ import { sitePermissionPattern } from "../extension/core/website-access.js";
 const target = "https://finance.yahoo.com/quote/example";
 const origin = new URL(target).origin;
 
+test("a manually opened tab is counted while redacted and read by its original ID after website access", async () => {
+  const signal = new AbortController().signal, queries = [], reads = [], prompts = [];
+  const apple = { id: 10, windowId: 5, url: "https://www.apple.com/", title: "Apple", index: 0 };
+  const yahoo = { id: 42, windowId: 5, url: "", title: "Hidden title must stay private", index: 1 };
+  const tabs = [apple], access = { mode: "auto", allowed: [], blocked: ["blocked.example"] };
+  const api = { tabs: { get: async id => tabs.find(tab => tab.id === id), query: async filter => { queries.push(filter); return tabs; } },
+    scripting: { executeScript: async ({target, args}) => { reads.push(target.tabId); return [{result:{url:args[3],elements:[],text:"Yahoo fixture"}}]; } } };
+  const run = createBrowserTools({ api, defaultTabId: apple.id, pageChars: 5000, readAccess: async () => access,
+    requestTabAccess: async (id, label) => { prompts.push([id,label]); yahoo.url = "https://www.yahoo.com/?private=1"; yahoo.title = "Yahoo"; return "https://www.yahoo.com"; } });
+  const list = () => run({operation:"list_tabs"},signal);
+  assert.equal((await list()).length,1);
+  tabs.push(yahoo,{id:43, url:"https://blocked.example/"},{id:44,url:"safari-web-extension://extension/panel.html"});
+  assert.deepEqual((await list())[1],{tabId:42, title:"Tab 2", url:"", needsWebsiteAccess:true});
+  assert.deepEqual(reads,[]); assert.deepEqual(prompts,[]);
+  assert.equal((await run({operation:"read",tabId:42},signal)).text,"Yahoo fixture");
+  assert.deepEqual(reads,[42]); assert.deepEqual(prompts,[[42,"Tab 2"]]);
+  assert.deepEqual((await list())[1],{tabId:42,title:"Yahoo",url:"https://www.yahoo.com/"});
+  assert.ok(queries.every(filter => filter.windowId === 5));
+});
+
 async function openDestination(mode = "auto") {
   const f = { url: "", granted: false, reads: [], prompts: [], opens: [], approvals: [], access: { mode, allowed: [], blocked: [] } };
   const controller = new AbortController();

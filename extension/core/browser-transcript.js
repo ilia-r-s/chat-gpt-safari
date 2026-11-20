@@ -13,7 +13,7 @@ export function actionReceipt(args, result) {
     receipt.motion = result.motion.active ? result.motion.speed : result.motion.reason;
   }
   if (Array.isArray(result)) receipt.tabCount = result.length;
-  for (const key of ["ok", "moved", "checked", "scrollX", "scrollY", "fromItem", "requestedItem", "navigationObserved"]) {
+  for (const key of ["ok", "found", "inViewport", "moved", "checked", "scrollX", "scrollY", "fromItem", "requestedItem", "navigationObserved", "openedTabId"]) {
     const value = result?.[key] ?? result?.viewport?.[key];
     if (typeof value === "boolean" || Number.isFinite(value)) receipt[key] = value;
   }

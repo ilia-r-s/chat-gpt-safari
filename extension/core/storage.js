@@ -1,4 +1,4 @@
-import { MAX_BROWSER_ACTIONS, normalizeSettings } from "./config.js";
+import { MAX_BROWSER_ACTIONS, MAX_TURN_MINUTES, normalizeSettings } from "./config.js";
 import { boundedContexts, textPrefix } from "./context.js";
 
 const MAX_CHATS = 50;
@@ -29,8 +29,12 @@ export function prepareChat(all, chat, retainID) {
     role: m.role, text: m.text.length > 120000 ? m.text.slice(0, 119980) + "\n[Content trimmed]" : m.text,
     contexts: boundedContexts(m.contexts),
     ...(m.error ? { error: true } : {}),
-    ...(m.role === "assistant" && Number.isFinite(m.workMs) ? { workMs: Math.max(0, Math.min(300000, m.workMs)) } : {}),
+    ...(m.role === "assistant" && m.error && typeof m.errorMessage === "string" ? { errorMessage: m.errorMessage.slice(0, 1000) } : {}),
+    ...(m.role === "assistant" && Number.isFinite(m.workMs) ? { workMs: Math.max(0, Math.min(MAX_TURN_MINUTES * 60000, m.workMs)) } : {}),
     ...actionCount(m),
+    ...(m.role === "assistant" && Array.isArray(m.toolErrors) && m.toolErrors.length ? {
+      toolErrors: m.toolErrors.slice(-8).filter(e => typeof e?.detail === "string").map(e => ({ operation: String(e.operation || "").slice(0, 32), detail: e.detail.slice(0, 300) })),
+    } : {}),
   }));
   while (messages.length && messages[0].role !== "user") messages.shift();
   while (bytes(messages) > MAX_CHAT_BYTES) {

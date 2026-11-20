@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Untitled – Paint</title>
+<main><canvas width="300" height="190" aria-label="Paint canvas"></canvas></main>
+<script>
+  const canvas = document.querySelector("canvas");
+  const ctx = canvas.getContext("2d");
+  let started, presses = 0, releases = 0;
+  ctx.lineWidth = 4;
+  canvas.onpointerdown = e => {
+    if (document.hidden || e.buttons !== 1) return;
+    canvas.dataset.presses = ++presses;
+    started = performance.now();
+    ctx.beginPath();
+    ctx.moveTo(e.offsetX, e.offsetY);
+  };
+  canvas.onpointermove = e => {
+    if (document.hidden || !started || e.buttons !== 1) return;
+    ctx.lineTo(e.offsetX, e.offsetY);
+    ctx.stroke();
+  };
+  canvas.onpointerup = e => {
+    if (document.hidden || !started || e.buttons !== 0) return;
+    canvas.dataset.releases = ++releases;
+    canvas.dataset.elapsed = performance.now() - started;
+    started = 0;
+  };
+</script>

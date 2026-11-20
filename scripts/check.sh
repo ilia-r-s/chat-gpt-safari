@@ -12,3 +12,4 @@ swift test --disable-sandbox --scratch-path "$PWD/.build" \
   --security-path "$PWD/.cache/swiftpm-security" \
   -Xswiftc -module-cache-path -Xswiftc "$SWIFT_MODULECACHE_PATH"
 plutil -lint SafariChat.xcodeproj/project.pbxproj native/App/Info.plist native/Extension/Info.plist native/App/App.entitlements native/Extension/Extension.entitlements
+python3 tests/project-signing.py

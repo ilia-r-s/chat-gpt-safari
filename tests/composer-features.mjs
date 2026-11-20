@@ -16,7 +16,7 @@ export async function testComposerFeatures(page, origin) {
   await page.keyboard.press("Escape"); await menu.waitFor({ state: "hidden" });
   assert.equal(await add.evaluate(el => el === document.activeElement), true);
   await page.setViewportSize({ width: 440, height: 900 });
-  assert.equal(await page.getByRole("group", { name: "Conversation mode" }).count(), 0);
+  assert.equal(await page.getByRole("group", { name: "Conversation mode" }).getByRole("button", { name: "Work", pressed: true }).isVisible(), true);
   assert.equal(await page.locator("#actions-guidance").isVisible(), true);
   assert.deepEqual(await page.evaluate(() => globalThis.__reads), [], "available browser tools do not read a page until requested");
   await add.click(); await page.locator("#web-search").click();
@@ -26,11 +26,12 @@ export async function testComposerFeatures(page, origin) {
   await page.locator("#prompt").fill("Look up a fact."); await page.locator("#send-button").click();
   await page.locator("#stop-button").waitFor({ state: "hidden" });
   const run = await page.evaluate(() => globalThis.__runs.at(-1));
-  assert.equal(run.webSearch, true); assert.equal("browserTools" in run, false, "ordinary messages do not carry a browser-mode gate");
+  assert.equal(run.webSearch, true); assert.equal(run.interactionMode, "work");
   assert.equal(await page.locator("#messages .assistant a").getAttribute("href"), "https://example.com/source");
   await page.reload(); await page.waitForFunction(() => document.getElementById("account-label").textContent === "Test account");
   assert.equal(await page.locator("#messages .assistant a").getAttribute("href"), "https://example.com/source", "citations persist with the answer");
   await page.locator("#search-chip").click(); await page.locator("#search-chip").waitFor({ state: "hidden" });
+  await page.locator("#history-button").click();
   await page.locator("#new-button").click();
 
   await add.click(); await page.locator("#menu-tabs").click();
@@ -51,6 +52,7 @@ export async function testComposerFeatures(page, origin) {
   await page.locator("#tabs-dialog").waitFor({ state: "hidden" });
   assert.equal(await page.locator("#attachments .attachment").count(), 2);
   assert.deepEqual(await page.evaluate(() => globalThis.__reads), [2, 3, 3]);
+  await page.locator("#history-button").click();
   await page.locator("#new-button").click();
   const prompt = page.locator("#prompt"), mentions = page.locator("#tab-mentions");
   await prompt.fill("Compare @"); await mentions.waitFor({ state: "visible" });
@@ -66,6 +68,7 @@ export async function testComposerFeatures(page, origin) {
   await page.keyboard.press("Enter");
   await page.locator(".assistant li").filter({ hasText: "Final handoff" }).waitFor();
   await page.screenshot({ path: "build/screenshots/panel-conversation.png" });
+  await page.locator("#history-button").click();
   await page.locator("#new-button").click();
 
   await page.locator("#file-input").setInputFiles([{ name: "notes.md", mimeType: "text/markdown", buffer: Buffer.from("Notes") }, { name: "data.json", mimeType: "application/json", buffer: Buffer.from('{"value":1}') }]);
@@ -80,12 +83,14 @@ export async function testComposerFeatures(page, origin) {
   });
   await page.waitForFunction(() => document.querySelectorAll("#attachments .attachment").length === 3);
   assert.equal(await page.evaluate(() => globalThis.__dropPrevented), true);
+  await page.locator("#history-button").click();
   await page.locator("#settings-button").click();
   await page.getByLabel("Appearance", { exact: true }).selectOption("dark");
   await page.getByRole("button", { name: "Close settings", exact: true }).click();
   await add.click();
   await page.screenshot({ path: "build/screenshots/panel-tools-menu.png" });
   await page.keyboard.press("Escape");
+  await page.locator("#history-button").click();
   await page.locator("#new-button").click();
 
   // Finish an old account's read while a different account has reopened the picker.
@@ -128,6 +133,7 @@ export async function testComposerFeatures(page, origin) {
     return [globalThis.__data[run.chatId].messages.at(-1).role, globalThis.__drafts[fork].text, run.chatId !== fork];
   });
   assert.deepEqual(copies, ["assistant", "Keep my follow-up draft", true]);
+  await page.locator("#history-button").click();
   await page.locator("#new-button").click();
   await prompt.fill("Leave during a response"); await page.keyboard.press("Enter");
   await page.waitForFunction(() => globalThis.__runs.at(-1)?.messages.at(-1)?.text === "Leave during a response");

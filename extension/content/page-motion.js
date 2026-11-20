@@ -46,9 +46,12 @@ export function controlPageMotion(command, id, options) {
       if (state.active) frame = requestAnimationFrame(tick);
       return state;
     };
-    globalThis.__safariChatStartScroll = (target, owner, direction, speed, speedChanges) => {
+    globalThis.__safariChatStartScroll = (target, owner, direction, speed, speedChanges, probe) => {
       const state = { active: true, kind: "scroll", direction, speed };
       let fraction = 0, stalled = 0, lastDirection, travelled = 0, checkpoint = 0;
+      const viewport = target === document.scrollingElement ? innerHeight : Math.min(innerHeight, target.clientHeight);
+      const stride = Math.max(1, Math.floor(viewport / 3));
+      let nextCheck = 0, lastCheck = 0, activeSeconds = 0;
       const applySpeeds = () => {
         while (checkpoint < speedChanges.length && travelled >= speedChanges[checkpoint].after) {
           state.speed = speedChanges[checkpoint++].speed;
@@ -57,13 +60,22 @@ export function controlPageMotion(command, id, options) {
       };
       applySpeeds();
       return globalThis.__safariChatStartMotion(owner, state, target, (dt, now) => {
+        if (probe) {
+          if (state.speed) activeSeconds += dt;
+          if (travelled >= nextCheck || now - lastCheck >= 250 || stalled) {
+            const found = probe(target);
+            if (found) { state.match = found; return "target visible"; }
+            nextCheck = travelled + stride; lastCheck = now;
+          }
+          if (travelled >= 12 * viewport || activeSeconds >= 15) return "search limit";
+        }
         if (state.direction !== lastDirection || !state.speed) { stalled = 0; fraction = 0; }
         lastDirection = state.direction;
         const horizontal = ["left", "right"].includes(lastDirection);
         const sign = ["up", "left"].includes(lastDirection) ? -1 : 1;
         fraction += sign * Math.min(horizontal ? target.scrollWidth : target.scrollHeight, state.speed * dt);
         const remaining = speedChanges[checkpoint] ? Math.ceil(speedChanges[checkpoint].after - travelled) : Infinity;
-        const distance = sign * Math.min(Math.abs(Math.trunc(fraction)), remaining);
+        const distance = sign * Math.min(Math.abs(Math.trunc(fraction)), remaining, probe ? nextCheck - travelled : Infinity);
         if (!distance) return;
         fraction -= distance;
         const before = horizontal ? target.scrollLeft : target.scrollTop;

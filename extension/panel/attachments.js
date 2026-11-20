@@ -22,7 +22,7 @@ export async function readTextFiles(files, limit) {
 
 export function setupAttachments({ state, add, readPage, listTabs, report }) {
   const menu = $("add-menu"), trigger = $("add-button");
-  const closeMenu = anchorPopover(menu, trigger, 306);
+  const closeMenu = anchorPopover(menu, trigger, 454);
   const run = callback => async () => {
     const owner = state().owner;
     closeMenu();
@@ -47,7 +47,7 @@ export function setupAttachments({ state, add, readPage, listTabs, report }) {
     const end = prompt.selectionEnd, before = prompt.value;
     try {
       if (state().contexts.length >= 6 && !state().contexts.some(source => source.tabId === tab.id)) throw new Error("Remove a source before adding another tab.");
-      await readPage(tab.id);
+      await readPage(tab.id, false, tab);
       if (state().owner !== item.owner || prompt.value !== before) return;
       prompt.setRangeText("", item.start, end, "end");
       prompt.dispatchEvent(new Event("input")); prompt.focus();
@@ -60,7 +60,7 @@ export function setupAttachments({ state, add, readPage, listTabs, report }) {
       const row = document.createElement("button");
       row.type = "button"; row.id = `mention-tab-${i}`; row.tabIndex = -1; row.setAttribute("role", "option");
       const title = document.createElement("strong"), url = document.createElement("small");
-      title.textContent = tab.title; url.textContent = tab.url; row.append(title, url);
+      title.textContent = tab.title; url.textContent = tab.needsWebsiteAccess ? "Website access needed" : tab.url; row.append(title, url);
       row.onmousedown = event => event.preventDefault();
       row.onclick = () => chooseMention(item, tab); suggestions.append(row);
     }
@@ -140,7 +140,7 @@ export function setupAttachments({ state, add, readPage, listTabs, report }) {
       const label = document.createElement("label"); label.className = "tab-choice";
       const check = document.createElement("input"); check.type = "checkbox"; check.checked = selected.has(tab.id); check.disabled = loading;
       const text = document.createElement("span"); text.textContent = tab.title || "Untitled tab";
-      const url = document.createElement("small"); url.textContent = tab.url; text.append(url);
+      const url = document.createElement("small"); url.textContent = tab.needsWebsiteAccess ? "Website access needed" : tab.url; text.append(url);
       check.onchange = () => {
         if (check.checked) selected.add(tab.id); else selected.delete(tab.id);
         if (selected.size + state().contexts.length > 6) {
@@ -173,7 +173,7 @@ export function setupAttachments({ state, add, readPage, listTabs, report }) {
     try {
       for (const id of [...selected]) {
         if (request !== revision || batchOwner !== state().owner || state().blocked) return;
-        await readPage(id);
+        await readPage(id, false, tabs.find(tab => tab.id === id));
         if (request !== revision || batchOwner !== state().owner) return;
         selected.delete(id);
       }

@@ -1,5 +1,10 @@
 /** Self-contained functions: Safari serializes these into its isolated content-script world. */
-export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false, expectedURL = null, indicateCopy = false, pointerPaths = false) {
+export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false, expectedURL = null, indicateCopy = false, pointerPaths = false, reportError = false) {
+  // WebKit can replace a thrown exception with a generic scripting error at the process boundary.
+  if (reportError) {
+    try { return snapshotPage(limit, viewportOnly, selectionOnly, expectedURL, indicateCopy, pointerPaths); }
+    catch (error) { return { pageError: String(error.message || error).slice(0, 700) }; }
+  }
   if (expectedURL && location.href !== expectedURL) throw new Error("The tab navigated before it could be read. Choose the page again.");
   const selection = getSelection();
   const editable = node => node?.parentElement?.closest("input,textarea,[contenteditable]");
@@ -50,24 +55,25 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
       }
     }
   };
-  const visible = element => {
+  const rendered = (element, inViewport) => {
     if (!element || element.closest("[hidden],[aria-hidden='true'],[inert],#safari-chat-host")) return false;
     const style = getComputedStyle(element);
     if (style.display === "none" || style.visibility !== "visible" || style.opacity === "0" || !element.getClientRects().length) return false;
     const rect = element.getBoundingClientRect();
-    if (viewportOnly && (rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= viewportWidth)) return false;
+    if (inViewport && (rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= viewportWidth)) return false;
     let depth = 0;
     for (let parent = element.parentElement; parent; parent = parent.parentElement) {
       if (++depth > 64) return false;
       const parentStyle = getComputedStyle(parent);
       if (parentStyle.opacity === "0") return false;
-      if (!viewportOnly || parent === document.body || parent === document.documentElement) continue;
+      if (!inViewport || parent === document.body || parent === document.documentElement) continue;
       const clip = parent.getBoundingClientRect();
       if (/auto|scroll|hidden|clip/.test(parentStyle.overflowY) && (rect.bottom <= clip.top || rect.top >= clip.bottom)) return false;
       if (/auto|scroll|hidden|clip/.test(parentStyle.overflowX) && (rect.right <= clip.left || rect.left >= clip.right)) return false;
     }
     return true;
   };
+  const visible = element => rendered(element, viewportOnly);
   // Action reads include navigation and dialogs; attachments prefer the article's text.
   const root = viewportOnly ? document.body : document.querySelector("main,article,[role='main']") ?? document.body;
   if (!root) throw new Error("This page has no readable content.");
@@ -141,15 +147,11 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
   };
   // Transform-based carousels are moved through their own tab controls, never
   // by changing page styles or guessing at a product link / "Next" button.
-  const galleries = [];
-  let tablists = 0;
-  for (const list of document.querySelectorAll("[role='tablist']")) {
-    if (++tablists > 40 || galleries.length >= 4) break;
-    if (!visible(list)) continue;
+  function galleryFor(list) {
     const tabs = [...list.querySelectorAll("[role='tab']")];
-    if (tabs.length < 2 || tabs.length > 40 || tabs.some(tab => tab.closest("[role='tablist']") !== list)) continue;
+    if (tabs.length < 2 || tabs.length > 40 || tabs.some(tab => tab.closest("[role='tablist']") !== list)) return null;
     const controls = tabs.map(tab => tab.getAttribute("aria-controls"));
-    if (controls.some(id => !id || /\s/.test(id) || id.length > 256) || new Set(controls).size !== tabs.length) continue;
+    if (controls.some(id => !id || /\s/.test(id) || id.length > 256) || new Set(controls).size !== tabs.length) return null;
     const safeTab = tab => {
       if (tab.matches(":disabled,[aria-disabled='true']") || tab.closest("form") || tab.form) return false;
       if (tab.matches("a[href]")) {
@@ -160,9 +162,9 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
       }
       return tab.matches("button,[role='tab']:not(a):not(input)");
     };
-    if (!tabs.every(safeTab)) continue;
+    if (!tabs.every(safeTab)) return null;
     const selected = tabs.findIndex(tab => tab.getAttribute("aria-selected") === "true");
-    if (selected < 0 || tabs.filter(tab => tab.getAttribute("aria-selected") === "true").length !== 1) continue;
+    if (selected < 0 || tabs.filter(tab => tab.getAttribute("aria-selected") === "true").length !== 1) return null;
     let scope = list.parentElement, panels;
     for (let depth = 0; scope && depth < 6 && scope !== document.body; scope = scope.parentElement, depth++) {
       if (!/(^|[\s_-])(gallery|carousel|slideshow)([\s_-]|$)/i.test(`${scope.id} ${scope.getAttribute("class")} ${scope.getAttribute("aria-roledescription")}`)) continue;
@@ -171,10 +173,19 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
       if (panels.every(Boolean)) break;
       panels = null;
     }
-    if (!panels || !scope || scope === document.body) continue;
+    if (!panels || !scope || scope === document.body) return null;
     const orientation = list.getAttribute("aria-orientation") === "vertical" ? "vertical" : "horizontal";
     const label = (scope.getAttribute("aria-label") || scope.querySelector("h1,h2,h3,[role='heading']")?.textContent || "Gallery").trim().slice(0, 100);
-    const gallery = { scope, panels, orientation, label, rtl: getComputedStyle(list).direction === "rtl", tabs: tabs.map(tab => ({ element: tab, label: labelFor(tab), signature: signature(tab, true) })) };
+    return { scope, panels, orientation, label, selected, rtl: getComputedStyle(list).direction === "rtl", tabs: tabs.map(tab => ({ element: tab, label: labelFor(tab), signature: signature(tab, true) })) };
+  }
+  const galleries = [];
+  let tablists = 0;
+  for (const list of document.querySelectorAll("[role='tablist']")) {
+    if (++tablists > 40 || galleries.length >= 4) break;
+    if (!visible(list)) continue;
+    const gallery = galleryFor(list);
+    if (!gallery) continue;
+    const { orientation, label, selected, tabs } = gallery;
     galleries.push(gallery);
     add(list, `${label} navigation`, { actions: ["scroll"], kind: "carousel", directions: orientation === "vertical" ? ["up", "down"] : ["left", "right"], currentItem: selected + 1, itemCount: tabs.length }, 1500, { gallery });
   }
@@ -238,7 +249,7 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
     if (!visible(area) || galleries.some(gallery => gallery.scope.contains(area) && getComputedStyle(area).overflowX === "hidden")) continue;
     add(area, labelFor(area), { actions: ["scroll"], directions: scrollDirections(area), scrollTop: Math.round(area.scrollTop), scrollLeft: Math.round(area.scrollLeft) }, 5000);
   }
-  globalThis.__safariChatRefs = { url: location.href, refs, viewport: { width: viewportWidth, height: innerHeight, x: scrollX, y: scrollY } };
+  globalThis.__safariChatRefs = { url: location.href, refs, visible, rendered, galleryFor, scrollDirections, viewport: { width: viewportWidth, height: innerHeight, x: scrollX, y: scrollY } };
   const page = document.scrollingElement ?? document.documentElement;
   return {
     ...excerpt, elements, elementsTruncated,
@@ -247,7 +258,12 @@ export function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly 
   };
 }
 
-export function actOnPage(operation, elementId, text, expectedURL, { direction, checked, preview = false, motionId, speed, path, speedChanges, inputOwner } = {}) {
+export function actOnPage(operation, elementId, text, expectedURL, options = {}, reportError = false) {
+  if (reportError) {
+    try { return actOnPage(operation, elementId, text, expectedURL, options); }
+    catch (error) { return { pageError: String(error.message || error).slice(0, 700) }; }
+  }
+  const { direction, checked, preview = false, motionId, speed, path, speedChanges, inputOwner, until } = options;
   const state = globalThis.__safariChatRefs;
   if (!state || state.url !== location.href || location.href !== expectedURL) throw new Error("The page changed. Read it again before acting.");
   const labelFor = element => {
@@ -257,7 +273,7 @@ export function actOnPage(operation, elementId, text, expectedURL, { direction, 
   };
   const signature = (element, ignoreSelection = false) => JSON.stringify([element.tagName, element.type, element.name, element.getAttribute("role"), element.getAttribute("href"), element.closest("a[href]")?.href, element.getAttribute("target"), element.getAttribute("download"), element.form?.action, element.form?.method, element.getAttribute("formaction"), element.formAction, element.getAttribute("aria-controls"), ignoreSelection ? null : element.getAttribute("aria-selected"), element.getAttribute("aria-orientation")]);
   const reference = state.refs.get(elementId);
-  const freePointer = operation === "move_pointer" && !elementId;
+  const freePointer = (operation === "move_pointer" || operation === "gesture") && !elementId;
   const element = freePointer ? document.documentElement : reference?.element;
   const pageScroll = operation === "scroll" && !elementId;
   let label = "Page";
@@ -299,6 +315,10 @@ export function actOnPage(operation, elementId, text, expectedURL, { direction, 
   // A preview resolves the same validated target, but leaves the real action single-use.
   if (preview && (document.hidden || !(operation === "click" || operation === "set_checked" || reference?.gallery && operation === "scroll"))) return {};
   if (!preview) globalThis.__safariChatRefs = null;
+  if (operation === "gesture") {
+    const motion = globalThis.__safariChatStartGesture(motionId, element, options.gestureSpec, state, options.hosts);
+    return { ok: true, operation, label, motion };
+  }
   if (operation === "drag" || operation === "move_pointer") {
     const motion = globalThis.__safariChatStartPath(motionId, element, operation, path, speed, state.viewport);
     return { ok: true, operation, label, motion };
@@ -331,13 +351,10 @@ export function actOnPage(operation, elementId, text, expectedURL, { direction, 
       const next = selected + (direction === forward ? 1 : -1);
       if (next < 0 || next >= tabs.length) return { ok: true, operation, moved: false, message: "This gallery is at its first or last item. Scroll in the other direction." };
       const control = tabs[next].element;
+      if (control.matches(":disabled,[aria-disabled='true']") || !state.rendered(control, false)) throw new Error("The next gallery control is not available. Read the page again.");
+      if (!state.rendered(control, true)) control.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
       const rect = control.getBoundingClientRect();
-      if (control.matches(":disabled,[aria-disabled='true']") || control.closest("[hidden],[inert],[aria-hidden='true'],#safari-chat-host") || !control.getClientRects().length || rect.width === 0 || rect.height === 0 || rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth) || getComputedStyle(control).visibility !== "visible") throw new Error("The next gallery control is not available. Read the page again.");
-      let depth = 0;
-      for (let parent = control; parent; parent = parent.parentElement) {
-        const style = getComputedStyle(parent), clip = parent.getBoundingClientRect();
-        if (++depth > 64 || style.opacity === "0" || (/auto|scroll|hidden|clip/.test(style.overflowX) && (rect.right <= clip.left || rect.left >= clip.right)) || (/auto|scroll|hidden|clip/.test(style.overflowY) && (rect.bottom <= clip.top || rect.top >= clip.bottom))) throw new Error("The next gallery control is not visible. Read the page again.");
-      }
+      if (!rect.width || !rect.height || rect.left >= Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth) || !state.rendered(control, true)) throw new Error("The next gallery control is not visible. Read the page again.");
       click(control);
       if (preview) return { pointer: true };
       return { ok: true, operation, dispatched: true, fromItem: selected + 1, requestedItem: next + 1, message: "Gallery navigation activated. Read the page again to verify the newly visible cards." };
@@ -346,7 +363,8 @@ export function actOnPage(operation, elementId, text, expectedURL, { direction, 
     const axis = ["left", "right"].includes(direction) ? "overflowX" : "overflowY";
     if (!pageScroll && !/^(auto|scroll|hidden)$/.test(getComputedStyle(target)[axis])) throw new Error("This area cannot scroll in that direction. Use its listed directions or gallery controls.");
     if (motionId) {
-      const motion = globalThis.__safariChatStartScroll(target, motionId, direction, speed, speedChanges ?? []);
+      if (until && !state.probe) throw new Error("The scroll target expired. Read the page again.");
+      const motion = globalThis.__safariChatStartScroll(target, motionId, direction, speed, speedChanges ?? [], until ? state.probe : null);
       return { ok: true, operation, label, motion };
     }
     const before = { x: target.scrollLeft, y: target.scrollTop };

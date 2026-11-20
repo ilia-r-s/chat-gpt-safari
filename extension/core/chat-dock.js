@@ -1,5 +1,6 @@
 const storageKey = "chatDocks";
 const frameKeys = ["left", "top", "width", "height"];
+const restoreScript = "safari-chat-dock-restore";
 
 export function sourceTabId(sender) {
   const value = new URL(sender.url).searchParams.get("tab");
@@ -65,10 +66,20 @@ export class ChatDock {
   async mount(tab, entry, restore) {
     if (tab.url && !/^https?:\/\//i.test(tab.url)) throw new Error("Safari protects this page. Open Safari Chat on a website.");
     const url = this.panelURL + "?tab=" + tab.id;
-    try { await this.api.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/mount.js"] }); }
+    try { await this.api.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/mount.js"], ...(restore && { injectImmediately: true }) }); }
     catch { throw new Error("Safari could not open the pane here. Check Safari Chat's access to this website and try again."); }
     const reply = await this.api.tabs.sendMessage(tab.id, { type: "panel.show", url, token: entry.token, width: entry.width, restore }, { frameId: 0 }).catch(() => null);
     if (!reply?.ok) throw new Error("Safari could not display the pane on this page. Reload the page and try again.");
+  }
+  async earlyRestore(enable) {
+    const scripting = this.api.scripting;
+    if (!scripting?.getRegisteredContentScripts || this.registered === enable) return;
+    try {
+      const scripts = await scripting.getRegisteredContentScripts({ ids: [restoreScript] });
+      if (enable && !scripts.length) await scripting.registerContentScripts([{ id: restoreScript, matches: ["http://*/*", "https://*/*"], js: ["content/restore.js"], runAt: "document_start", persistAcrossSessions: false }]);
+      if (!enable && scripts.length) await scripting.unregisterContentScripts({ ids: [restoreScript] });
+      this.registered = enable;
+    } catch { /* tabs.onUpdated also restores the dock on supported documents. */ }
   }
   open(tab, { restore = false } = {}) {
     return this.serial(async () => {
@@ -80,6 +91,7 @@ export class ChatDock {
         await this.save();
       }
       await this.mount(tab, entry, restore);
+      await this.earlyRestore(true);
       return true;
     });
   }
@@ -99,13 +111,17 @@ export class ChatDock {
       if (this.closing) delete this.closing[source];
       await this.save();
       await this.api.tabs.sendMessage(source, { type: "panel.close" }, { frameId: 0 }).catch(() => {});
+      if (!Object.keys(this.entries).length) await this.earlyRestore(false);
       return true;
     });
   }
   removed(id) {
     return this.serial(async () => {
       if (this.closing) delete this.closing[id];
-      if (this.entries[id]) { delete this.entries[id]; await this.save(); }
+      if (this.entries[id]) {
+        delete this.entries[id]; await this.save();
+        if (!Object.keys(this.entries).length) await this.earlyRestore(false);
+      }
     });
   }
   clear() {
@@ -113,6 +129,7 @@ export class ChatDock {
     return this.serial(async () => {
       this.closing ??= Object.fromEntries(Object.entries(this.entries).map(([id, entry]) => [id, entry.token]));
       this.entries = {};
+      await this.earlyRestore(false);
       await this.save();
       if ((await this.api.storage.session.get(storageKey))[storageKey]) throw new Error("Safari still contains dock records. Retry cleanup.");
     });

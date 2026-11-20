@@ -1,5 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { availableBrowserActions } from "../extension/core/browser-actions.js";
+
+test("browser operations follow the installed Safari tab and scripting APIs", () => {
+  const api = { tabs: { query() {}, setZoom() {} } };
+  assert.deepEqual(availableBrowserActions(api), ["list_tabs", "zoom"]);
+  api.scripting = { executeScript() {} }; api.tabs.goBack = () => {};
+  const actions = availableBrowserActions(api);
+  assert.ok(["back", "zoom", "read", "type_text"].every(action => actions.includes(action)));
+  assert.ok(!actions.includes("forward") && !actions.includes("open_tab"));
+});
 import { runAgent } from "../extension/core/agent.js";
 
 const stream = result => new Response(`data: ${JSON.stringify({ type: "response.completed", response: result })}\n\n`);

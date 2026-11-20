@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createBrowserTools, readTab } from "../extension/core/browser-tools.js";
-import { readyTab } from "../extension/core/tab-navigation.js";
+import { readyTab, watchNavigation } from "../extension/core/tab-navigation.js";
 
 function fixture(approval = async () => {}) {
   let url = "https://example.com/";
@@ -19,6 +19,37 @@ function fixture(approval = async () => {}) {
   return { api, execute: createBrowserTools({ api, pageChars: 6000, approve: approval }), writes, navigate: value => { url = value; } };
 }
 const signal = new AbortController().signal;
+test("a same-address metadata notification during a field click is not navigation", async () => {
+  const url = "https://finance.example/";
+  let updated;
+  const tabs = { onUpdated: { addListener(fn) { updated = fn; }, removeListener() {} } };
+  const click = () => { updated(2, { url, title: "Quotes" }); return { ok: true, clicks: 1 }; };
+  assert.deepEqual(await watchNavigation({ tabs }, 2, url, signal, click, false), { ok: true, clicks: 1 });
+  await assert.rejects(watchNavigation({ tabs }, 2, url, signal, () => {
+    updated(2, { url, title: "Quotes" }); throw Error("A JavaScript exception occurred");
+  }, false), /JavaScript exception/);
+});
+test("website activation reports its new tab and preserves a partially failed input", async () => {
+  let created;
+  const tabs = {
+    onUpdated: { addListener() {}, removeListener() {} },
+    onCreated: { addListener(fn) { created = fn; }, removeListener(fn) { assert.equal(created, fn); created = null; } },
+  };
+  const activate = async () => {
+    created({ id: 3, openerTabId: 1 }); created({ id: 9, openerTabId: 2 });
+    return { ok: false, clicks: 1, error: "The target changed before the second click." };
+  };
+  const result = await watchNavigation({ tabs }, 1, "https://example.com/", signal, activate, false);
+  assert.equal(result.openedTabId, 3); assert.equal(result.ok, false);
+  assert.match(result.error, /second click/); assert.equal(created, null);
+  const lost = await watchNavigation({ tabs }, 1, "https://example.com/", signal, () => {
+    created({ id: 7, openerTabId: 1 }); throw Error("A JavaScript exception occurred");
+  }, false);
+  assert.equal(lost.openedTabId, 7);
+  await assert.rejects(watchNavigation({ tabs }, 1, "https://example.com/", signal, () => {
+    created({ id: 8, openerTabId: 4 }); throw Error("A JavaScript exception occurred");
+  }, false), /JavaScript exception/);
+});
 test("Safari script-result errors retain the concrete read failure", async () => {
   const f = fixture();
   for (const error of [new Error("The page changed while reading."), "The page changed while reading."]) {

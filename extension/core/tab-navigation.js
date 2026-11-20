@@ -36,30 +36,40 @@ export async function watchNavigation(api, tabId, previousURL, signal, dispatch,
   if (!api.tabs.onUpdated) return dispatch();
   // Collect tab events before dispatch. A fast redirect can already have
   // returned to the original URL by the time Safari acknowledges the action.
-  let started = false, finished = false, wake, timer;
+  let started = false, finished = false, openedTabId, wake, timer;
+  const created = tab => {
+    if (tab.openerTabId !== tabId || !Number.isInteger(tab.id)) return;
+    openedTabId = tab.id; wake?.();
+  };
   const updated = (id, change) => {
-    if (id !== tabId || (!change.status && !change.url)) return;
+    // Safari can report the current URL and title after website access changes,
+    // even when a plain field click stayed in the same complete document.
+    if (id !== tabId || (!change.status && (!change.url || change.url === previousURL))) return;
     started = true;
     if (change.status) finished = change.status === "complete";
     wake?.();
   };
   api.tabs.onUpdated.addListener(updated);
+  api.tabs.onCreated?.addListener(created);
   try {
     let result, lostDocument;
     try { result = await dispatch(); }
     catch (error) {
-      if (navigationRequested || !/context was destroyed|frame (?:was )?removed|document (?:was )?unloaded|page did not confirm/i.test(error.message)) throw error;
+      // WebKit can lose the injection reply during document replacement and
+      // report only a generic exception. Require a matching tab event below.
+      if (navigationRequested || !/context was destroyed|frame (?:was )?removed|document (?:was )?unloaded|page did not confirm|^a javascript exception occurred\.?$/i.test(error.message)) throw error;
       lostDocument = error;
     }
     // Link default actions run after the click handler returns. Give Safari a
     // short opportunity to report navigation even when injection succeeded.
-    if (!started && !navigationRequested) await new Promise(resolve => { wake = resolve; timer = setTimeout(resolve, 300); });
+    if (!started && openedTabId == null && !navigationRequested) await new Promise(resolve => { wake = resolve; timer = setTimeout(resolve, 300); });
     signal.throwIfAborted();
+    if (openedTabId != null && !navigationRequested) return { ok: !result?.error, ...result, openedTabId, navigationObserved: true, message: "The website opened another tab. Read openedTabId to verify the outcome before submitting again." };
     if (started || navigationRequested) await readyTab(api, tabId, signal, tab => finished || tab.url !== previousURL);
     if (lostDocument) {
       if (!started) throw lostDocument;
       return { navigationObserved: true, message: "The tab navigated during the click. Read the new page to verify the result before taking another action." };
     }
     return result;
-  } finally { clearTimeout(timer); api.tabs.onUpdated.removeListener(updated); }
+  } finally { clearTimeout(timer); api.tabs.onUpdated.removeListener(updated); api.tabs.onCreated?.removeListener(created); }
 }

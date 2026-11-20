@@ -1,15 +1,20 @@
 import { normalizeEffort } from "./models.js";
 
 export const MAX_BROWSER_ACTIONS = 100;
+export const MAX_TURN_MINUTES = 60;
 
 export const DEFAULTS = Object.freeze({
   theme: "system",
   model: "",
   reasoningEffort: "auto",
+  interactionMode: "chat",
+  chatModel: "",
+  chatEffort: "auto",
   pageChars: 12000,
   inputChars: 48000,
   historyTurns: 8,
   maxBrowserActions: MAX_BROWSER_ACTIONS,
+  turnMinutes: 10,
   webSearch: false,
   desktopControl: false,
 });
@@ -24,10 +29,14 @@ export function normalizeSettings(value = {}) {
     theme: ["system", "light", "dark"].includes(value.theme) ? value.theme : DEFAULTS.theme,
     model: typeof value.model === "string" ? value.model.slice(0, 120) : "",
     reasoningEffort: normalizeEffort(value.reasoningEffort),
+    interactionMode: value.interactionMode === "work" ? "work" : DEFAULTS.interactionMode,
+    chatModel: typeof value.chatModel === "string" ? value.chatModel.slice(0, 120) : "",
+    chatEffort: ["instant", "medium", "high", "xhigh", "pro"].includes(value.chatEffort) ? value.chatEffort : value.chatEffort === "none" ? "instant" : "auto",
     pageChars: integer(value.pageChars, DEFAULTS.pageChars, 2000, 24000),
     inputChars: integer(value.inputChars, DEFAULTS.inputChars, 12000, 96000),
     historyTurns: integer(value.historyTurns, DEFAULTS.historyTurns, 1, 20),
     maxBrowserActions: integer(value.maxBrowserActions, legacyRounds === 6 ? DEFAULTS.maxBrowserActions : legacyRounds, 1, MAX_BROWSER_ACTIONS),
+    turnMinutes: integer(value.turnMinutes, DEFAULTS.turnMinutes, 1, MAX_TURN_MINUTES),
     webSearch: value.webSearch === true,
     desktopControl: value.desktopControl === true,
   };

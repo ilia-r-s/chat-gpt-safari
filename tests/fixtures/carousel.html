@@ -1,0 +1,79 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Gallery and sketch pad</title>
+<style>
+  body { margin: 0; font: 16px system-ui; }
+  main { padding: 16px; }
+  h1 { margin: 0 0 12px; }
+  canvas { background: #eee; touch-action: none; }
+  .gallery { margin: 120vh 0; }
+  .gallery img { display: block; width: 100%; height: 110px; background: #679; }
+  footer { padding: 20px; }
+</style>
+<main>
+  <h1>Sketch pad</h1>
+  <canvas id="pad" aria-label="Sketch pad" width="300" height="190"></canvas>
+  <section class="gallery" aria-roledescription="carousel" aria-label="Offers">
+    <div id="pictures"></div>
+    <div role="tablist" aria-label="Choose an offer"></div>
+  </section>
+  <footer>End of offers</footer>
+</main>
+<script>
+  const list = document.querySelector('[role="tablist"]'), pictures = document.querySelector("#pictures");
+  const visits = [], hover = [], strokes = [];
+  let current = 0, clicks = 0, travel = 0, pressed = false;
+  function select(index) {
+    current = index; visits.push(index);
+    Array.from(list.children).forEach((tab, i) => tab.setAttribute("aria-selected", String(index === i)));
+    Array.from(pictures.children).forEach((panel, i) => { panel.hidden = index !== i; });
+  }
+  for (let i = 0; i < 5; i++) {
+    const tab = document.createElement("button"), panel = document.createElement("div");
+    panel.id = "offer-" + i; panel.setAttribute("role", "tabpanel");
+    const link = document.createElement("a"), image = document.createElement("img");
+    link.href = "#" + panel.id; link.setAttribute("aria-label", "Offer picture " + (i + 1));
+    image.alt = "Offer " + (i + 1);
+    image.src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+    link.append(image); panel.append(link); pictures.append(panel);
+    tab.setAttribute("role", "tab"); tab.setAttribute("aria-controls", panel.id);
+    tab.textContent = String(i + 1); tab.onclick = () => select(i); list.append(tab);
+  }
+  select(1);
+  pictures.addEventListener("wheel", event => {
+    if (event.target.tagName !== "IMG") return;
+    event.preventDefault();
+    if (Math.sign(event.deltaX) !== Math.sign(travel)) travel = 0;
+    travel += event.deltaX;
+    if (Math.abs(travel) >= 96) {
+      select(Math.min(4, Math.max(0, current + Math.sign(travel))));
+      travel -= Math.sign(travel) * 96;
+    }
+  }, { passive: false });
+  pictures.parentElement.addEventListener("click", () => clicks++);
+
+  const pad = document.querySelector("#pad"), ink = pad.getContext("2d");
+  ink.lineWidth = 2;
+  pad.addEventListener("pointerdown", event => {
+    strokes.push("down"); pressed = true;
+    ink.beginPath(); ink.moveTo(event.offsetX, event.offsetY);
+  });
+  pad.addEventListener("pointermove", event => {
+    if (pressed) { ink.lineTo(event.offsetX, event.offsetY); ink.stroke(); }
+    else if (!event.buttons) hover.push([event.offsetX, event.offsetY, event.timeStamp]);
+  });
+  pad.addEventListener("pointerup", () => { strokes.push("up"); pressed = false; });
+  pad.addEventListener("pointercancel", () => { strokes.push("cancel"); pressed = false; });
+
+  window.verifyWorkflow = () => {
+    if (visits.join() !== "1,2,3,2,1" || clicks) return "Slide visits " + visits + ", gallery clicks " + clicks;
+    if (Math.abs(scrollY) > 1) return "The page did not return to the top";
+    if (strokes.join() !== "down,up") return "Wrong stroke boundaries: " + strokes;
+    const times = [[25,20], [125,65], [25,110], [125,155]].map(([x,y]) =>
+      hover.find(([px,py]) => Math.abs(x-px) < 1 && Math.abs(y-py) < 1)?.[2]);
+    if (!times.every(Number.isFinite) || times[1]-times[0] < 2 * (times[2]-times[1]) || times[3]-times[2] < 2 * (times[2]-times[1])) return "Wrong zigzag timing: " + times;
+    const hasInk = (x,y) => ink.getImageData(x-2, y-2, 5, 5).data.some((byte,i) => i % 4 === 3 && byte);
+    if (![[42,110], [85,50], [185,92], [132,132], [66,134]].every(([x,y]) => hasInk(x,y)) || hasInk(10,10)) return "Missing or misplaced ink on the turtle";
+    return "ok";
+  };
+</script>

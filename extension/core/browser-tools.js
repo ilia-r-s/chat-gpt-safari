@@ -1,11 +1,20 @@
 import { snapshotPage, actOnPage } from "../content/page.js";
 import { installPointerPath } from "../content/pointer-path.js";
+import { installGesturePlayer } from "../content/gesture.js";
+import { installGestureContacts } from "../content/gesture-contacts.js";
+import { installTrackpad } from "../content/trackpad.js";
+import { installPageGestureEvents } from "../content/page-gesture-events.js";
+import { gesturePreview, validateGesture } from "./gestures.js";
+import { configureGallerySearch } from "../content/scroll-search.js";
+import { findPageText } from "../content/find-text.js";
 import { showActionPointer } from "../content/action-pointer.js";
 import { readyTab, watchNavigation } from "./tab-navigation.js";
 import { INPUT_ACTIONS } from "./page-input.js";
+import { BROWSER_ACTIONS, TAB_METHODS } from "./browser-actions.js";
+import { TabFocus, waitForVisiblePage } from "./tab-focus.js";
 import { motionResult } from "./motion-session.js";
 import { publicURL, safeWebURL } from "./context.js";
-import { allowsAction, sitePermissionPattern, visibleWebsite } from "./website-access.js";
+import { allowsAction, listedTabs, sitePermissionPattern } from "./website-access.js";
 
 function describePath(path, viewport, bounds) {
   if (!viewport || !bounds || !Array.isArray(path) || path.length < 2 || path.length > 128) throw new Error("Read the target and choose 2-128 visible viewport points.");
@@ -21,8 +30,8 @@ function describePath(path, viewport, bounds) {
 
 function scriptResult(results, fallback) {
   const injection = results?.[0];
-  if (injection?.error != null) {
-    const error = injection.error;
+  const error = injection?.error ?? injection?.result?.pageError;
+  if (error != null) {
     const detail = typeof error === "string" ? error : error?.message;
     throw new Error(typeof detail === "string" && detail.trim() ? detail.slice(0, 700) : fallback);
   }
@@ -45,7 +54,7 @@ export async function readTab(api, tabId, limit, { viewportOnly = false, selecti
   if (!Number.isInteger(tabId) || tabId < 0) throw new Error("Select a Safari tab first.");
   const url = expectedURL ?? (await api.tabs.get(tabId)).url;
   if (url && !safeWebURL(url)) throw new Error("Safari protects this page. Open an ordinary website to attach it.");
-  const results = await api.scripting.executeScript({ target: { tabId }, func: snapshotPage, args: [limit, viewportOnly, selectionOnly, url ?? null, true, pointerPaths] });
+  const results = await api.scripting.executeScript({ target: { tabId }, func: snapshotPage, args: [limit, viewportOnly, selectionOnly, url ?? null, true, pointerPaths, true] });
   const { pointerRect, ...page } = scriptResult(results, "Could not read this page. Check that the tab finished loading and read it again.");
   if (pointerRect) await indicatePageAction(api, tabId, page.url, pointerRect);
   return page;
@@ -61,11 +70,12 @@ export async function sourceWindowId(api, tabId) {
   throw new Error("Safari could not identify the source window. Open Safari Chat from the website again.");
 }
 
-export function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verifySession, readAccess, motionSession, inputs, initialTabs = [], defaultTabId = null, protectedTabId = null }) {
+export function createBrowserTools({ api, pageChars, approve, requestSiteAccess, requestTabAccess, verifySession, readAccess, motionSession, inputs, initialTabs = [], defaultTabId = null, protectedTabId = null, tabFocus = new TabFocus(api, defaultTabId) }) {
   const readableTabs = new Map(initialTabs.filter(tab => Number.isInteger(tab.id) && safeWebURL(tab.url)).map(tab => [tab.id, new URL(tab.url).origin]));
   // A requested destination is a hint for Safari's permission sheet, never proof
   // of the live tab's URL or a grant to share its contents.
   const destinations = new Map(), declinedSites = new Set();
+  const hiddenTabs = new Map(), declinedTabs = new Set();
   const snapshots = new Map();
   async function authorize(details, hosts, signal, sharedRead = false, siteOrigin = null) {
     const automatic = readAccess && allowsAction(await readAccess(), hosts);
@@ -103,7 +113,7 @@ export function createBrowserTools({ api, pageChars, approve, requestSiteAccess,
     const hint = destinations.get(tabId) ?? readableTabs.get(tabId);
     const committed = tab => !hint || tab.url !== "about:blank";
     let tab = await readyTab(api, tabId, signal, committed);
-    let url = safeWebURL(tab.url), grant;
+    let url = safeWebURL(tab.url), grant, requestedSite = false;
     const visibleTab = () => readyTab(api, tabId, signal, current => !!current.url && current.url !== "about:blank",
       "Safari still hides the address of this tab. It may have redirected. Check website access for the site shown in that tab.");
     const readGrant = (address, askSafari = false) => {
@@ -112,17 +122,30 @@ export function createBrowserTools({ api, pageChars, approve, requestSiteAccess,
       return authorize({ operation: "read", title: "Read this page?", detail: publicURL(address) },
         [hostname], signal, readableTabs.get(tabId) === origin, askSafari ? origin : null);
     };
+    if (!tab.url && !hint && requestTabAccess && hiddenTabs.has(tabId)) {
+      if (declinedTabs.has(tabId)) throw new Error("Access to this tab was declined for this task.");
+      await verifySession?.();
+      signal.throwIfAborted();
+      let expected;
+      try { expected = await requestTabAccess(tabId, hiddenTabs.get(tabId), signal); }
+      catch (error) { declinedTabs.add(tabId); throw error; }
+      signal.throwIfAborted();
+      tab = await visibleTab();
+      url = safeWebURL(tab.url);
+      if (!url || new URL(url).origin !== expected) throw new Error("The site's address does not match the permission for this tab. List the tabs again.");
+      grant = await authorize({ operation: "read" }, [new URL(url).hostname], signal, true);
+      requestedSite = !!await api.permissions?.contains({ origins: [sitePermissionPattern(expected)] });
+    }
     if (!tab.url && hint && api.permissions?.contains) {
       const pattern = sitePermissionPattern(hint);
       if (!pattern) throw new Error("Safari cannot request website access for this address.");
-      if (!await api.permissions.contains({ origins: [pattern] })) grant = await readGrant(hint, true);
+      if (!await api.permissions.contains({ origins: [pattern] })) { grant = await readGrant(hint, true); requestedSite = true; }
       tab = await visibleTab();
       url = safeWebURL(tab.url);
       if (grant && (!url || new URL(url).origin !== hint)) throw new Error("The tab changed websites during the permission request. Read this same tab again to review its current site.");
     }
     if (!url) throw new Error(tab.url ? "Safari protects this page. Choose an HTTP or HTTPS website." : "Safari has not exposed this tab's address. Check Safari Chat's website access for the site in that tab.");
     const origin = new URL(url).origin;
-    const requestedAccess = !!grant;
     grant ??= await readGrant(url);
     await grant.verify();
     const capture = () => readTab(api, tabId, pageChars, { viewportOnly: true, expectedURL: url, pointerPaths: !!motionSession });
@@ -130,7 +153,7 @@ export function createBrowserTools({ api, pageChars, approve, requestSiteAccess,
     try { page = await capture(); } catch (error) {
       // A tab's address may still be visible when Safari rejects injection.
       // Recover a permission failure once, without replaying a browser mutation.
-      if (requestedAccess || !requestSiteAccess || !api.permissions?.contains ||
+      if (requestedSite || !requestSiteAccess || !api.permissions?.contains ||
           !/permission|does not have access|access (?:was |is )?denied|cannot access contents/i.test(error.message)) throw error;
       signal.throwIfAborted();
       const pattern = sitePermissionPattern(origin);
@@ -143,20 +166,25 @@ export function createBrowserTools({ api, pageChars, approve, requestSiteAccess,
       page = await capture();
     }
     signal.throwIfAborted();
-    if (readAccess) await grant.verify();
-    if (new URL(page.url).origin !== origin) throw new Error("The tab changed websites while reading. Request permission for the new page.");
+    await grant.verify();
+    if (requestedSite && !await api.permissions.contains({ origins: [sitePermissionPattern(origin)] })) throw new Error("Safari website permission changed while reading the tab.");
+    if (new URL(page.url).origin !== origin || (await api.tabs.get(tabId)).url !== url) throw new Error("The tab changed while reading. Read the current page again.");
     if (grant.rememberRead) readableTabs.set(tabId, origin);
     snapshots.set(tabId, { url: page.url, elements: page.elements, viewport: page.viewport });
     return { ...page, url: publicURL(page.url), tabId, ...(motionSession?.last?.tabId === tabId && { motion: motionSession.last }) };
   }
   return async function execute(args, signal) {
-    const { operation, tabId: requestedTab, elementId, url, text, direction, speed, checked, path, wait, speedChanges } = args ?? {};
-    const tabId = requestedTab ?? defaultTabId;
-    if (!["read", "click", "fill", "select", "set_checked", "scroll", "drag", "move_pointer", "set_speed", "stop_motion", "wait_motion", "navigate", "open_tab", "close_tab", "list_tabs", ...INPUT_ACTIONS].includes(operation)) throw new Error("Unknown browser action.");
+    const { operation: requestedOperation, tabId: requestedTab, elementId, url, text, direction, speed, checked, path, wait, speedChanges } = args ?? {};
+    const seeking = requestedOperation === "scroll_until", operation = seeking ? "scroll" : requestedOperation;
+    const tabId = requestedTab ?? (["stop_motion", "wait_motion", "set_speed"].includes(operation) ? motionSession?.last?.tabId : null) ?? defaultTabId;
+    if (requestedOperation !== "gesture" && !BROWSER_ACTIONS.includes(requestedOperation)) throw new Error("Unknown browser action.");
     signal.throwIfAborted();
     const motion = motionSession?.current;
     const pointerPath = operation === "drag" || operation === "move_pointer";
-    const continuous = operation === "scroll" && speed != null;
+    const gesture = operation === "gesture";
+    const continuous = operation === "scroll" && (speed != null || seeking);
+    const until = seeking ? (text?.trim() || "carousel") : null;
+    if (seeking && (!["up","down"].includes(direction) || until.length > 180 || speed === 0 || motion)) throw new Error("Start a search up or down with a short visible phrase or 'carousel' and a positive speed. Stop other motion first.");
     if (speedChanges != null && (!continuous || motion || !Array.isArray(speedChanges) || speedChanges.length > 128 ||
         speedChanges.some((change, i) => !Number.isFinite(change?.after) || change.after < 0 || (i && change.after <= speedChanges[i-1].after) || !Number.isFinite(change?.speed) || change.speed < 0))) {
       throw new Error("On starting a continuous scroll, supply up to 128 speed changes with increasing distances in CSS pixels and nonnegative speeds.");
@@ -172,10 +200,11 @@ export function createBrowserTools({ api, pageChars, approve, requestSiteAccess,
       if (!state.active) snapshots.delete(tabId);
       return motionResult(state);
     }
-    if (continuous || pointerPath) {
+    if (continuous || pointerPath || gesture) {
       if (!motionSession) throw new Error("Use Safari side chat for continuous scroll and pointer paths.");
       if (speed != null && (!Number.isFinite(speed) || speed < 0)) throw new Error("Use a finite speed of zero or more CSS pixels per second.");
       if (motionSession.last?.reason === "stopped by user") throw new Error("The user stopped motion. Leave it stopped for this message.");
+      if (motionSession.last?.tabId === tabId && motionSession.last.reason === "tab hidden") throw new Error("The tab was hidden during motion. Leave it stopped for this message.");
       if (continuous && !["up", "down", "left", "right"].includes(direction)) throw new Error("Continuous scroll needs up, down, left or right.");
       if (motion) {
         if (!continuous || motion.kind !== "scroll" || motion.tabId !== tabId || elementId) throw new Error("Stop the current motion before starting another. Use set_speed to adjust it.");
@@ -190,12 +219,15 @@ export function createBrowserTools({ api, pageChars, approve, requestSiteAccess,
       signal.throwIfAborted();
     }
     if (operation === "list_tabs") {
-      const grant = await authorize({ operation, title: "Share your open tabs?", detail: "Share the titles and addresses of accessible tabs in this window." }, [], signal);
+      const grant = await authorize({ operation, title: "Share your open tabs?", detail: "List tabs in this window with the titles and addresses Safari makes available." }, [], signal);
       const windowId = await sourceWindowId(api, defaultTabId);
       await grant.verify();
       const tabs = await api.tabs.query(Number.isInteger(windowId) ? { windowId } : { currentWindow: true });
-      const access = readAccess ? await grant.verify() : undefined;
-      return tabs.filter(tab => visibleWebsite(tab.url, access)).slice(0, 40).map(tab => ({ tabId: tab.id, title: (tab.title ?? "Untitled").slice(0, 160), url: publicURL(tab.url) }));
+      const access = await grant.verify();
+      const rows = listedTabs(tabs, access, 40, protectedTabId);
+      hiddenTabs.clear();
+      for (const row of rows) if (row.needsWebsiteAccess) hiddenTabs.set(row.id, row.title);
+      return rows.map(({ id, ...row }) => ({ tabId: id, ...row }));
     }
     if (operation === "open_tab") {
       const target = safeWebURL(url);
@@ -215,17 +247,60 @@ export function createBrowserTools({ api, pageChars, approve, requestSiteAccess,
     if (!currentURL) throw new Error("Safari has not exposed a website address for this tab. Read the tab before trying this action.");
     const hosts = [new URL(currentURL).hostname];
     const snapshot = snapshots.get(tabId);
+    if (operation === "switch_tab") {
+      const grant = await authorize({ operation, title: "Switch to this tab?", detail: (tab.title || "Website") + "\n" + publicURL(currentURL) }, hosts, signal);
+      await tabFocus.show(tabId, currentURL, grant.verify);
+      return { ok: true, tabId, active: true, message: "Safari selected this tab. Use its tabId for subsequent actions." };
+    }
+    if (["back", "forward", "zoom"].includes(operation)) {
+      const zoom = operation === "zoom", method = TAB_METHODS[operation];
+      if (typeof api.tabs[method] !== "function") throw new Error("This Safari version does not expose this tab operation.");
+      if (zoom && (!Number.isFinite(speed) || speed < 0.3 || speed > 5)) throw new Error("Choose a zoom factor from 0.3 to 5.");
+      const title = zoom ? "Change this tab's zoom to " + Math.round(speed * 100) + "%?" : "Go " + operation + " in this tab's history?";
+      const grant = await authorize({ operation, title, detail: publicURL(currentURL) }, hosts, signal);
+      if ((await api.tabs.get(tabId)).url !== currentURL) throw new Error("The tab changed before the operation. Read it again.");
+      await grant.verify();
+      snapshots.delete(tabId);
+      if (zoom) {
+        await api.tabs.setZoom(tabId, speed);
+        const factor = await api.tabs.getZoom?.(tabId).catch(() => undefined);
+        if (Number.isFinite(factor) && Math.abs(factor-speed) > 0.001) return { ok: false, zoom: factor, error: "Safari applied a different zoom factor: " + factor + "." };
+        return { ok: true, zoom: factor ?? speed, message: "Safari accepted the tab zoom." };
+      }
+      readableTabs.delete(tabId); destinations.delete(tabId);
+      await watchNavigation(api, tabId, currentURL, signal, () => api.tabs[method](tabId), false);
+      const after = await api.tabs.get(tabId);
+      return { ok: true, navigationObserved: !!after.url && after.url !== currentURL, message: "Safari received the history request. Read this tab to verify the destination." };
+    }
+    const observeActivation = async dispatch => {
+      const result = await watchNavigation(api, tabId, currentURL, signal, dispatch, false);
+      if (Number.isInteger(result?.openedTabId)) hiddenTabs.set(result.openedTabId, "Results tab");
+      return result;
+    };
+    if (operation === "find_text") {
+      const occurrence = args.occurrence ?? 1;
+      if (typeof text !== "string" || !text.trim() || text.length > 180 || !Number.isInteger(occurrence) || occurrence < 1 || occurrence > 100) throw new Error("Use a phrase of up to 180 characters and an occurrence from 1 to 100.");
+      if (snapshot?.url !== currentURL) throw new Error("Read this tab before searching its loaded text.");
+      const grant = await authorize({ operation, title: "Find this text on the page?", detail: publicURL(currentURL) + "\n" + text }, hosts, signal);
+      await grant.verify();
+      const result = scriptResult(await api.scripting.executeScript({ target: { tabId }, func: findPageText, args: [currentURL, text, occurrence] }), "Could not search the current document.");
+      snapshots.delete(tabId);
+      await grant.verify();
+      if ((await api.tabs.get(tabId)).url !== currentURL) throw new Error("The page changed during the search. Read it again.");
+      return { ...result, tabId };
+    }
     const fieldClick = inputs && operation === "click" && (args.point || snapshot?.elements.find(item => item.id === elementId)?.actions?.includes("type_text"));
     if (INPUT_ACTIONS.includes(operation) || fieldClick) {
       if (!inputs) throw new Error("Use Safari side chat for direct keyboard, selection and pointer input.");
       const indicate = (target, effect) => indicatePageAction(api, tabId, currentURL, target, effect);
       snapshots.delete(tabId);
-      return inputs.execute(args, tabId, currentURL, snapshot, authorize, signal, indicate);
+      return inputs.execute(args, tabId, currentURL, snapshot, authorize, signal, indicate, observeActivation);
     }
     let detail;
     let target;
     let galleryScroll = false;
     let directions;
+    let gestureSpec;
     if (operation === "navigate") {
       target = safeWebURL(url);
       if (!target) throw new Error("Only HTTP and HTTPS navigation is supported.");
@@ -238,32 +313,47 @@ export function createBrowserTools({ api, pageChars, approve, requestSiteAccess,
       if (["fill", "select"].includes(operation) && (typeof text !== "string" || text.length > 12000)) throw new Error("Invalid field text.");
       if (!snapshot || snapshot.url !== currentURL) throw new Error("Read the current page before acting on an element.");
       const ref = snapshot?.elements.find(element => element.id === elementId);
-      if (!(["scroll", "move_pointer"].includes(operation) && !elementId) && !ref) throw new Error("Read the current page before acting on an element.");
-      if (operation !== "move_pointer" && ref?.actions && !ref.actions.includes(operation)) throw new Error("This control does not support that action. Read the page and use one of its listed actions.");
+      if (!(["scroll", "move_pointer", "gesture"].includes(operation) && !elementId) && !ref) throw new Error("Read the current page before acting on an element.");
+      if (!gesture && operation !== "move_pointer" && ref?.actions && !ref.actions.includes(operation)) throw new Error("This control does not support that action. Read the page and use one of its listed actions.");
       if (operation === "scroll" && ref?.directions && !ref.directions.includes(direction)) throw new Error("Use one of this area's listed scroll directions.");
       galleryScroll = operation === "scroll" && ref?.kind === "carousel";
       if (continuous && galleryScroll) throw new Error("This gallery has discrete navigation controls. Use scroll with speed null for each item.");
       directions = ref?.directions ?? ["up", "down", "left", "right"];
       detail = `${publicURL(currentURL)}\n${ref?.label ?? "Page"}${["fill", "select"].includes(operation) ? `\n${text}` : ""}${operation === "scroll" ? `\n${galleryScroll ? "Advance gallery" : "Scroll"} ${direction}` : ""}${operation === "set_checked" ? `\n${checked ? "Check" : "Uncheck"}` : ""}`;
-      if (operation === "click" && ref.destinationHost && ref.destinationHost !== hosts[0]) {
+      if ((operation === "click" || gesture) && ref?.destinationHost && ref.destinationHost !== hosts[0]) {
         hosts.push(ref.destinationHost);
         detail += `\nDestination: ${ref.destinationHost}`;
       }
       if (pointerPath) detail += "\n" + describePath(path, snapshot.viewport, ref?.bounds ?? [0, 0, snapshot.viewport?.width, snapshot.viewport?.height]);
-      if (continuous) detail += "\nStart at " + speed + " px/s. Speed and direction can change within this area. You can stop scrolling in chat or on the page.";
+      if (gesture) {
+        gestureSpec = validateGesture(args, snapshot.viewport, ref?.bounds);
+        const start = gestureSpec.anchor ?? gestureSpec.frames[0].points[0];
+        const units = gestureSpec.device === "wheel" ? (args.deltaMode || "pixel") + " wheel deltas" : gestureSpec.fingers + (gestureSpec.fingers === 1 ? " contact" : " contacts");
+        detail += "\n" + gestureSpec.device + " at (" + Math.round(start.x) + ", " + Math.round(start.y) + "), " + units + ", " + gestureSpec.frames.length + " frames over " + gestureSpec.frames.at(-1).at + " ms.";
+      }
+      if (seeking) detail += "\nStop when visible: " + until;
+      else if (continuous) detail += "\nStart at " + speed + " px/s. Speed and direction can change within this area. You can stop scrolling in chat or on the page.";
     }
-    const title = continuous ? "Scroll continuously?" : galleryScroll ? "Move this gallery?" : {
-      drag: "Drag along this path?", move_pointer: "Move the pointer along this path?", click: "Click this element?",
+    const needsVisiblePage = continuous || pointerPath || gesture;
+    if (needsVisiblePage && tab.active === false) detail += "\nSafari Chat will bring this tab into view for the motion.";
+    const title = seeking ? "Scroll to find this target?" : continuous ? "Scroll continuously?" : galleryScroll ? "Move this gallery?" : {
+      drag: "Drag along this path?", move_pointer: "Move the pointer along this path?", gesture: "Perform this webpage gesture?", click: "Click this element?",
       fill: "Enter this text?", select: "Choose this option?", set_checked: "Change this checkbox or radio option?",
       scroll: "Scroll this page or area?", navigate: "Navigate this tab?", close_tab: "Close this tab?",
     }[operation];
-    const grant = await authorize({ operation, title, detail, ...(pointerPath && { path: path.map(({ x, y }) => [x, y]) }) }, hosts, signal);
+    const grant = await authorize({ operation, title, detail, ...(pointerPath && { path: path.map(({ x, y }) => [x, y]) }),
+      ...(gesture && gestureSpec.device !== "wheel" && { paths: gesturePreview(gestureSpec) }) }, hosts, signal);
     signal.throwIfAborted();
     // The user may navigate while an approval is visible; reject stale permission.
     const now = await api.tabs.get(tabId);
     await grant.verify();
     if (now.url !== currentURL) throw new Error("The tab navigated while awaiting approval. Read it again.");
     snapshots.delete(tabId);
+    if (needsVisiblePage && now.active === false) {
+      await tabFocus.show(tabId, currentURL, grant.verify, true);
+      await waitForVisiblePage(api, tabId, currentURL, signal);
+      await grant.verify();
+    }
     if (operation === "navigate") {
       readableTabs.delete(tabId);
       await watchNavigation(api, tabId, currentURL, signal, () => api.tabs.update(tabId, { url: target }), true);
@@ -273,7 +363,7 @@ export function createBrowserTools({ api, pageChars, approve, requestSiteAccess,
     if (operation === "close_tab") { readableTabs.delete(tabId); destinations.delete(tabId); await api.tabs.remove(tabId); return { ok: true }; }
     const inject = (preview = false, motionId = null) => api.scripting.executeScript({
       target: { tabId }, func: actOnPage,
-      args: [operation, elementId ?? null, text ?? null, currentURL, { direction: direction ?? null, checked: checked ?? null, preview, ...(inputs && operation === "click" && { inputOwner: inputs.owner }), ...(motionId && { motionId, speed: speed ?? 600, ...(pointerPath && { path }), ...(speedChanges && { speedChanges }) }) }],
+      args: [operation, elementId ?? null, text ?? null, currentURL, { direction: direction ?? null, checked: checked ?? null, preview, ...(inputs && operation === "click" && { inputOwner: inputs.owner }), ...(motionId && { motionId, speed: speed ?? (seeking ? 1400 : 600), until, ...(pointerPath && { path }), ...(gesture && { gestureSpec, hosts }), ...(speedChanges && { speedChanges }) }) }, true],
     });
     if (now.active !== false && (operation === "click" || operation === "set_checked" || galleryScroll)) {
       const preview = await inject(true).catch(() => null);
@@ -282,15 +372,38 @@ export function createBrowserTools({ api, pageChars, approve, requestSiteAccess,
       await grant.verify();
     }
     const dispatch = async motionId => scriptResult(await inject(false, motionId), "The page did not confirm the action. Read it again before retrying.");
+    if (gesture) {
+      if (gestureSpec.device === "touch" || gestureSpec.device === "trackpad" && gestureSpec.fingers > 1) {
+        const channel = "safari-chat-gesture-" + crypto.randomUUID();
+        const installed = await api.scripting.executeScript({ target: { tabId }, world: "MAIN", func: installPageGestureEvents, args: [channel] }).catch(() => []);
+        if (installed[0]?.result === true) gestureSpec.eventChannel = channel;
+      }
+      const drivers = { trackpad: installTrackpad, touch: installGestureContacts, pen: installGestureContacts, mouse: installGestureContacts };
+      for (const func of [drivers[gestureSpec.device], installGesturePlayer].filter(Boolean)) {
+        scriptResult(await api.scripting.executeScript({ target: { tabId }, func }), "Safari could not prepare the gesture.");
+      }
+      await grant.verify();
+      const { x, y } = gestureSpec.anchor ?? gestureSpec.frames[0].points[0];
+      await indicatePageAction(api, tabId, currentURL, { left: x-1, top: y-1, right: x+1, bottom: y+1 }, "aim");
+      return motionSession.start(tabId, operation, [], grant.verify, signal, dispatch, wait ?? true);
+    }
     if (pointerPath) {
       scriptResult(await api.scripting.executeScript({ target: { tabId }, func: installPointerPath }), "Safari could not prepare the pointer path.");
       await grant.verify();
       const { x, y } = path[0];
       await indicatePageAction(api, tabId, currentURL, { left: x - 1, top: y - 1, right: x + 1, bottom: y + 1 }, "aim");
     }
+    if (seeking) {
+      const gallery = /^(carousel|gallery)$/i.test(until);
+      scriptResult(await api.scripting.executeScript({ target: { tabId }, func: gallery ? configureGallerySearch : findPageText,
+        args: gallery ? [currentURL] : [currentURL, until, null] }), "Could not locate this document.");
+      const result = await motionSession.start(tabId, "scroll", directions, grant.verify, signal, dispatch, true);
+      if (result.motion?.reason === "scroll boundary") return { ...result, found: false, message: "Reached the scroll boundary without finding the target." };
+      return result;
+    }
     if (continuous || pointerPath) return motionSession.start(tabId, operation, directions, grant.verify, signal, dispatch, wait ?? pointerPath);
     if (operation !== "click") return dispatch();
-    const result = await watchNavigation(api, tabId, currentURL, signal, dispatch, false);
+    const result = await observeActivation(dispatch);
     if (inputs && result.focused) inputs.targets.set(tabId, { url: currentURL, ref: snapshot.elements.find(item => item.id === elementId), selected: false });
     return result;
   };

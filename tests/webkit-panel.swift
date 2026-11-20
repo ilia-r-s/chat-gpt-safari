@@ -23,7 +23,7 @@ configuration.userContentController.add(check, name: "panelCheck")
 let script = #"""
 const $check = id => document.getElementById(id);
 let reads = 0;
-const prefs = { theme: "light", pageChars: 6000, inputChars: 24000, historyTurns: 4 };
+const prefs = { theme: "light", interactionMode: "work", pageChars: 6000, inputChars: 24000, historyTurns: 4 };
 window.browser = { runtime: {
   id: "webkit-fixture", onMessage: { addListener() {} },
   sendMessage: async ({type, settings, draft}) => {
@@ -55,12 +55,16 @@ addEventListener("load", async () => {
     await wait(() => prompt.value === "Compare " && $check("attachments").textContent.includes("Travel notes"));
     if (reads !== 1) throw Error("Unexpected number of page reads");
     $check("add-button").click(); await wait(() => $check("add-menu").matches(":popover-open")); $check("add-menu").hidePopover();
-    if (!$check("model").getClientRects().length || !$check("effort").getClientRects().length) throw Error("Missing main-screen response settings");
+    $check("model-trigger").click(); await wait(() => $check("model-popover").matches(":popover-open"));
+    if (!$check("effort").getClientRects().length) throw Error("Missing composer effort control");
+    $check("select-model").click(); await wait(() => $check("model-list").getClientRects().length);
+    $check("model-popover").hidePopover();
     $check("actions-guidance").click(); await wait(() => $check("access-menu").matches(":popover-open"));
     $check("auto-mode").click(); await wait(() => $check("mode-label").textContent === "Approve for me");
+    $check("history-button").click(); await wait(() => $check("history-dialog").open);
     $check("settings-button").click(); await wait(() => $check("settings-dialog").open);
     $check("theme-setting").value = "dark"; $check("theme-setting").dispatchEvent(new Event("change"));
-    await wait(() => getComputedStyle(document.body).backgroundColor === "rgb(27, 27, 27)");
+    await wait(() => getComputedStyle(document.querySelector(".panel-surface")).backgroundColor === "rgb(14, 14, 14)");
     report("passed");
   } catch (error) { report(error.message); }
 });

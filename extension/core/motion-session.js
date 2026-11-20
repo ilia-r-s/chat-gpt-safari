@@ -1,6 +1,11 @@
 import { controlPageMotion } from "../content/page-motion.js";
 
 export function motionResult(state) {
+  if (state.reason === "gesture finished") return { ok: true, motion: state, message: "Delivered " + state.events + " scripted events. " +
+    (state.currentItem && state.fromItem !== state.currentItem ? "Gallery selection changed from " + state.fromItem + " to " + state.currentItem + ". " : "") +
+    (state.rotationUnavailable ? "This browser has no trackpad rotation event. " : "") + "Read the page to verify the requested effect." };
+  if (state.reason === "target visible") return { ok: true, found: true, motion: state, message: "Stopped at " + state.match + ". Read this viewport for fresh controls and continue the requested actions." };
+  if (state.reason === "search limit") return { ok: true, found: false, motion: state, message: "Paused after searching this section. Read the viewport and refine or continue the search." };
   const expected = state.active || ["path finished", "scroll boundary", "stopped by model", "stopped by user"].includes(state.reason);
   return expected ? { ok: true, motion: state } : { ok: false, motion: state, error: "Motion interrupted: " + state.reason + ". Read the page before continuing." };
 }

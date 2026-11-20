@@ -1,11 +1,12 @@
 // Position a native popover without covering its trigger in a narrow chat window.
-export function anchorPopover(menu, trigger, width) {
+export function anchorPopover(menu, trigger, width, align = "start") {
   function position() {
     const rect = trigger.getBoundingClientRect(), margin = 8;
     const above = rect.top - margin * 2, below = innerHeight - rect.bottom - margin * 2;
     const size = `min(${width}px, 100vw - ${margin * 2}px)`;
     menu.style.width = size;
-    menu.style.left = `clamp(${margin}px, ${rect.left}px, 100vw - ${size} - ${margin}px)`;
+    const left = align === "center" ? (innerWidth - width) / 2 : align === "end" ? rect.right - width : rect.left;
+    menu.style.left = `clamp(${margin}px, ${left}px, 100vw - ${size} - ${margin}px)`;
     menu.style.top = below > above ? `${rect.bottom + margin}px` : "auto";
     menu.style.bottom = below > above ? "auto" : `${innerHeight - rect.top + margin}px`;
     menu.style.maxHeight = `${Math.max(0, above, below)}px`;

@@ -14,7 +14,8 @@ export class PageInputs {
 
   async inject(tabId, func, args) {
     const [injection] = await this.api.scripting.executeScript({ target: { tabId }, func, args });
-    if (injection?.error || !injection?.result) throw new Error(injection?.error?.message || "The input target is unavailable. Read the page again.");
+    const error = injection?.error ?? injection?.result?.pageError;
+    if (error || !injection?.result) throw new Error((typeof error === "string" ? error : error?.message) || "The input target is unavailable. Read the page again.");
     return injection.result;
   }
 
@@ -24,7 +25,7 @@ export class PageInputs {
     this.targets.clear();
   }
 
-  async execute(args, tabId, url, snapshot, authorize, signal, indicate) {
+  async execute(args, tabId, url, snapshot, authorize, signal, indicate, observeActivation) {
     const { operation, elementId, text, point, range, occurrence } = args;
     const current = this.targets.get(tabId);
     const clicking = operation === "double_click" || operation === "click";
@@ -67,22 +68,24 @@ export class PageInputs {
     await grant.verify();
     const target = prior ?? { url, ref: ref || null, selected: false };
     if (!prior) {
-      await this.inject(tabId, actOnPage, ["bind_input", ref?.id ?? null, null, url, { inputOwner: this.owner }]);
+      await this.inject(tabId, actOnPage, ["bind_input", ref?.id ?? null, null, url, { inputOwner: this.owner }, true]);
       this.targets.set(tabId, target);
     }
-    const run = (step, payload = {}) => this.inject(tabId, performPageInput, [this.owner, step, payload]);
+    const run = (step, payload = {}) => this.inject(tabId, performPageInput, [this.owner, step, payload, true]);
     if (clicking) {
       const { point: p } = await run("aim_click", { point });
       await indicate({ left: p.x-1, top: p.y-1, right: p.x+1, bottom: p.y+1 }, "aim");
       await grant.verify();
-      const first = await run("click", { count: 1, hosts });
-      if (operation === "click") return { ...first, message: "Pressed and released the target. Verify the result." };
-      await new Promise(resolve => setTimeout(resolve, 100));
-      try {
-        await grant.verify();
-        const result = await run("click", { count: 2, hosts });
-        return { ...result, message: result.doubleClicked ? "Two clicks and a double-click event dispatched. Verify the result." : "Both clicks were sent but the target changed before the double-click event." };
-      } catch (error) { signal.throwIfAborted(); return { ok: false, clicks: 1, doubleClicked: false, error: "The first click was confirmed. Check the page before retrying. " + error.message }; }
+      return observeActivation(async () => {
+        const first = await run("click", { count: 1, hosts });
+        if (operation === "click") return { ...first, message: "Pressed and released the target. Verify the result." };
+        await new Promise(resolve => setTimeout(resolve, 100));
+        try {
+          await grant.verify();
+          const result = await run("click", { count: 2, hosts });
+          return { ...result, message: result.doubleClicked ? "Two clicks and a double-click event dispatched. Verify the result." : "Both clicks were sent but the target changed before the double-click event." };
+        } catch (error) { signal.throwIfAborted(); return { ok: false, clicks: 1, doubleClicked: false, error: "The first click was confirmed. Check the page before retrying. " + error.message }; }
+      });
     }
     await this.inject(tabId, installTextSelection, [this.owner]);
     if (operation === "copy") {
@@ -115,7 +118,8 @@ export class PageInputs {
       return { ok: true, typed, message: "Typed at the caret." };
     }
     await grant.verify();
-    const result = await run(operation, { text, range, occurrence, hosts });
+    const dispatch = () => run(operation, { text, range, occurrence, hosts });
+    const result = operation === "press_key" && text === "Enter" ? await observeActivation(dispatch) : await dispatch();
     target.selected = (operation === "select_text" && result.ok) || result.selected > 0;
     return result;
   }

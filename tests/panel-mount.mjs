@@ -10,7 +10,7 @@ export async function testPanelMount(browser, origin) {
       id: 'dock-test', getURL: name => `${origin}/${name}`,
       onMessage: { addListener: listener => { globalThis.__mountMessage = listener; } },
       sendMessage: async message => {
-        if (message.type === 'panel.present') await parent.__mountMessage({ type: 'panel.ready', token: message.dockToken }, { id: 'dock-test' });
+        if (message.type === 'panel.visible') await parent.__mountMessage({ type: 'panel.ready', token: message.dockToken }, { id: 'dock-test' });
         if (message.type === 'dock.dismiss') await globalThis.__mountMessage({ type: 'panel.close' }, { id: 'dock-test' });
         return { ok: true, value: message.type === 'bootstrap' ? {
         prefs: { theme: 'light', model: 'test-model', pageChars: 12000, inputChars: 48000, historyTurns: 8, maxToolRounds: 6, desktopControl: false },
@@ -97,6 +97,12 @@ export async function testPanelMount(browser, origin) {
   // Escape restores the width at the beginning of the active gesture.
   await page.mouse.move(1123, 450); await page.mouse.down();
   await page.mouse.move(943, 450); await waitWidth(500);
+  const grip = await page.evaluate(() => {
+    const handle = window.dockShadow.querySelector('[role=separator]'), style = getComputedStyle(handle,'::after');
+    return [style.width, style.height, getComputedStyle(handle).outlineStyle, handle.hasAttribute('data-dragging')];
+  });
+  assert.deepEqual(grip,['4px','24px','none',true]);
+  await page.screenshot({ path: 'build/screenshots/panel-divider-drag.png' });
   await page.keyboard.press('Escape'); await waitWidth(320); await page.mouse.up();
   await page.keyboard.press('Enter'); await waitWidth(440);
   await dragBy(160); await waitWidth(600);
@@ -154,6 +160,7 @@ export async function testPanelMount(browser, origin) {
     assert.equal(panel.right, width); assert.ok(site.right <= panel.left + 1 && floating.right <= panel.left + 1);
     assert.equal(await narrow.locator('#prompt').inputValue(), 'Present beside the page');
     assert.ok(await narrow.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await narrow.locator('#history-button').click();
     await narrow.getByRole('button', { name: 'Settings', exact: true }).click();
     await narrow.getByRole('button', { name: 'Close settings' }).click();
     if (width === 640) await page.screenshot({ path: 'build/screenshots/panel-narrow-docked.png' });

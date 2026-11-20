@@ -48,6 +48,7 @@ export async function testSideChatIntegration(browser, origin) {
     await source.setContent('<article style="height:2300px">Local page for side chat</article>');
     const operations = [{ operation: "read" }, { operation: "scroll", direction: "down" }];
     const f = await fixture({ toolRequest: operations });
+    f.data.settings = { interactionMode: "work" };
     f.api.tabs.get = async id => ({ id, url: source.url(), status: "complete" });
     let reads = 0;
     f.api.scripting = { executeScript: async ({ target, func, args }) => {
@@ -60,7 +61,9 @@ export async function testSideChatIntegration(browser, origin) {
     await page.goto(origin + "/panel/panel.html?tab=1");
     const prompt = page.getByRole("textbox", { name: "Message Safari Chat" });
     const mode = page.locator("#actions-guidance"), approval = page.locator("#approval");
-    await page.getByRole("combobox", { name: "Reasoning effort" }).selectOption("high");
+    await page.locator("#model-trigger").click();
+    await page.getByRole("slider", { name: "Reasoning effort" }).press("End");
+    await page.keyboard.press("Escape");
     assert.equal(reads, 0);
     await prompt.fill("Scroll down this page."); await prompt.press("Enter");
     await approval.waitFor();
@@ -74,6 +77,7 @@ export async function testSideChatIntegration(browser, origin) {
     assert.deepEqual(Array.from(f.data["website-access:account-a"].allowed), ["127.0.0.1"]);
     assert.ok(f.requests.every(req => req.reasoning.effort === "high"));
     await mode.click(); await page.getByRole("button", { name: /Manage website access/ }).click();
+    assert.equal(await page.getByLabel("Default for websites").count(), 0);
     await page.getByRole("button", { name: "Remove rule for 127.0.0.1" }).click();
     await page.getByRole("button", { name: "Close settings" }).click();
     await mode.click();
@@ -84,7 +88,9 @@ export async function testSideChatIntegration(browser, origin) {
     await mode.filter({ hasText: "Approve for me" }).waitFor();
     assert.equal(reads, 1, "opening or restoring chat does not read a page in automatic mode");
     f.requests.length = 0;
-    await page.getByRole("combobox", { name: "Reasoning effort" }).selectOption("auto");
+    await page.locator("#model-trigger").click();
+    await page.locator("#reset-effort").click();
+    await page.keyboard.press("Escape");
     await prompt.fill("Scroll again."); await prompt.press("Enter");
     await page.locator("#messages .assistant").nth(1).getByText("Hello").waitFor();
     assert.equal(reads, 2); assert.ok(f.requests.every(req => !req.reasoning));
@@ -122,12 +128,102 @@ export async function testSideChatIntegration(browser, origin) {
   } finally { await context.close(); }
 }
 
+export async function testConversationModes(browser, origin) {
+  const page = await browser.newPage({ viewport: { width: 482, height: 782 }, colorScheme: "dark" });
+  const errors = []; page.on("pageerror", error => errors.push(error.message));
+  const models = ["GPT-6.2 Sol", "GPT-6.2 Astra", "GPT-6.1 Sol", "GPT-6.1 Terra", "GPT-6 Astra", "GPT-6 Sol", "GPT-6 Luna"].map(display_name => ({
+    display_name, visibility: "list", slug: display_name.toLowerCase().replaceAll(" ", "-"), supported_reasoning_levels: ["low", "medium", "high"],
+  }));
+  models.push({ slug: "chat-latest", display_name: "Chat Latest (Instant)", visibility: "list", supported_reasoning_levels: [] });
+  models.push({ slug: "gpt-5.6-sol", display_name: "GPT-5.6 Sol", visibility: "list", supported_reasoning_levels: ["high"], supported_reasoning_modes: ["standard"] });
+  const f = await fixture({ catalog: { models } });
+  f.data.settings = { reasoningEffort: "low" };
+  try {
+    await connectPanel(page, f);
+    await page.goto(origin + "/panel/panel.html?tab=1");
+    const prompt = page.locator("#prompt"), temporary = page.locator("#temporary-button"), picker = page.locator("#model-trigger");
+    await picker.filter({ hasText: "Medium" }).waitFor();
+    assert.equal(await page.locator("#chat-mode").getAttribute("aria-pressed"), "true");
+    const dimensions = () => page.evaluate(() => ["#work-sources", "#composer", "#prompt", ".composer-toolbar"].map(selector => {
+      const { x, y, width, height } = document.querySelector(selector).getBoundingClientRect();
+      return { x, y, width, height };
+    }));
+    for (const width of [320, 482]) {
+      await page.setViewportSize({ width, height: 782 });
+      for (const draft of ["", "First line\nSecond line\nThird line"]) {
+        await prompt.fill(draft);
+        const chatSize = await dimensions();
+        await page.locator("#work-mode").click();
+        assert.deepEqual(await dimensions(), chatSize, `Composer geometry with ${draft.length} characters at ${width}px`);
+        await page.locator("#chat-mode").click();
+      }
+    }
+    await prompt.fill(""); await page.locator("#work-mode").click();
+    await picker.filter({ hasText: "GPT-6.2 Sol" }).waitFor();
+    await page.screenshot({ path: "build/screenshots/panel-reference-work.png" });
+    await picker.click(); await page.locator("#effort").press("End");
+    await page.screenshot({ path: "build/screenshots/panel-reference-effort.png" });
+    await page.locator("#select-model").click();
+    await page.screenshot({ path: "build/screenshots/panel-reference-models.png" });
+    await page.keyboard.press("Escape");
+    await page.locator("#chat-mode").click();
+    await page.locator("#work-sources").waitFor();
+    assert.match(await picker.innerText(), /Medium/);
+    assert.equal(await page.locator("#action-budget").isVisible(), true);
+    assert.equal(await page.locator("#actions-guidance").isVisible(), true);
+    await page.screenshot({ path: "build/screenshots/panel-reference-chat.png" });
+    await picker.click(); await page.locator("#select-model").click();
+    assert.deepEqual(await page.locator("#model-list button").allInnerTexts(), ["GPT-6", "GPT-5.6 Sol"]);
+    await page.locator("#back-to-effort").click();
+    await page.locator("#effort").press("End");
+    assert.equal(await page.locator("#effort").getAttribute("aria-valuetext"), "Pro");
+    await page.keyboard.press("Escape");
+    await prompt.fill("Remember the ordinary draft.");
+    await temporary.click();
+    await page.getByRole("heading", { name: "Temporary chat" }).waitFor();
+    assert.equal(await prompt.inputValue(), "");
+    await prompt.fill("A temporary question"); await prompt.press("Enter");
+    await page.locator("#messages .assistant").getByText("Hello").waitFor();
+    assert.equal(f.requests[0].tools[0].name, "safari");
+    assert.equal(f.requests[0].model, "gpt-6-astra");
+    assert.deepEqual(f.requests[0].reasoning, { mode: "pro" });
+    await page.reload();
+    await page.locator("#messages .user").getByText("A temporary question").waitFor();
+    await page.locator("#history-button").click();
+    await page.locator("#history-list").getByText("Remember the ordinary draft.").waitFor();
+    assert.doesNotMatch(await page.locator("#history-list").innerText(), /temporary question/);
+    await page.screenshot({ path: "build/screenshots/panel-reference-drawer.png" });
+    await page.keyboard.press("Escape");
+    await temporary.click();
+    await page.waitForFunction(() => document.querySelector("#prompt").value === "Remember the ordinary draft.");
+    await page.locator("#work-mode").click();
+    await picker.filter({ hasText: "High" }).waitFor();
+    assert.equal(await page.locator("#work-sources").isVisible(), true);
+    assert.doesNotMatch(JSON.stringify(f.data), /A temporary question/);
+    await page.reload(); await picker.filter({ hasText: "GPT-6.2 Sol" }).waitFor();
+    assert.equal(await page.locator("#work-mode").getAttribute("aria-pressed"), "true");
+    await page.locator("#chat-mode").click(); await picker.click(); await page.locator("#select-model").click();
+    await page.locator("#model-list").getByRole("button", { name: "GPT-5.6 Sol" }).click();
+    await page.getByText("Instant is unavailable for this model on this connection.").waitFor();
+    assert.deepEqual(await page.locator("#chat-levels button").allTextContents(), ["High"]);
+    await page.locator("#select-model").click(); await page.getByRole("button", { name: "GPT-6", exact: true }).click();
+    await page.locator("#chat-levels").getByRole("button", { name: "Instant" }).click();
+    await picker.filter({ hasText: "Instant" }).waitFor();
+    await prompt.fill("An Instant question"); await prompt.press("Enter");
+    await page.locator("#messages .assistant").getByText("Hello").waitFor();
+    assert.equal(f.requests.at(-1).model, "chat-latest");
+    assert.equal(f.requests.at(-1).reasoning, undefined);
+    assert.deepEqual(errors, []);
+    console.log("Chat and Work preferences, the sidebar, and temporary-chat recovery and isolation passed.");
+  } finally { await page.close(); }
+}
+
 export async function testActionAllowance(browser, origin) {
   const page = await browser.newPage({ viewport: { width: 440, height: 720 } });
   const gate = Promise.withResolvers();
   try {
     const operations = Array.from({ length: 100 }, () => ({ operation: "list_tabs" }));
-    const f = await fixture({ toolRequest: operations });
+    const f = await fixture({ toolRequest: operations, catalog: { data: [{ id: "gpt-6-sol" }] } });
     f.data["website-access:account-a"] = { mode: "auto", allowed: [], blocked: [] };
     let lists = 0;
     f.api.tabs.query = async () => { if (++lists === 99) await gate.promise; return []; };
@@ -137,8 +233,16 @@ export async function testActionAllowance(browser, origin) {
     await meter.filter({ hasText: /^100\/100 browser actions left$/ }).waitFor();
     await prompt.fill("Check my open tabs until the browser action allowance is used."); await prompt.press("Enter");
     await meter.filter({ hasText: "1/100 browser actions left · 99 used" }).waitFor();
+    await page.locator("#history-button").click();
     await page.locator("#settings-button").click();
     await page.getByText("Context and usage", { exact: true }).click();
+    const time = page.getByLabel("Time limit per message (minutes)");
+    assert.equal(await time.inputValue(), "10");
+    await time.fill("0"); await time.press("Tab");
+    assert.equal(await time.evaluate(field => field.validity.rangeUnderflow), true);
+    await time.fill("12"); await time.press("Tab");
+    await page.waitForFunction(() => document.querySelector("#settings-status").textContent === "Setting saved.");
+    assert.equal(f.data.settings.turnMinutes, 12);
     const setting = page.locator("#actions-setting");
     assert.equal(await setting.inputValue(), "100");
     await setting.fill("7"); await setting.press("Tab");
@@ -151,13 +255,16 @@ export async function testActionAllowance(browser, origin) {
     gate.resolve();
     const more = page.getByRole("button", { name: "Continue", exact: true });
     await more.waitFor();
+    assert.equal(await meter.textContent(), "7/7 browser actions left");
+    assert.equal(await page.locator("#action-limit-note").innerText(), "This reply used all 100 browser actions.");
     assert.equal(lists, 100); assert.equal(f.requests.length, 101); assert.equal(f.requests.at(-1).tools, undefined);
     await page.reload();
     await more.waitFor();
-    assert.equal(await meter.textContent(), "0/100 browser actions left");
+    assert.equal(await meter.textContent(), "7/7 browser actions left");
     assert.equal(await prompt.inputValue(), "Keep this private follow-up draft.");
     await page.screenshot({ path: "build/screenshots/panel-action-limit.png" });
     await page.setViewportSize({ width: 320, height: 640 });
+    await more.scrollIntoViewIfNeeded();
     const button = await more.boundingBox();
     assert.ok(button.x >= 0 && button.x + button.width <= 320 && button.y + button.height <= 640);
     await more.click();
@@ -199,6 +306,7 @@ export async function testDockWorkflow(browser, origin) {
         });
       } }));
     } });
+    f.data.settings = { interactionMode: "work" };
     let loading = false, reads = 0, clicks = 0, visits = 0;
     const sourceTab = () => ({ id: 1, windowId: 4, index: 0, active: true, url: source.url(), status: loading ? "loading" : "complete" });
     const frameIds = new Map(), ports = new Map();
@@ -280,7 +388,7 @@ export async function testDockWorkflow(browser, origin) {
     const prompt = frame => frame.getByRole("textbox", { name: "Message Safari Chat" });
     await source.goto(origin + "/__workflow/one"); await f.events.action(sourceTab());
     const first = await panel();
-    await first.waitForFunction(() => document.getElementById("model")?.value === "model-a");
+    await first.waitForFunction(() => document.getElementById("model-name")?.textContent === "Model A");
     assert.ok(await source.evaluate(() => {
       const edge = document.getElementById("safari-chat-host").getBoundingClientRect().left;
       return innerWidth === 1440 && edge === 1000 && ["main", "header", "button"].every(s => document.querySelector(s).getBoundingClientRect().right <= edge + 1);
@@ -316,7 +424,7 @@ export async function testDockWorkflow(browser, origin) {
     await source.goBack();
     const back = await panel();
     await back.locator("#messages .assistant").getByText("First part, completed.", { exact: true }).waitFor();
-    assert.match(await back.locator("#actions-left").textContent(), /^95\/100 /);
+    assert.match(await back.locator("#actions-left").textContent(), /^100\/100 /);
     assert.equal(await prompt(back).inputValue(), "Keep this follow-up draft.");
     const chats = Object.keys(f.data).filter(key => key.startsWith("chat:"));
     assert.equal(chats.length, 1); assert.equal(f.data[chats[0]].messages.length, 2);
@@ -372,4 +480,53 @@ export async function testDockWorkflow(browser, origin) {
     assert.deepEqual(f.createdTabs, []); assert.deepEqual(f.createdWindows, []); assert.deepEqual(errors, []);
     console.log("Integrated dock passed two reloads, approval and draft recovery, streamed output, navigation and interaction with a rigid website in the same tab.");
   } finally { finish.resolve(); await context.close(); }
+}
+
+export async function testVoiceComposer(browser, origin) {
+  const page = await browser.newPage({viewport:{width:320,height:640}});
+  const f = await fixture({ catalog: { data: [{ id: "gpt-6-sol" }] } });
+  try {
+    await connectPanel(page, f);
+    await page.addInitScript(() => {
+      window.spoken = [];
+      window.SpeechRecognition = class {
+        start() { window.mic = this; this.onstart(); }
+        stop() { this.onend(); }
+        abort() { window.aborted = true; }
+      };
+      Object.defineProperty(window, "speechSynthesis", { configurable:true, value:{
+        speak(line) { window.spoken.push(line.text); window.line = line; }, cancel() { window.cancelledVoice = true; }
+      } });
+      window.recognize = (word,final) => mic.onresult({results:[Object.assign([{transcript:word}],{isFinal:final})]});
+    });
+    await page.goto(origin+"/panel/panel.html?tab=1");
+    const prompt = page.locator("#prompt");
+    await prompt.fill("old words here");
+    await prompt.evaluate(el=>el.setSelectionRange(4,9));
+    await page.keyboard.press("Control+Shift+D");
+    await page.getByRole("button",{name:"Finish dictation"}).waitFor();
+    await page.evaluate(()=>recognize("new",false));
+    assert.equal(await prompt.inputValue(),"old words here");
+    await page.evaluate(()=>recognize("new",true));
+    assert.equal(await prompt.inputValue(),"old new here");
+    await page.getByRole("button",{name:"Finish dictation"}).click();
+    assert.equal(f.requests.length,0);
+    await prompt.fill("");
+    await page.locator("#voice-button").click();
+    await page.evaluate(()=>line.onend());
+    await page.evaluate(()=>{ recognize("A spoken question",true); mic.onend(); });
+    await page.waitForFunction(()=>spoken.includes("Hello"));
+    assert.equal(f.requests.length,1);
+    await page.evaluate(()=>line.onend());
+    await page.locator("#voice-status").filter({hasText:"Listening"}).waitFor();
+    await page.getByRole("button",{name:"End Voice"}).click();
+    await page.evaluate(()=>{ recognize("Late callback",true); mic.onend(); });
+    assert.equal(f.requests.length,1);
+    await page.locator("#dictate-button").click();
+    await page.evaluate(()=>mic.onerror({error:"not-allowed"}));
+    await page.locator("#notice").filter({hasText:"microphone"}).waitFor();
+    assert.equal(await page.locator("#voice-status").isVisible(),false);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth <= innerWidth),true);
+    console.log("Dictation, voice submit/play/listen, rejection and explicit stop passed with deterministic audio fixtures.");
+  } finally { await page.close(); }
 }

@@ -1,497 +1,595 @@
 // !$*UTF8*$!
 {
-	archiveVersion = 1;
-	classes = {
+	"archiveVersion" = "1";
+	"classes" = {
 	};
-	objectVersion = 56;
-	objects = {
-
-/* Begin PBXBuildFile section */
-		00E851084F5155E578DFB50E /* extension/background.bundle.js in Resources */ = {isa = PBXBuildFile; fileRef = 6108C92BF360BF450467A925 /* extension/background.bundle.js */; };
-		090635A2BEA4F7EA0F408085 /* native/Shared/DesktopHTTP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58ABA0132E8654182AB6BE3A /* native/Shared/DesktopHTTP.swift */; };
-		0A56D5FA9ADA20095C47EA17 /* native/Shared/LocalDataCleaner.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD4BFB3138D75C487A6F41D9 /* native/Shared/LocalDataCleaner.swift */; };
-		0C2C015EE95DBBD2CF204E7C /* extension/panel in Resources */ = {isa = PBXBuildFile; fileRef = 148545EC369199BD7BA62859 /* extension/panel */; };
-		0E5A1942B943D9795DD7CF7A /* native/Shared/LoopbackListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96106B0672688AFC951140E9 /* native/Shared/LoopbackListener.swift */; };
-		0F9BBF4BC21470207460B9AB /* extension/icons in Resources */ = {isa = PBXBuildFile; fileRef = 210804686F1EBAC4EE67D73D /* extension/icons */; };
-		11D8404D28925B92534AD0B0 /* extension/core in Resources */ = {isa = PBXBuildFile; fileRef = 039E888B69F47AF7A8BCDF20 /* extension/core */; };
-		2EDE87099A5C8F02E734409F /* native/Shared/DesktopHTTP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58ABA0132E8654182AB6BE3A /* native/Shared/DesktopHTTP.swift */; };
-		30F04584C51058BF8CC1BD06 /* extension/manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 1929F2F40162BAF33D4A074C /* extension/manifest.json */; };
-		3503820B0B0CA098D7533700 /* native/Extension/SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 725091995693E2EB524E295D /* native/Extension/SafariWebExtensionHandler.swift */; };
-		483374CF61864189AA4B9D9F /* native/Shared/DirectoryLock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A926A6916C82AAD3AEEC885D /* native/Shared/DirectoryLock.swift */; };
-		55BC8E0BF3DC134B2AA91B03 /* native/Shared/DirectoryLock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A926A6916C82AAD3AEEC885D /* native/Shared/DirectoryLock.swift */; };
-		599231E400727B964219A3F0 /* native/Shared/OAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 914E313D08149D6132FDA306 /* native/Shared/OAuth.swift */; };
-		603B06C73130B6E762489729 /* native/Shared/LoopbackListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96106B0672688AFC951140E9 /* native/Shared/LoopbackListener.swift */; };
-		6109ED6D1D324043221ECF41 /* native/Shared/DesktopRelay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48F5CB9FC8488FAD112B2925 /* native/Shared/DesktopRelay.swift */; };
-		6960DB9638725CA64802D161 /* native/Shared/LocalDataCleaner.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD4BFB3138D75C487A6F41D9 /* native/Shared/LocalDataCleaner.swift */; };
-		76CF3347A52D632C664E47A1 /* native/Shared/Configuration.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE21AAA7F403B1681FD5F7DB /* native/Shared/Configuration.swift */; };
-		2D660C7D09459F8DDB9556AF /* native/Shared/PlainTextClipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2577C9E2CFC600CD002B3B6D /* native/Shared/PlainTextClipboard.swift */; };
-		7C10B2BFD627CC59549278B0 /* native/App/SafariChatIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = 2B76B1F89D349EF2C8CC8F7B /* native/App/SafariChatIcon.icns */; };
-		80732C436ACE0D2B9AF95CC0 /* native/App/SafariChatApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3519ABA8A64BDAD541B7114 /* native/App/SafariChatApp.swift */; };
-		A13867F929383CBEB3E19A1E /* native/Shared/CompanionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DED66C5D9B50E00B5FBDE341 /* native/Shared/CompanionApp.swift */; };
-		A723379FEDA256C37B2E2644 /* native/Shared/Configuration.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE21AAA7F403B1681FD5F7DB /* native/Shared/Configuration.swift */; };
-		DBE64867950B9FB1268557B7 /* native/Shared/PlainTextClipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2577C9E2CFC600CD002B3B6D /* native/Shared/PlainTextClipboard.swift */; };
-		B98A2DE5AA5C2AE8C4CAD2FF /* native/App/DesktopMCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D7AA5B3B1D82EE18AE1B04F /* native/App/DesktopMCP.swift */; };
-		C45F26720B3284BD9B807151 /* Safari Chat Extension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = DC176E8AF1DD34CEAAE8410B /* Safari Chat Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		C53A0BBA46097368AE535EDC /* native/Shared/CompanionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DED66C5D9B50E00B5FBDE341 /* native/Shared/CompanionApp.swift */; };
-		CF5BC47FD01732B00D38A398 /* native/App/AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA7CF8501171DDCFC6953C4C /* native/App/AppModel.swift */; };
-		D45DA44274EAD19D702D5775 /* native/Shared/CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A6238EF474657C5C4958918 /* native/Shared/CredentialStore.swift */; };
-		D663FFFED1CA4863D055BDC9 /* native/Shared/DesktopRelay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48F5CB9FC8488FAD112B2925 /* native/Shared/DesktopRelay.swift */; };
-		E118060892E6F5535DCF3F90 /* extension/content in Resources */ = {isa = PBXBuildFile; fileRef = 73B6DD99137FD1D127074C75 /* extension/content */; };
-		E24DF236B289848F434EA048 /* native/Shared/CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A6238EF474657C5C4958918 /* native/Shared/CredentialStore.swift */; };
-		E83DDFD798D5F8740B01C036 /* native/Shared/AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0919AEFA7EBBBA20F11A469E /* native/Shared/AuthService.swift */; };
-		ECC87A1673279FEBD3FA4A94 /* native/Shared/IDToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C01BDFD684CEFBF8FC04BEF /* native/Shared/IDToken.swift */; };
-		FCC140E04BED8841BD79C67D /* native/Shared/IDToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C01BDFD684CEFBF8FC04BEF /* native/Shared/IDToken.swift */; };
-		FE3B28EFAF5297252460E336 /* native/Shared/OAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 914E313D08149D6132FDA306 /* native/Shared/OAuth.swift */; };
-		FFAEAA226428D28B6186D34F /* native/Shared/AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0919AEFA7EBBBA20F11A469E /* native/Shared/AuthService.swift */; };
-		B68AC92418F098126D024BED /* native/App/SetupContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CE9A3153D2F55D212A5193E /* native/App/SetupContent.swift */; };
-/* End PBXBuildFile section */
-
-/* Begin PBXContainerItemProxy section */
-		EBB30C28FB56077190499346 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 244210E48437B6556980A702 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = A148AD5E0608DCE6158BFF07;
-			remoteInfo = "Safari Chat Extension";
+	"objectVersion" = "56";
+	"objects" = {
+		"0919AEFA7EBBBA20F11A469E" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/Shared/AuthService.swift";
+			"sourceTree" = "<group>";
 		};
-/* End PBXContainerItemProxy section */
-
-/* Begin PBXCopyFilesBuildPhase section */
-		8A1EED22144C3F04485A69EE /* Embed App Extensions */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 13;
-			files = (
-				C45F26720B3284BD9B807151 /* Safari Chat Extension.appex in Embed App Extensions */,
-			);
-			name = "Embed App Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
+		"DED66C5D9B50E00B5FBDE341" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/Shared/CompanionApp.swift";
+			"sourceTree" = "<group>";
 		};
-/* End PBXCopyFilesBuildPhase section */
-
-/* Begin PBXFileReference section */
-		039E888B69F47AF7A8BCDF20 /* extension/core */ = {isa = PBXFileReference; lastKnownFileType = folder; path = extension/core; sourceTree = "<group>"; };
-		0919AEFA7EBBBA20F11A469E /* native/Shared/AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/Shared/AuthService.swift; sourceTree = "<group>"; };
-		0C01BDFD684CEFBF8FC04BEF /* native/Shared/IDToken.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/Shared/IDToken.swift; sourceTree = "<group>"; };
-		148545EC369199BD7BA62859 /* extension/panel */ = {isa = PBXFileReference; lastKnownFileType = folder; path = extension/panel; sourceTree = "<group>"; };
-		1929F2F40162BAF33D4A074C /* extension/manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = extension/manifest.json; sourceTree = "<group>"; };
-		210804686F1EBAC4EE67D73D /* extension/icons */ = {isa = PBXFileReference; lastKnownFileType = folder; path = extension/icons; sourceTree = "<group>"; };
-		2B76B1F89D349EF2C8CC8F7B /* native/App/SafariChatIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = native/App/SafariChatIcon.icns; sourceTree = "<group>"; };
-		3A6238EF474657C5C4958918 /* native/Shared/CredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/Shared/CredentialStore.swift; sourceTree = "<group>"; };
-		48F5CB9FC8488FAD112B2925 /* native/Shared/DesktopRelay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/Shared/DesktopRelay.swift; sourceTree = "<group>"; };
-		58ABA0132E8654182AB6BE3A /* native/Shared/DesktopHTTP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/Shared/DesktopHTTP.swift; sourceTree = "<group>"; };
-		6108C92BF360BF450467A925 /* extension/background.bundle.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = extension/background.bundle.js; sourceTree = "<group>"; };
-		681C948D238C526E9E3424E0 /* Safari Chat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Safari Chat.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		725091995693E2EB524E295D /* native/Extension/SafariWebExtensionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/Extension/SafariWebExtensionHandler.swift; sourceTree = "<group>"; };
-		73B6DD99137FD1D127074C75 /* extension/content */ = {isa = PBXFileReference; lastKnownFileType = folder; path = extension/content; sourceTree = "<group>"; };
-		914E313D08149D6132FDA306 /* native/Shared/OAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/Shared/OAuth.swift; sourceTree = "<group>"; };
-		96106B0672688AFC951140E9 /* native/Shared/LoopbackListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/Shared/LoopbackListener.swift; sourceTree = "<group>"; };
-		9D7AA5B3B1D82EE18AE1B04F /* native/App/DesktopMCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/App/DesktopMCP.swift; sourceTree = "<group>"; };
-		A926A6916C82AAD3AEEC885D /* native/Shared/DirectoryLock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/Shared/DirectoryLock.swift; sourceTree = "<group>"; };
-		BD4BFB3138D75C487A6F41D9 /* native/Shared/LocalDataCleaner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/Shared/LocalDataCleaner.swift; sourceTree = "<group>"; };
-		DC176E8AF1DD34CEAAE8410B /* Safari Chat Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Safari Chat Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
-		DED66C5D9B50E00B5FBDE341 /* native/Shared/CompanionApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/Shared/CompanionApp.swift; sourceTree = "<group>"; };
-		E3519ABA8A64BDAD541B7114 /* native/App/SafariChatApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/App/SafariChatApp.swift; sourceTree = "<group>"; };
-		EA7CF8501171DDCFC6953C4C /* native/App/AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/App/AppModel.swift; sourceTree = "<group>"; };
-		FE21AAA7F403B1681FD5F7DB /* native/Shared/Configuration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/Shared/Configuration.swift; sourceTree = "<group>"; };
-		2577C9E2CFC600CD002B3B6D /* native/Shared/PlainTextClipboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/Shared/PlainTextClipboard.swift; sourceTree = "<group>"; };
-		8CE9A3153D2F55D212A5193E /* native/App/SetupContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = native/App/SetupContent.swift; sourceTree = "<group>"; };
-/* End PBXFileReference section */
-
-/* Begin PBXGroup section */
-		0A3E27B8CA818264D75C8D81 /* Products */ = {
-			isa = PBXGroup;
-			children = (
-				681C948D238C526E9E3424E0 /* Safari Chat.app */,
-				DC176E8AF1DD34CEAAE8410B /* Safari Chat Extension.appex */,
-			);
-			name = Products;
-			sourceTree = "<group>";
+		"FE21AAA7F403B1681FD5F7DB" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/Shared/Configuration.swift";
+			"sourceTree" = "<group>";
 		};
-		C69913C7EE4DFDD011BE172F = {
-			isa = PBXGroup;
-			children = (
-				0919AEFA7EBBBA20F11A469E /* native/Shared/AuthService.swift */,
-				DED66C5D9B50E00B5FBDE341 /* native/Shared/CompanionApp.swift */,
-				FE21AAA7F403B1681FD5F7DB /* native/Shared/Configuration.swift */,
-				2577C9E2CFC600CD002B3B6D /* native/Shared/PlainTextClipboard.swift */,
-				3A6238EF474657C5C4958918 /* native/Shared/CredentialStore.swift */,
-				58ABA0132E8654182AB6BE3A /* native/Shared/DesktopHTTP.swift */,
-				48F5CB9FC8488FAD112B2925 /* native/Shared/DesktopRelay.swift */,
-				A926A6916C82AAD3AEEC885D /* native/Shared/DirectoryLock.swift */,
-				0C01BDFD684CEFBF8FC04BEF /* native/Shared/IDToken.swift */,
-				BD4BFB3138D75C487A6F41D9 /* native/Shared/LocalDataCleaner.swift */,
-				96106B0672688AFC951140E9 /* native/Shared/LoopbackListener.swift */,
-				914E313D08149D6132FDA306 /* native/Shared/OAuth.swift */,
-				EA7CF8501171DDCFC6953C4C /* native/App/AppModel.swift */,
-				9D7AA5B3B1D82EE18AE1B04F /* native/App/DesktopMCP.swift */,
-				E3519ABA8A64BDAD541B7114 /* native/App/SafariChatApp.swift */,
-				8CE9A3153D2F55D212A5193E /* native/App/SetupContent.swift */,
-				725091995693E2EB524E295D /* native/Extension/SafariWebExtensionHandler.swift */,
-				1929F2F40162BAF33D4A074C /* extension/manifest.json */,
-				6108C92BF360BF450467A925 /* extension/background.bundle.js */,
-				039E888B69F47AF7A8BCDF20 /* extension/core */,
-				73B6DD99137FD1D127074C75 /* extension/content */,
-				148545EC369199BD7BA62859 /* extension/panel */,
-				210804686F1EBAC4EE67D73D /* extension/icons */,
-				2B76B1F89D349EF2C8CC8F7B /* native/App/SafariChatIcon.icns */,
-				0A3E27B8CA818264D75C8D81 /* Products */,
-			);
-			sourceTree = "<group>";
+		"3A6238EF474657C5C4958918" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/Shared/CredentialStore.swift";
+			"sourceTree" = "<group>";
 		};
-/* End PBXGroup section */
-
-/* Begin PBXNativeTarget section */
-		A148AD5E0608DCE6158BFF07 /* Safari Chat Extension */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = ADEEB35D23F3BD2EB16F34AB /* Build configuration list for PBXNativeTarget "Safari Chat Extension" */;
-			buildPhases = (
-				C466118970C1492107ADB7A6 /* Sources */,
-				6F5FEFA63F53BA04E8D73CB2 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			name = "Safari Chat Extension";
-			productName = "Safari Chat Extension";
-			productReference = DC176E8AF1DD34CEAAE8410B /* Safari Chat Extension.appex */;
-			productType = "com.apple.product-type.app-extension";
+		"58ABA0132E8654182AB6BE3A" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/Shared/DesktopHTTP.swift";
+			"sourceTree" = "<group>";
 		};
-		C1E9827DB735CA9BAA54A540 /* Safari Chat */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 900621C63942CF97857E701F /* Build configuration list for PBXNativeTarget "Safari Chat" */;
-			buildPhases = (
-				C7DEC6FCCD74FC72557EBA8A /* Sources */,
-				88EAC1297EFC578EA1E87A58 /* Resources */,
-				8A1EED22144C3F04485A69EE /* Embed App Extensions */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				965FF32F58B180754D654307 /* PBXTargetDependency */,
-			);
-			name = "Safari Chat";
-			productName = "Safari Chat";
-			productReference = 681C948D238C526E9E3424E0 /* Safari Chat.app */;
-			productType = "com.apple.product-type.application";
+		"48F5CB9FC8488FAD112B2925" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/Shared/DesktopRelay.swift";
+			"sourceTree" = "<group>";
 		};
-/* End PBXNativeTarget section */
-
-/* Begin PBXProject section */
-		244210E48437B6556980A702 /* Project object */ = {
-			isa = PBXProject;
-			attributes = {
-				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 1600;
-				TargetAttributes = {
-					A148AD5E0608DCE6158BFF07 = {
-						CreatedOnToolsVersion = 16.0;
-						SystemCapabilities = {
-							com.apple.ApplicationGroups.iOS = {
-								enabled = 1;
+		"A926A6916C82AAD3AEEC885D" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/Shared/DirectoryLock.swift";
+			"sourceTree" = "<group>";
+		};
+		"0C01BDFD684CEFBF8FC04BEF" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/Shared/IDToken.swift";
+			"sourceTree" = "<group>";
+		};
+		"BD4BFB3138D75C487A6F41D9" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/Shared/LocalDataCleaner.swift";
+			"sourceTree" = "<group>";
+		};
+		"96106B0672688AFC951140E9" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/Shared/LoopbackListener.swift";
+			"sourceTree" = "<group>";
+		};
+		"914E313D08149D6132FDA306" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/Shared/OAuth.swift";
+			"sourceTree" = "<group>";
+		};
+		"2577C9E2CFC600CD002B3B6D" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/Shared/PlainTextClipboard.swift";
+			"sourceTree" = "<group>";
+		};
+		"EA7CF8501171DDCFC6953C4C" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/App/AppModel.swift";
+			"sourceTree" = "<group>";
+		};
+		"9D7AA5B3B1D82EE18AE1B04F" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/App/DesktopMCP.swift";
+			"sourceTree" = "<group>";
+		};
+		"E3519ABA8A64BDAD541B7114" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/App/SafariChatApp.swift";
+			"sourceTree" = "<group>";
+		};
+		"8CE9A3153D2F55D212A5193E" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/App/SetupContent.swift";
+			"sourceTree" = "<group>";
+		};
+		"725091995693E2EB524E295D" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "native/Extension/SafariWebExtensionHandler.swift";
+			"sourceTree" = "<group>";
+		};
+		"1929F2F40162BAF33D4A074C" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "text.json";
+			"path" = "extension/manifest.json";
+			"sourceTree" = "<group>";
+		};
+		"6108C92BF360BF450467A925" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.javascript";
+			"path" = "extension/background.bundle.js";
+			"sourceTree" = "<group>";
+		};
+		"039E888B69F47AF7A8BCDF20" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "folder";
+			"path" = "extension/core";
+			"sourceTree" = "<group>";
+		};
+		"73B6DD99137FD1D127074C75" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "folder";
+			"path" = "extension/content";
+			"sourceTree" = "<group>";
+		};
+		"148545EC369199BD7BA62859" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "folder";
+			"path" = "extension/panel";
+			"sourceTree" = "<group>";
+		};
+		"210804686F1EBAC4EE67D73D" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "folder";
+			"path" = "extension/icons";
+			"sourceTree" = "<group>";
+		};
+		"C42283A4E50B0BCCC502F2C0" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "image.icns";
+			"path" = "native/App/SafariChatIcon.icns";
+			"sourceTree" = "<group>";
+		};
+		"681C948D238C526E9E3424E0" = {
+			"isa" = "PBXFileReference";
+			"explicitFileType" = "wrapper.application";
+			"path" = "Safari Chat.app";
+			"sourceTree" = "BUILT_PRODUCTS_DIR";
+			"includeInIndex" = "0";
+		};
+		"DC176E8AF1DD34CEAAE8410B" = {
+			"isa" = "PBXFileReference";
+			"explicitFileType" = "wrapper.app-extension";
+			"path" = "Safari Chat Extension.appex";
+			"sourceTree" = "BUILT_PRODUCTS_DIR";
+			"includeInIndex" = "0";
+		};
+		"0A3E27B8CA818264D75C8D81" = {
+			"isa" = "PBXGroup";
+			"children" = ("681C948D238C526E9E3424E0", "DC176E8AF1DD34CEAAE8410B");
+			"name" = "Products";
+			"sourceTree" = "<group>";
+		};
+		"C69913C7EE4DFDD011BE172F" = {
+			"isa" = "PBXGroup";
+			"children" = ("0919AEFA7EBBBA20F11A469E", "DED66C5D9B50E00B5FBDE341", "FE21AAA7F403B1681FD5F7DB", "3A6238EF474657C5C4958918", "58ABA0132E8654182AB6BE3A", "48F5CB9FC8488FAD112B2925", "A926A6916C82AAD3AEEC885D", "0C01BDFD684CEFBF8FC04BEF", "BD4BFB3138D75C487A6F41D9", "96106B0672688AFC951140E9", "914E313D08149D6132FDA306", "2577C9E2CFC600CD002B3B6D", "EA7CF8501171DDCFC6953C4C", "9D7AA5B3B1D82EE18AE1B04F", "E3519ABA8A64BDAD541B7114", "8CE9A3153D2F55D212A5193E", "725091995693E2EB524E295D", "1929F2F40162BAF33D4A074C", "6108C92BF360BF450467A925", "039E888B69F47AF7A8BCDF20", "73B6DD99137FD1D127074C75", "148545EC369199BD7BA62859", "210804686F1EBAC4EE67D73D", "C42283A4E50B0BCCC502F2C0", "0A3E27B8CA818264D75C8D81");
+			"sourceTree" = "<group>";
+		};
+		"5DC6C614DE4CFA0C3E21E20F" = {
+			"isa" = "XCBuildConfiguration";
+			"name" = "Debug";
+			"buildSettings" = {
+				"SDKROOT" = "macosx";
+				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
+				"SWIFT_VERSION" = "5.0";
+				"SAFARI_CHAT_BUNDLE_ID" = "org.safarichat.app";
+				"SAFARI_CHAT_GROUP_ID" = "org.safarichat.shared";
+				"CLANG_ENABLE_MODULES" = "YES";
+				"SWIFT_STRICT_CONCURRENCY" = "complete";
+				"ENABLE_HARDENED_RUNTIME" = "YES";
+				"CODE_SIGN_STYLE" = "Automatic";
+				"GENERATE_INFOPLIST_FILE" = "NO";
+				"CURRENT_PROJECT_VERSION" = "14";
+				"MARKETING_VERSION" = "0.3.9";
+				"COMBINE_HIDPI_IMAGES" = "YES";
+				"ENABLE_USER_SCRIPT_SANDBOXING" = "YES";
+				"PRODUCT_BUNDLE_IDENTIFIER" = "$(SAFARI_CHAT_BUNDLE_ID).Extension";
+				"PRODUCT_NAME" = "Safari Chat Extension";
+				"INFOPLIST_FILE" = "native/Extension/Info.plist";
+				"CODE_SIGN_ENTITLEMENTS" = "native/Extension/Extension.entitlements";
+				"APPLICATION_EXTENSION_API_ONLY" = "YES";
+				"SKIP_INSTALL" = "YES";
+				"LD_RUNPATH_SEARCH_PATHS" = ("$(inherited)", "@executable_path/../Frameworks", "@executable_path/../../../../Frameworks");
+				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+				"DEBUG_INFORMATION_FORMAT" = "dwarf";
+				"SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "DEBUG";
+				"DEVELOPMENT_TEAM" = "3C73MH433Q";
+			};
+		};
+		"C408DF7A1CF0E5FF81A55A64" = {
+			"isa" = "XCBuildConfiguration";
+			"name" = "Release";
+			"buildSettings" = {
+				"SDKROOT" = "macosx";
+				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
+				"SWIFT_VERSION" = "5.0";
+				"SAFARI_CHAT_BUNDLE_ID" = "org.safarichat.app";
+				"SAFARI_CHAT_GROUP_ID" = "org.safarichat.shared";
+				"CLANG_ENABLE_MODULES" = "YES";
+				"SWIFT_STRICT_CONCURRENCY" = "complete";
+				"ENABLE_HARDENED_RUNTIME" = "YES";
+				"CODE_SIGN_STYLE" = "Automatic";
+				"GENERATE_INFOPLIST_FILE" = "NO";
+				"CURRENT_PROJECT_VERSION" = "14";
+				"MARKETING_VERSION" = "0.3.9";
+				"COMBINE_HIDPI_IMAGES" = "YES";
+				"ENABLE_USER_SCRIPT_SANDBOXING" = "YES";
+				"PRODUCT_BUNDLE_IDENTIFIER" = "$(SAFARI_CHAT_BUNDLE_ID).Extension";
+				"PRODUCT_NAME" = "Safari Chat Extension";
+				"INFOPLIST_FILE" = "native/Extension/Info.plist";
+				"CODE_SIGN_ENTITLEMENTS" = "native/Extension/Extension.entitlements";
+				"APPLICATION_EXTENSION_API_ONLY" = "YES";
+				"SKIP_INSTALL" = "YES";
+				"LD_RUNPATH_SEARCH_PATHS" = ("$(inherited)", "@executable_path/../Frameworks", "@executable_path/../../../../Frameworks");
+				"SWIFT_OPTIMIZATION_LEVEL" = "-O";
+				"DEBUG_INFORMATION_FORMAT" = "dwarf-with-dsym";
+				"DEVELOPMENT_TEAM" = "3C73MH433Q";
+			};
+		};
+		"ADEEB35D23F3BD2EB16F34AB" = {
+			"isa" = "XCConfigurationList";
+			"buildConfigurations" = ("5DC6C614DE4CFA0C3E21E20F", "C408DF7A1CF0E5FF81A55A64");
+			"defaultConfigurationIsVisible" = "0";
+			"defaultConfigurationName" = "Release";
+		};
+		"E83DDFD798D5F8740B01C036" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "0919AEFA7EBBBA20F11A469E";
+		};
+		"A13867F929383CBEB3E19A1E" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "DED66C5D9B50E00B5FBDE341";
+		};
+		"A723379FEDA256C37B2E2644" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "FE21AAA7F403B1681FD5F7DB";
+		};
+		"E24DF236B289848F434EA048" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "3A6238EF474657C5C4958918";
+		};
+		"090635A2BEA4F7EA0F408085" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "58ABA0132E8654182AB6BE3A";
+		};
+		"6109ED6D1D324043221ECF41" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "48F5CB9FC8488FAD112B2925";
+		};
+		"55BC8E0BF3DC134B2AA91B03" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "A926A6916C82AAD3AEEC885D";
+		};
+		"ECC87A1673279FEBD3FA4A94" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "0C01BDFD684CEFBF8FC04BEF";
+		};
+		"6960DB9638725CA64802D161" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "BD4BFB3138D75C487A6F41D9";
+		};
+		"0E5A1942B943D9795DD7CF7A" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "96106B0672688AFC951140E9";
+		};
+		"FE3B28EFAF5297252460E336" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "914E313D08149D6132FDA306";
+		};
+		"DBE64867950B9FB1268557B7" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "2577C9E2CFC600CD002B3B6D";
+		};
+		"3503820B0B0CA098D7533700" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "725091995693E2EB524E295D";
+		};
+		"C466118970C1492107ADB7A6" = {
+			"isa" = "PBXSourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = ("E83DDFD798D5F8740B01C036", "A13867F929383CBEB3E19A1E", "A723379FEDA256C37B2E2644", "E24DF236B289848F434EA048", "090635A2BEA4F7EA0F408085", "6109ED6D1D324043221ECF41", "55BC8E0BF3DC134B2AA91B03", "ECC87A1673279FEBD3FA4A94", "6960DB9638725CA64802D161", "0E5A1942B943D9795DD7CF7A", "FE3B28EFAF5297252460E336", "DBE64867950B9FB1268557B7", "3503820B0B0CA098D7533700");
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"30F04584C51058BF8CC1BD06" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "1929F2F40162BAF33D4A074C";
+		};
+		"00E851084F5155E578DFB50E" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "6108C92BF360BF450467A925";
+		};
+		"11D8404D28925B92534AD0B0" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "039E888B69F47AF7A8BCDF20";
+		};
+		"E118060892E6F5535DCF3F90" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "73B6DD99137FD1D127074C75";
+		};
+		"0C2C015EE95DBBD2CF204E7C" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "148545EC369199BD7BA62859";
+		};
+		"0F9BBF4BC21470207460B9AB" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "210804686F1EBAC4EE67D73D";
+		};
+		"6F5FEFA63F53BA04E8D73CB2" = {
+			"isa" = "PBXResourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = ("30F04584C51058BF8CC1BD06", "00E851084F5155E578DFB50E", "11D8404D28925B92534AD0B0", "E118060892E6F5535DCF3F90", "0C2C015EE95DBBD2CF204E7C", "0F9BBF4BC21470207460B9AB");
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"A148AD5E0608DCE6158BFF07" = {
+			"isa" = "PBXNativeTarget";
+			"name" = "Safari Chat Extension";
+			"productName" = "Safari Chat Extension";
+			"productReference" = "DC176E8AF1DD34CEAAE8410B";
+			"productType" = "com.apple.product-type.app-extension";
+			"buildConfigurationList" = "ADEEB35D23F3BD2EB16F34AB";
+			"buildPhases" = ("C466118970C1492107ADB7A6", "6F5FEFA63F53BA04E8D73CB2");
+			"dependencies" = ();
+			"buildRules" = ();
+		};
+		"EBB30C28FB56077190499346" = {
+			"isa" = "PBXContainerItemProxy";
+			"containerPortal" = "244210E48437B6556980A702";
+			"proxyType" = "1";
+			"remoteGlobalIDString" = "A148AD5E0608DCE6158BFF07";
+			"remoteInfo" = "Safari Chat Extension";
+		};
+		"965FF32F58B180754D654307" = {
+			"isa" = "PBXTargetDependency";
+			"target" = "A148AD5E0608DCE6158BFF07";
+			"targetProxy" = "EBB30C28FB56077190499346";
+		};
+		"C45F26720B3284BD9B807151" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "DC176E8AF1DD34CEAAE8410B";
+			"settings" = {
+				"ATTRIBUTES" = ("RemoveHeadersOnCopy");
+			};
+		};
+		"8A1EED22144C3F04485A69EE" = {
+			"isa" = "PBXCopyFilesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"dstPath" = "";
+			"dstSubfolderSpec" = "13";
+			"name" = "Embed App Extensions";
+			"files" = ("C45F26720B3284BD9B807151");
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"AA9B1D3BE1353EBD76471D11" = {
+			"isa" = "XCBuildConfiguration";
+			"name" = "Debug";
+			"buildSettings" = {
+				"SDKROOT" = "macosx";
+				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
+				"SWIFT_VERSION" = "5.0";
+				"SAFARI_CHAT_BUNDLE_ID" = "org.safarichat.app";
+				"SAFARI_CHAT_GROUP_ID" = "org.safarichat.shared";
+				"CLANG_ENABLE_MODULES" = "YES";
+				"SWIFT_STRICT_CONCURRENCY" = "complete";
+				"ENABLE_HARDENED_RUNTIME" = "YES";
+				"CODE_SIGN_STYLE" = "Automatic";
+				"GENERATE_INFOPLIST_FILE" = "NO";
+				"CURRENT_PROJECT_VERSION" = "14";
+				"MARKETING_VERSION" = "0.3.9";
+				"COMBINE_HIDPI_IMAGES" = "YES";
+				"ENABLE_USER_SCRIPT_SANDBOXING" = "YES";
+				"PRODUCT_BUNDLE_IDENTIFIER" = "$(SAFARI_CHAT_BUNDLE_ID)";
+				"PRODUCT_NAME" = "Safari Chat";
+				"INFOPLIST_FILE" = "native/App/Info.plist";
+				"CODE_SIGN_ENTITLEMENTS" = "native/App/App.entitlements";
+				"LD_RUNPATH_SEARCH_PATHS" = ("$(inherited)", "@executable_path/../Frameworks");
+				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+				"DEBUG_INFORMATION_FORMAT" = "dwarf";
+				"SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "DEBUG";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				"DEVELOPMENT_TEAM" = "3C73MH433Q";
+			};
+		};
+		"1E2E67F111F111E446D58E6C" = {
+			"isa" = "XCBuildConfiguration";
+			"name" = "Release";
+			"buildSettings" = {
+				"SDKROOT" = "macosx";
+				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
+				"SWIFT_VERSION" = "5.0";
+				"SAFARI_CHAT_BUNDLE_ID" = "org.safarichat.app";
+				"SAFARI_CHAT_GROUP_ID" = "org.safarichat.shared";
+				"CLANG_ENABLE_MODULES" = "YES";
+				"SWIFT_STRICT_CONCURRENCY" = "complete";
+				"ENABLE_HARDENED_RUNTIME" = "YES";
+				"CODE_SIGN_STYLE" = "Automatic";
+				"GENERATE_INFOPLIST_FILE" = "NO";
+				"CURRENT_PROJECT_VERSION" = "14";
+				"MARKETING_VERSION" = "0.3.9";
+				"COMBINE_HIDPI_IMAGES" = "YES";
+				"ENABLE_USER_SCRIPT_SANDBOXING" = "YES";
+				"PRODUCT_BUNDLE_IDENTIFIER" = "$(SAFARI_CHAT_BUNDLE_ID)";
+				"PRODUCT_NAME" = "Safari Chat";
+				"INFOPLIST_FILE" = "native/App/Info.plist";
+				"CODE_SIGN_ENTITLEMENTS" = "native/App/App.entitlements";
+				"LD_RUNPATH_SEARCH_PATHS" = ("$(inherited)", "@executable_path/../Frameworks");
+				"SWIFT_OPTIMIZATION_LEVEL" = "-O";
+				"DEBUG_INFORMATION_FORMAT" = "dwarf-with-dsym";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				"DEVELOPMENT_TEAM" = "3C73MH433Q";
+			};
+		};
+		"900621C63942CF97857E701F" = {
+			"isa" = "XCConfigurationList";
+			"buildConfigurations" = ("AA9B1D3BE1353EBD76471D11", "1E2E67F111F111E446D58E6C");
+			"defaultConfigurationIsVisible" = "0";
+			"defaultConfigurationName" = "Release";
+		};
+		"FFAEAA226428D28B6186D34F" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "0919AEFA7EBBBA20F11A469E";
+		};
+		"C53A0BBA46097368AE535EDC" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "DED66C5D9B50E00B5FBDE341";
+		};
+		"76CF3347A52D632C664E47A1" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "FE21AAA7F403B1681FD5F7DB";
+		};
+		"D45DA44274EAD19D702D5775" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "3A6238EF474657C5C4958918";
+		};
+		"2EDE87099A5C8F02E734409F" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "58ABA0132E8654182AB6BE3A";
+		};
+		"D663FFFED1CA4863D055BDC9" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "48F5CB9FC8488FAD112B2925";
+		};
+		"483374CF61864189AA4B9D9F" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "A926A6916C82AAD3AEEC885D";
+		};
+		"FCC140E04BED8841BD79C67D" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "0C01BDFD684CEFBF8FC04BEF";
+		};
+		"0A56D5FA9ADA20095C47EA17" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "BD4BFB3138D75C487A6F41D9";
+		};
+		"603B06C73130B6E762489729" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "96106B0672688AFC951140E9";
+		};
+		"599231E400727B964219A3F0" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "914E313D08149D6132FDA306";
+		};
+		"2D660C7D09459F8DDB9556AF" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "2577C9E2CFC600CD002B3B6D";
+		};
+		"CF5BC47FD01732B00D38A398" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "EA7CF8501171DDCFC6953C4C";
+		};
+		"B98A2DE5AA5C2AE8C4CAD2FF" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "9D7AA5B3B1D82EE18AE1B04F";
+		};
+		"80732C436ACE0D2B9AF95CC0" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "E3519ABA8A64BDAD541B7114";
+		};
+		"B68AC92418F098126D024BED" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "8CE9A3153D2F55D212A5193E";
+		};
+		"C7DEC6FCCD74FC72557EBA8A" = {
+			"isa" = "PBXSourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = ("FFAEAA226428D28B6186D34F", "C53A0BBA46097368AE535EDC", "76CF3347A52D632C664E47A1", "D45DA44274EAD19D702D5775", "2EDE87099A5C8F02E734409F", "D663FFFED1CA4863D055BDC9", "483374CF61864189AA4B9D9F", "FCC140E04BED8841BD79C67D", "0A56D5FA9ADA20095C47EA17", "603B06C73130B6E762489729", "599231E400727B964219A3F0", "2D660C7D09459F8DDB9556AF", "CF5BC47FD01732B00D38A398", "B98A2DE5AA5C2AE8C4CAD2FF", "80732C436ACE0D2B9AF95CC0", "B68AC92418F098126D024BED");
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"7C10B2BFD627CC59549278B0" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "C42283A4E50B0BCCC502F2C0";
+		};
+		"88EAC1297EFC578EA1E87A58" = {
+			"isa" = "PBXResourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = ("7C10B2BFD627CC59549278B0");
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"C1E9827DB735CA9BAA54A540" = {
+			"isa" = "PBXNativeTarget";
+			"name" = "Safari Chat";
+			"productName" = "Safari Chat";
+			"productReference" = "681C948D238C526E9E3424E0";
+			"productType" = "com.apple.product-type.application";
+			"buildConfigurationList" = "900621C63942CF97857E701F";
+			"buildPhases" = ("C7DEC6FCCD74FC72557EBA8A", "88EAC1297EFC578EA1E87A58", "8A1EED22144C3F04485A69EE");
+			"dependencies" = ("965FF32F58B180754D654307");
+			"buildRules" = ();
+		};
+		"2B23A31EEC75B029432F2445" = {
+			"isa" = "XCBuildConfiguration";
+			"name" = "Debug";
+			"buildSettings" = {
+				"ALWAYS_SEARCH_USER_PATHS" = "NO";
+				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+				"DEBUG_INFORMATION_FORMAT" = "dwarf";
+				"SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "DEBUG";
+			};
+		};
+		"07CA1E69F6068DEA30A4DA6B" = {
+			"isa" = "XCBuildConfiguration";
+			"name" = "Release";
+			"buildSettings" = {
+				"ALWAYS_SEARCH_USER_PATHS" = "NO";
+				"SWIFT_OPTIMIZATION_LEVEL" = "-O";
+				"DEBUG_INFORMATION_FORMAT" = "dwarf-with-dsym";
+			};
+		};
+		"F905B102B4F13BD6617D8EB3" = {
+			"isa" = "XCConfigurationList";
+			"buildConfigurations" = ("2B23A31EEC75B029432F2445", "07CA1E69F6068DEA30A4DA6B");
+			"defaultConfigurationIsVisible" = "0";
+			"defaultConfigurationName" = "Release";
+		};
+		"244210E48437B6556980A702" = {
+			"isa" = "PBXProject";
+			"attributes" = {
+				"LastUpgradeCheck" = "1600";
+				"BuildIndependentTargetsInParallel" = "YES";
+				"TargetAttributes" = {
+					"C1E9827DB735CA9BAA54A540" = {
+						"CreatedOnToolsVersion" = "16.0";
+						"SystemCapabilities" = {
+							"com.apple.ApplicationGroups.iOS" = {
+								"enabled" = "1";
 							};
-							com.apple.Keychain = {
-								enabled = 1;
+							"com.apple.Keychain" = {
+								"enabled" = "1";
 							};
 						};
 					};
-					C1E9827DB735CA9BAA54A540 = {
-						CreatedOnToolsVersion = 16.0;
-						SystemCapabilities = {
-							com.apple.ApplicationGroups.iOS = {
-								enabled = 1;
+					"A148AD5E0608DCE6158BFF07" = {
+						"CreatedOnToolsVersion" = "16.0";
+						"SystemCapabilities" = {
+							"com.apple.ApplicationGroups.iOS" = {
+								"enabled" = "1";
 							};
-							com.apple.Keychain = {
-								enabled = 1;
+							"com.apple.Keychain" = {
+								"enabled" = "1";
 							};
 						};
 					};
 				};
 			};
-			buildConfigurationList = F905B102B4F13BD6617D8EB3 /* Build configuration list for PBXProject "SafariChat" */;
-			compatibilityVersion = "Xcode 14.0";
-			developmentRegion = en;
-			hasScannedForEncodings = 0;
-			knownRegions = (
-				en,
-				Base,
-			);
-			mainGroup = C69913C7EE4DFDD011BE172F;
-			productRefGroup = 0A3E27B8CA818264D75C8D81 /* Products */;
-			projectDirPath = "";
-			projectRoot = "";
-			targets = (
-				C1E9827DB735CA9BAA54A540 /* Safari Chat */,
-				A148AD5E0608DCE6158BFF07 /* Safari Chat Extension */,
-			);
+			"buildConfigurationList" = "F905B102B4F13BD6617D8EB3";
+			"compatibilityVersion" = "Xcode 14.0";
+			"developmentRegion" = "en";
+			"hasScannedForEncodings" = "0";
+			"knownRegions" = ("en", "Base");
+			"mainGroup" = "C69913C7EE4DFDD011BE172F";
+			"productRefGroup" = "0A3E27B8CA818264D75C8D81";
+			"projectDirPath" = "";
+			"projectRoot" = "";
+			"targets" = ("C1E9827DB735CA9BAA54A540", "A148AD5E0608DCE6158BFF07");
 		};
-/* End PBXProject section */
-
-/* Begin PBXResourcesBuildPhase section */
-		6F5FEFA63F53BA04E8D73CB2 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				30F04584C51058BF8CC1BD06 /* extension/manifest.json in Resources */,
-				00E851084F5155E578DFB50E /* extension/background.bundle.js in Resources */,
-				11D8404D28925B92534AD0B0 /* extension/core in Resources */,
-				E118060892E6F5535DCF3F90 /* extension/content in Resources */,
-				0C2C015EE95DBBD2CF204E7C /* extension/panel in Resources */,
-				0F9BBF4BC21470207460B9AB /* extension/icons in Resources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		88EAC1297EFC578EA1E87A58 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				7C10B2BFD627CC59549278B0 /* native/App/SafariChatIcon.icns in Resources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXResourcesBuildPhase section */
-
-/* Begin PBXSourcesBuildPhase section */
-		C466118970C1492107ADB7A6 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				E83DDFD798D5F8740B01C036 /* native/Shared/AuthService.swift in Sources */,
-				A13867F929383CBEB3E19A1E /* native/Shared/CompanionApp.swift in Sources */,
-				A723379FEDA256C37B2E2644 /* native/Shared/Configuration.swift in Sources */,
-				DBE64867950B9FB1268557B7 /* native/Shared/PlainTextClipboard.swift in Sources */,
-				E24DF236B289848F434EA048 /* native/Shared/CredentialStore.swift in Sources */,
-				090635A2BEA4F7EA0F408085 /* native/Shared/DesktopHTTP.swift in Sources */,
-				6109ED6D1D324043221ECF41 /* native/Shared/DesktopRelay.swift in Sources */,
-				55BC8E0BF3DC134B2AA91B03 /* native/Shared/DirectoryLock.swift in Sources */,
-				ECC87A1673279FEBD3FA4A94 /* native/Shared/IDToken.swift in Sources */,
-				6960DB9638725CA64802D161 /* native/Shared/LocalDataCleaner.swift in Sources */,
-				0E5A1942B943D9795DD7CF7A /* native/Shared/LoopbackListener.swift in Sources */,
-				FE3B28EFAF5297252460E336 /* native/Shared/OAuth.swift in Sources */,
-				3503820B0B0CA098D7533700 /* native/Extension/SafariWebExtensionHandler.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		C7DEC6FCCD74FC72557EBA8A /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				FFAEAA226428D28B6186D34F /* native/Shared/AuthService.swift in Sources */,
-				C53A0BBA46097368AE535EDC /* native/Shared/CompanionApp.swift in Sources */,
-				76CF3347A52D632C664E47A1 /* native/Shared/Configuration.swift in Sources */,
-				2D660C7D09459F8DDB9556AF /* native/Shared/PlainTextClipboard.swift in Sources */,
-				D45DA44274EAD19D702D5775 /* native/Shared/CredentialStore.swift in Sources */,
-				2EDE87099A5C8F02E734409F /* native/Shared/DesktopHTTP.swift in Sources */,
-				D663FFFED1CA4863D055BDC9 /* native/Shared/DesktopRelay.swift in Sources */,
-				483374CF61864189AA4B9D9F /* native/Shared/DirectoryLock.swift in Sources */,
-				FCC140E04BED8841BD79C67D /* native/Shared/IDToken.swift in Sources */,
-				0A56D5FA9ADA20095C47EA17 /* native/Shared/LocalDataCleaner.swift in Sources */,
-				603B06C73130B6E762489729 /* native/Shared/LoopbackListener.swift in Sources */,
-				599231E400727B964219A3F0 /* native/Shared/OAuth.swift in Sources */,
-				CF5BC47FD01732B00D38A398 /* native/App/AppModel.swift in Sources */,
-				B98A2DE5AA5C2AE8C4CAD2FF /* native/App/DesktopMCP.swift in Sources */,
-				80732C436ACE0D2B9AF95CC0 /* native/App/SafariChatApp.swift in Sources */,
-				B68AC92418F098126D024BED /* native/App/SetupContent.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXSourcesBuildPhase section */
-
-/* Begin PBXTargetDependency section */
-		965FF32F58B180754D654307 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = A148AD5E0608DCE6158BFF07 /* Safari Chat Extension */;
-			targetProxy = EBB30C28FB56077190499346 /* PBXContainerItemProxy */;
-		};
-/* End PBXTargetDependency section */
-
-/* Begin XCBuildConfiguration section */
-		07CA1E69F6068DEA30A4DA6B /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ALWAYS_SEARCH_USER_PATHS = NO;
-				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				SWIFT_OPTIMIZATION_LEVEL = "-O";
-			};
-			name = Release;
-		};
-		1E2E67F111F111E446D58E6C /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_ENTITLEMENTS = native/App/App.entitlements;
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 11;
-				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = 3C73MH433Q;
-				ENABLE_HARDENED_RUNTIME = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = native/App/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/../Frameworks",
-				);
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.3.6;
-				PRODUCT_BUNDLE_IDENTIFIER = "$(SAFARI_CHAT_BUNDLE_ID)";
-				PRODUCT_NAME = "Safari Chat";
-				SAFARI_CHAT_BUNDLE_ID = org.safarichat.app;
-				SAFARI_CHAT_GROUP_ID = org.safarichat.shared;
-				SDKROOT = macosx;
-				SWIFT_OPTIMIZATION_LEVEL = "-O";
-				SWIFT_STRICT_CONCURRENCY = complete;
-				SWIFT_VERSION = 5.0;
-			};
-			name = Release;
-		};
-		2B23A31EEC75B029432F2445 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ALWAYS_SEARCH_USER_PATHS = NO;
-				DEBUG_INFORMATION_FORMAT = dwarf;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
-				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
-			};
-			name = Debug;
-		};
-		5DC6C614DE4CFA0C3E21E20F /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				APPLICATION_EXTENSION_API_ONLY = YES;
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_ENTITLEMENTS = native/Extension/Extension.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 11;
-				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = 3C73MH433Q;
-				ENABLE_HARDENED_RUNTIME = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = native/Extension/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/../Frameworks",
-					"@executable_path/../../../../Frameworks",
-				);
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.3.6;
-				PRODUCT_BUNDLE_IDENTIFIER = "$(SAFARI_CHAT_BUNDLE_ID).Extension";
-				PRODUCT_NAME = "Safari Chat Extension";
-				SAFARI_CHAT_BUNDLE_ID = org.safarichat.app;
-				SAFARI_CHAT_GROUP_ID = org.safarichat.shared;
-				SDKROOT = macosx;
-				SKIP_INSTALL = YES;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
-				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
-				SWIFT_STRICT_CONCURRENCY = complete;
-				SWIFT_VERSION = 5.0;
-			};
-			name = Debug;
-		};
-		AA9B1D3BE1353EBD76471D11 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_ENTITLEMENTS = native/App/App.entitlements;
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 11;
-				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = 3C73MH433Q;
-				ENABLE_HARDENED_RUNTIME = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = native/App/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/../Frameworks",
-				);
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.3.6;
-				PRODUCT_BUNDLE_IDENTIFIER = "$(SAFARI_CHAT_BUNDLE_ID)";
-				PRODUCT_NAME = "Safari Chat";
-				SAFARI_CHAT_BUNDLE_ID = org.safarichat.app;
-				SAFARI_CHAT_GROUP_ID = org.safarichat.shared;
-				SDKROOT = macosx;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
-				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
-				SWIFT_STRICT_CONCURRENCY = complete;
-				SWIFT_VERSION = 5.0;
-			};
-			name = Debug;
-		};
-		C408DF7A1CF0E5FF81A55A64 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				APPLICATION_EXTENSION_API_ONLY = YES;
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_ENTITLEMENTS = native/Extension/Extension.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 11;
-				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = 3C73MH433Q;
-				ENABLE_HARDENED_RUNTIME = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = native/Extension/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/../Frameworks",
-					"@executable_path/../../../../Frameworks",
-				);
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.3.6;
-				PRODUCT_BUNDLE_IDENTIFIER = "$(SAFARI_CHAT_BUNDLE_ID).Extension";
-				PRODUCT_NAME = "Safari Chat Extension";
-				SAFARI_CHAT_BUNDLE_ID = org.safarichat.app;
-				SAFARI_CHAT_GROUP_ID = org.safarichat.shared;
-				SDKROOT = macosx;
-				SKIP_INSTALL = YES;
-				SWIFT_OPTIMIZATION_LEVEL = "-O";
-				SWIFT_STRICT_CONCURRENCY = complete;
-				SWIFT_VERSION = 5.0;
-			};
-			name = Release;
-		};
-/* End XCBuildConfiguration section */
-
-/* Begin XCConfigurationList section */
-		900621C63942CF97857E701F /* Build configuration list for PBXNativeTarget "Safari Chat" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				AA9B1D3BE1353EBD76471D11 /* Debug */,
-				1E2E67F111F111E446D58E6C /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		ADEEB35D23F3BD2EB16F34AB /* Build configuration list for PBXNativeTarget "Safari Chat Extension" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				5DC6C614DE4CFA0C3E21E20F /* Debug */,
-				C408DF7A1CF0E5FF81A55A64 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		F905B102B4F13BD6617D8EB3 /* Build configuration list for PBXProject "SafariChat" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				2B23A31EEC75B029432F2445 /* Debug */,
-				07CA1E69F6068DEA30A4DA6B /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-/* End XCConfigurationList section */
 	};
-	rootObject = 244210E48437B6556980A702 /* Project object */;
+	"rootObject" = "244210E48437B6556980A702";
 }

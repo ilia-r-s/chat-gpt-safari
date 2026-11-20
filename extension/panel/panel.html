@@ -8,31 +8,32 @@
   <link rel="stylesheet" href="panel.css">
   <script type="module" src="panel.js"></script>
 </head>
-<body>
+<body data-mode="chat">
   <header class="topbar">
-    <button class="brand" id="history-button" title="Recent chats" aria-label="Recent chats" aria-haspopup="dialog">
-      <span class="chatgpt-mark" aria-hidden="true"></span><strong>Safari Chat</strong><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
-    </button>
+    <div class="brand"><span class="chatgpt-mark" aria-hidden="true"></span><strong>Safari Chat</strong></div>
     <span id="conversation-title" class="sr-only"></span>
-    <nav aria-label="Chat controls">
-      <button class="icon-button" id="new-button" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24"><path d="M12 4H7a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-5M10 14l.8-3.8L18 3a1.5 1.5 0 0 1 2 2l-7.2 7.5z"/></svg></button>
+    <nav aria-label="Panel controls">
       <button class="icon-button" id="source-button" title="Return to source tab" aria-label="Return to source tab" hidden><svg viewBox="0 0 24 24"><path d="M10 6l-6 6 6 6M4 12h11a5 5 0 0 0 5-5"/></svg></button>
-      <button class="icon-button" id="settings-button" aria-label="Settings" title="Settings" aria-haspopup="dialog"><svg viewBox="0 0 24 24"><path d="M3 7h4m6 0h8M3 17h10m6 0h2"/><circle cx="10" cy="7" r="3"/><circle cx="16" cy="17" r="3"/></svg></button>
-      <button class="icon-button" id="close-button" title="Close panel" aria-label="Close panel"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      <button class="icon-button" id="close-button" title="Close panel" aria-label="Close panel"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
     </nav>
   </header>
-
+  <div class="panel-surface">
+    <nav class="chat-navigation" aria-label="Chat navigation">
+      <button class="icon-button" id="history-button" title="Toggle sidebar (⇧⌘S)" aria-label="Toggle sidebar" aria-haspopup="dialog" aria-expanded="false"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M8 7v10"/></svg></button>
+      <div id="mode-switch" class="mode-switch" role="group" aria-label="Conversation mode">
+        <button id="chat-mode" type="button" aria-pressed="true" title="Ask questions and explore ideas">Chat</button>
+        <button id="work-mode" type="button" aria-pressed="false" title="Work with files and Safari tabs">Work</button>
+      </div>
+      <button class="icon-button temporary" id="temporary-button" title="Temporary chat" aria-label="Start temporary chat" aria-pressed="false"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5.3 17.5a9 9 0 0 1-.6-9m2.7-3a9 9 0 0 1 11.3 1m2 3.5a9 9 0 0 1-7 10.7M10 20.6l-1.4-.5L4 21l1.3-3.5"/></svg></button>
+    </nav>
   <main id="conversation" aria-label="Conversation">
     <section id="welcome" class="welcome">
       <span class="chatgpt-mark welcome-mark" aria-hidden="true"></span>
       <p id="opening-chat" class="muted" role="status">Opening chat…</p>
       <div class="starters" hidden>
-        <h1>What can I help with?</h1>
-        <div class="suggestions">
-          <button data-prompt="summarize"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18m-14 4h10m-10 3h6"/></svg>Summarize this page</button>
-          <button data-prompt="explain"><svg viewBox="0 0 24 24"><path d="M4 6h6v7l-4 4m8-11h6v7l-4 4"/></svg>Explain selected text</button>
-          <button data-prompt="write"><svg viewBox="0 0 24 24"><path d="m5 15-1 5 5-1L20 8l-4-4zM13 7l4 4"/></svg>Help me write</button>
-        </div>
+        <h1 id="welcome-heading" hidden>Temporary chat</h1>
+        <p id="temporary-info" class="muted" hidden>This conversation stays out of Recent chats. Closing the pane ends it.</p>
+
       </div>
       <div class="connect-card" id="connect-card" hidden>
         <h1>Connect to Safari Chat</h1><p>Use your ChatGPT account or an API key to chat beside this page.</p>
@@ -42,10 +43,11 @@
     </section>
     <div id="messages" role="log" aria-live="polite" aria-relevant="additions"></div>
     <div class="turn-feedback">
+      <div id="exhausted-turn" hidden><span id="action-limit-note" role="status"></span> <button type="button" id="continue-actions">Continue</button></div>
       <div id="activity" class="activity" role="status" hidden><span id="activity-label"></span><small id="activity-detail"></small></div>
       <section id="approval" class="approval" hidden aria-labelledby="approval-title">
         <strong id="approval-title" role="status"></strong><pre id="approval-detail"></pre>
-        <div id="approval-path" hidden><svg role="img" aria-label="Proposed pointer path with a dot at the start and a ring at the end"><polyline/><circle/><circle/></svg></div>
+        <div id="approval-path" hidden><svg role="img" aria-label="Proposed pointer path"></svg></div>
         <div class="approval-actions">
           <button id="decline-button" class="secondary">Decline</button>
           <div class="split-button">
@@ -61,32 +63,53 @@
   <footer class="bottom">
     <div id="motion-controls" hidden>
       <span id="motion-status" role="status"></span>
-      <label class="motion-speed"><input id="motion-speed" type="number" min="0" step="any" required aria-label="Motion speed in pixels per second" title="Pixels per second. Set to zero to pause."> px/s</label>
+      <label class="motion-speed"><input id="motion-speed" type="number" min="0" step="any" required aria-label="Motion speed in pixels per second"><span id="motion-unit">px/s</span></label>
       <button type="button" class="text-button" id="stop-motion">Stop scrolling</button>
     </div>
-    <div class="run-options" id="run-options" role="group" aria-label="Response settings" hidden>
-      <label class="compact-select"><span>Model</span><strong aria-hidden="true" id="model-name">Choose a model</strong><select id="model" aria-label="Model"><option value="">Choose a model</option></select></label>
-      <label class="compact-select" id="effort-control" hidden><span>Effort</span><strong aria-hidden="true" id="effort-name">Model default</strong><select id="effort" aria-label="Reasoning effort" title="Model default leaves the effort choice to the selected model."><option value="auto">Model default</option></select></label>
-      <button type="button" id="retry-models" class="text-button" hidden>Reload models</button>
+    <div class="work-sources" id="work-sources" role="group" aria-label="Sources and browser approvals" hidden>
+      <button type="button" id="work-files" title="Attach a file"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="7" y="4" width="14" height="16" rx="3"/><path d="m6 7-2 1 2 12a2 2 0 0 0 3 2"/></svg>Files</button>
+      <button type="button" id="work-tabs" title="Add browser tabs"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="8" width="14" height="12" rx="2"/><path d="M7 5h12a2 2 0 0 1 2 2v9"/></svg>Tabs</button>
+      <button class="permission-mode" type="button" id="actions-guidance" popovertarget="access-menu" aria-controls="access-menu" aria-expanded="false" title="Browser approvals"><span id="mode-label">Ask for approval</span><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
     </div>
     <div id="tab-mentions" class="mentions" role="listbox" aria-label="Mention a Safari tab" hidden></div>
     <form id="composer" class="composer">
       <div class="source-row"><div class="attachments" id="attachments"></div><button type="button" id="search-chip" class="pill" aria-label="Remove web search" hidden>Web search ×</button></div>
       <label class="sr-only" for="prompt">Message Safari Chat</label>
-      <textarea id="prompt" rows="1" maxlength="12000" placeholder="Ask anything or @mention a tab" aria-controls="tab-mentions" aria-autocomplete="list" aria-describedby="composer-hint"></textarea>
+      <textarea id="prompt" rows="1" maxlength="12000" placeholder="Ask ChatGPT" aria-controls="tab-mentions" aria-autocomplete="list" aria-describedby="composer-hint"></textarea>
+      <div id="voice-status" class="voice-status" role="status" hidden></div>
       <div class="composer-toolbar">
         <button class="icon-button add-button" id="add-button" type="button" popovertarget="add-menu" aria-controls="add-menu" aria-expanded="false" title="Add context and tools" aria-label="Add context and tools"><svg viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></svg></button>
         <input id="file-input" type="file" multiple accept=".txt,.md,.csv,.json,.log,.js,.ts,.py,.html,.css,.xml,.yaml,.yml" hidden>
-        <button class="permission-mode" type="button" id="actions-guidance" popovertarget="access-menu" aria-controls="access-menu" aria-expanded="false" title="Browser approvals"><span id="mode-label">Ask for approval</span><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
-        <button class="send-button" id="send-button" type="submit" aria-label="Send message"><svg viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
+        <button type="button" class="model-trigger" id="model-trigger" popovertarget="model-popover" aria-label="Model and reasoning effort" aria-haspopup="dialog" aria-expanded="false"><span id="model-name"></span><span id="effort-name"></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
+        <button class="icon-button" id="dictate-button" type="button" title="Dictate (⌃⇧D)" aria-label="Dictate" aria-pressed="false"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="13" rx="4"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4m-3 0h6"/></svg></button>
+        <button class="send-button" id="voice-button" type="button" title="Start Voice (⌃⇧V)" aria-label="Start Voice" aria-pressed="false"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 10v4m4-8v12m4-15v18m4-15v12m4-8v4"/></svg></button>
+        <button class="send-button" id="send-button" type="submit" aria-label="Send message" hidden><svg viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
         <button class="send-button" id="stop-button" type="button" aria-label="Stop response" hidden><span class="stop-square"></span></button>
       </div>
     </form>
     <div class="composer-help">
-      <div id="action-budget" hidden><span id="actions-left"></span> <span id="action-limit-note" role="status"></span> <button type="button" id="continue-actions" hidden>Continue</button></div>
+      <div id="action-budget" hidden><span id="actions-left"></span></div>
       <span id="draft-status" role="status"></span><span class="sr-only" id="composer-hint">Type @ to mention a tab. Enter sends. Shift + Enter adds a line.</span>
     </div>
   </footer>
+  </div>
+
+  <div id="model-popover" class="model-popover add-menu" popover="auto" role="dialog" aria-label="Model and reasoning effort">
+    <div id="effort-view">
+      <div class="picker-head"><output id="effort-value" for="effort"></output><button class="icon-button" id="reset-effort" title="Use model default" aria-label="Use model default">↺</button></div>
+      <button type="button" id="select-model" class="choose-model">Select model <span aria-hidden="true">›</span></button>
+      <div id="effort-control">
+        <input type="range" id="effort" aria-label="Reasoning effort" min="0" step="1" aria-describedby="effort-hint">
+        <div id="chat-levels" role="group" aria-label="Thinking levels" hidden></div>
+        <p id="effort-hint" hidden></p>
+      </div>
+    </div>
+    <div id="model-view" hidden>
+      <div class="picker-head"><button class="icon-button" id="back-to-effort" aria-label="Back to effort">‹</button><span>Select model</span></div>
+      <div id="model-list" role="group" aria-label="Available models"></div>
+      <button type="button" id="retry-models" class="text-button" hidden>Reload models</button>
+    </div>
+  </div>
 
   <div id="access-menu" class="add-menu" popover="auto" role="dialog" aria-label="Browser approvals">
     <button id="ask-mode" aria-pressed="true"><span><strong>Ask for approval</strong><small>Ask before acting, except on allowed sites.</small></span><span class="menu-check" aria-hidden="true">✓</span></button>
@@ -102,18 +125,40 @@
   <div id="add-menu" class="add-menu" popover="auto" role="dialog" aria-label="Add context and tools">
     <button id="attach-file" type="button"><svg viewBox="0 0 24 24"><path d="M8 12v5a4 4 0 0 0 8 0V6a3 3 0 0 0-6 0v10a1 1 0 0 0 2 0V7"/></svg><span><strong>Add files</strong><small>Text, Markdown, code & data</small></span></button>
     <button id="menu-page" type="button"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18M7 6.5h.01"/></svg><span><strong>Add current page</strong><small>Share a page excerpt</small></span></button>
-    <button id="menu-tabs" type="button"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg><span><strong>Add browser tabs</strong><small>Choose from accessible Safari tabs</small></span></button>
+    <button id="menu-tabs" type="button"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg><span><strong>Add browser tabs</strong><small>Use open tabs</small></span></button>
     <div class="menu-divider"></div>
-    <button id="web-search" type="button" aria-pressed="false"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></svg><span><strong>Web search</strong><small>Answers with sources, when available</small></span><span class="menu-check" aria-hidden="true">✓</span></button>
+    <button id="web-search" type="button" aria-pressed="false"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></svg><span><strong>Web search</strong><small>Find current information</small></span><span class="menu-check" aria-hidden="true">✓</span></button>
+    <div class="menu-divider"></div>
+    <div class="page-shortcuts">
+          <button data-prompt="summarize"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18m-14 4h10m-10 3h6"/></svg>Summarize this page</button>
+          <button data-prompt="explain"><svg viewBox="0 0 24 24"><path d="M4 6h6v7l-4 4m8-11h6v7l-4 4"/></svg>Explain selected text</button>
+          <button data-prompt="write"><svg viewBox="0 0 24 24"><path d="m5 15-1 5 5-1L20 8l-4-4zM13 7l4 4"/></svg>Help me write</button>
+        </div>
   </div>
 
-  <dialog id="history-dialog" class="sheet" aria-labelledby="history-heading">
-    <div class="dialog-head"><h2 id="history-heading">Recent chats</h2><button class="icon-button" data-close="history-dialog" aria-label="Close recent chats">×</button></div>
-    <input id="history-search" type="search" placeholder="Search chats" aria-label="Search chats" autofocus>
-    <div id="history-list" class="item-list"></div>
-    <div class="sheet-footer"><p class="muted">Chats are saved on this Mac for each account.</p></div>
+  <dialog id="history-dialog" class="drawer" aria-labelledby="history-heading">
+    <nav class="drawer-rail" aria-label="Sidebar">
+      <button class="icon-button" data-close="history-dialog" aria-label="Toggle sidebar" title="Toggle sidebar"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M8 7v10"/></svg></button>
+      <button class="icon-button rail-home" id="recents-button" aria-label="Recent chats" title="Recent chats"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10h-7v-7h-4v7H3z"/></svg></button>
+      <button id="settings-button" class="icon-button rail-settings" aria-label="Settings" title="Settings"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7h4m6 0h8M3 17h10m6 0h2"/><circle cx="10" cy="7" r="3"/><circle cx="16" cy="17" r="3"/></svg></button>
+    </nav>
+    <div class="drawer-content">
+      <div class="dialog-head"><h2 id="history-heading">Safari Chat</h2><button id="search-history" class="icon-button" aria-label="Search chats" title="Search chats" aria-expanded="false"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6.5"/><path d="m15 15 5 5"/></svg></button><button class="icon-button" data-close="history-dialog" aria-label="Close recent chats"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+      <input id="history-search" type="search" placeholder="Search chats" aria-label="Search chats" hidden>
+      <button id="new-button" class="drawer-new" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 4H7a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-5M10 14l.8-3.8L18 3a1.5 1.5 0 0 1 2 2l-7.2 7.5z"/></svg>New chat</button>
+      <h3>Recents</h3><div id="history-list" class="item-list"></div>
+    </div>
   </dialog>
-  <dialog id="tabs-dialog" aria-labelledby="tabs-heading"><div class="dialog-head"><h2 id="tabs-heading">Add browser tabs</h2><button class="icon-button" data-close="tabs-dialog" aria-label="Close tabs">×</button></div><input id="tabs-search" type="search" aria-label="Search browser tabs" placeholder="Search tabs"><div id="tabs-list" class="item-list"></div><p id="tabs-status" class="muted" role="status"></p><p class="muted">Only tabs Safari allows this extension to access are shown.</p><div class="dialog-actions"><button id="add-selected-tabs" class="primary" disabled>Add tabs</button></div></dialog>
+  <dialog id="tabs-dialog" aria-labelledby="tabs-heading"><div class="dialog-head"><h2 id="tabs-heading">Add browser tabs</h2><button class="icon-button" data-close="tabs-dialog" aria-label="Close tabs">×</button></div><input id="tabs-search" type="search" aria-label="Search browser tabs" placeholder="Search tabs"><div id="tabs-list" class="item-list"></div><p id="tabs-status" class="muted" role="status"></p><div class="dialog-actions"><button id="add-selected-tabs" class="primary" disabled>Add tabs</button></div></dialog>
+  <dialog id="tab-access-dialog" aria-labelledby="tab-access-heading">
+    <form class="site-form">
+      <div class="dialog-head"><h2 id="tab-access-heading">Identify tab</h2></div>
+      <label for="tab-address">Safari is hiding this tab’s address. Enter the website shown in its address bar.</label>
+      <input id="tab-address" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="www.example.com" required>
+      <p id="tab-access-status" class="muted" role="status"></p>
+      <div class="dialog-actions"><button id="tab-access-cancel" type="button" class="secondary">Cancel</button><button id="tab-access-allow" class="primary" type="submit">Allow in Safari…</button></div>
+    </form>
+  </dialog>
   <dialog id="edit-dialog" aria-labelledby="edit-title">
     <form id="edit-form">
       <div class="dialog-head"><h2 id="edit-title">Edit message</h2><button type="button" class="icon-button" data-close="edit-dialog" aria-label="Cancel editing">×</button></div>
@@ -137,7 +182,6 @@
     <p id="theme-status" class="setting-hint" role="status"></p><button class="text-button" id="retry-theme" hidden>Retry saving appearance</button>
     <details class="setting-section" id="website-section">
       <summary id="browser-permissions">Website access</summary>
-      <label class="setting-row">Default for websites<select id="default-access"><option value="ask">Ask for approval</option><option value="auto">Approve for me</option></select></label>
       <p class="muted">Rules match the exact hostname for this account and Safari profile. Blocked sites take priority. Safari manages its own website permissions.</p>
       <form id="site-form" class="site-form">
         <label for="site-host">Website hostname</label><input id="site-host" placeholder="example.com or a website URL" maxlength="2048" required autocapitalize="none" spellcheck="false">
@@ -157,6 +201,8 @@
       <label class="setting-row">Recent turns<select id="turns-setting"><option value="4">4 turns</option><option value="8">8 turns</option><option value="16">16 turns</option></select></label>
       <label class="setting-row">Browser actions per message<input id="actions-setting" type="number" min="1" max="100" step="1" required aria-describedby="actions-setting-hint"></label>
       <p id="actions-setting-hint" class="muted">Choose 1–100. Each page read or other browser attempt uses one action. Changes apply to the next message.</p>
+      <label class="setting-row">Time limit per message (minutes)<input id="time-setting" type="number" min="1" step="1" required aria-describedby="time-setting-hint"></label>
+      <p id="time-setting-hint" class="muted">Includes time spent on browser actions and waiting for approval. Changes apply to the next message.</p>
     </details>
     <div class="setting-section settings-links"><button id="export-button">Export chat as Markdown</button><button id="signout-button">Sign out</button></div>
     <details class="setting-section" id="data-section"><summary>Remove your data</summary>

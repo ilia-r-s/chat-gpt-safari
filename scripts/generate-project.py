@@ -1,10 +1,24 @@
 #!/usr/bin/env python3
-"""Generate a deterministic, dependency-free Xcode project. Never edits user settings."""
+"""Generate the Xcode project, retaining signing choices made in Xcode."""
 from pathlib import Path
 import hashlib
 import json
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
+directory = ROOT / "SafariChat.xcodeproj"
+project_file = directory / "project.pbxproj"
+existing = {}
+if project_file.exists():
+    existing = json.loads(subprocess.check_output(
+        ["plutil", "-convert", "json", "-o", "-", str(project_file)]
+    ))["objects"]
+
+SIGNING_SETTINGS = {
+    "DEVELOPMENT_TEAM", "CODE_SIGN_IDENTITY", "CODE_SIGN_STYLE",
+    "PROVISIONING_PROFILE", "PROVISIONING_PROFILE_SPECIFIER", "PRODUCT_BUNDLE_IDENTIFIER",
+    "SAFARI_CHAT_BUNDLE_ID", "SAFARI_CHAT_GROUP_ID",
+}
 objects = {}
 
 def uid(value):
@@ -28,7 +42,12 @@ def config_list(name, settings):
         merged.update(SWIFT_OPTIMIZATION_LEVEL="-Onone" if variant == "Debug" else "-O",
                       DEBUG_INFORMATION_FORMAT="dwarf" if variant == "Debug" else "dwarf-with-dsym")
         if variant == "Debug": merged["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] = "DEBUG"
-        configs.append(obj(f"{name}:{variant}", "XCBuildConfiguration", name=variant, buildSettings=merged))
+        key = f"{name}:{variant}"
+        previous = existing.get(uid(key), {}).get("buildSettings", {})
+        for setting in sorted(previous):
+            if setting.partition("[")[0] in SIGNING_SETTINGS:
+                merged[setting] = previous[setting]
+        configs.append(obj(key, "XCBuildConfiguration", name=variant, buildSettings=merged))
     return obj(name + ":configs", "XCConfigurationList", buildConfigurations=configs, defaultConfigurationIsVisible="0", defaultConfigurationName="Release")
 
 shared = [str(p.relative_to(ROOT)) for p in sorted((ROOT / "native/Shared").glob("*.swift"))]
@@ -46,8 +65,8 @@ root_group = obj("root-group", "PBXGroup", children=list(refs.values()) + [icon,
 common = {"SDKROOT": "macosx", "MACOSX_DEPLOYMENT_TARGET": "14.0", "SWIFT_VERSION": "5.0",
           "SAFARI_CHAT_BUNDLE_ID": "org.safarichat.app", "SAFARI_CHAT_GROUP_ID": "org.safarichat.shared",
           "CLANG_ENABLE_MODULES": "YES", "SWIFT_STRICT_CONCURRENCY": "complete", "ENABLE_HARDENED_RUNTIME": "YES",
-          "CODE_SIGN_STYLE": "Automatic", "GENERATE_INFOPLIST_FILE": "NO", "CURRENT_PROJECT_VERSION": "11",
-          "MARKETING_VERSION": "0.3.6", "COMBINE_HIDPI_IMAGES": "YES", "ENABLE_USER_SCRIPT_SANDBOXING": "YES"}
+          "CODE_SIGN_STYLE": "Automatic", "GENERATE_INFOPLIST_FILE": "NO", "CURRENT_PROJECT_VERSION": "14",
+          "MARKETING_VERSION": "0.3.9", "COMBINE_HIDPI_IMAGES": "YES", "ENABLE_USER_SCRIPT_SANDBOXING": "YES"}
 app_settings = {**common, "PRODUCT_BUNDLE_IDENTIFIER": "$(SAFARI_CHAT_BUNDLE_ID)", "PRODUCT_NAME": "Safari Chat",
                 "INFOPLIST_FILE": "native/App/Info.plist", "CODE_SIGN_ENTITLEMENTS": "native/App/App.entitlements",
                 "LD_RUNPATH_SEARCH_PATHS": ["$(inherited)", "@executable_path/../Frameworks"]}
@@ -76,6 +95,13 @@ project = obj("project", "PBXProject", attributes={"LastUpgradeCheck": "1600", "
                                    ext_target: {"CreatedOnToolsVersion": "16.0", "SystemCapabilities": {"com.apple.ApplicationGroups.iOS": {"enabled": "1"}, "com.apple.Keychain": {"enabled": "1"}}}}},
               buildConfigurationList=config_list("project", {"ALWAYS_SEARCH_USER_PATHS": "NO"}), compatibilityVersion="Xcode 14.0", developmentRegion="en", hasScannedForEncodings="0", knownRegions=["en", "Base"], mainGroup=root_group, productRefGroup=products, projectDirPath="", projectRoot="", targets=[app_target, ext_target])
 
+previous_targets = existing.get(project, {}).get("attributes", {}).get("TargetAttributes", {})
+for ident, attributes in objects[project]["attributes"]["TargetAttributes"].items():
+    previous = previous_targets.get(ident, {})
+    for key in ("DevelopmentTeam", "ProvisioningStyle"):
+        if key in previous:
+            attributes[key] = previous[key]
+
 def encode(value, depth=0):
     indent = "\t" * depth
     if isinstance(value, dict):
@@ -83,9 +109,8 @@ def encode(value, depth=0):
     if isinstance(value, list): return "(" + ", ".join(encode(v, depth) for v in value) + ")"
     return json.dumps(value)
 
-directory = ROOT / "SafariChat.xcodeproj"
 directory.mkdir(exist_ok=True)
-(directory / "project.pbxproj").write_text("// !$*UTF8*$!\n" + encode({"archiveVersion": "1", "classes": {}, "objectVersion": "56", "objects": objects, "rootObject": project}) + "\n")
+project_file.write_text("// !$*UTF8*$!\n" + encode({"archiveVersion": "1", "classes": {}, "objectVersion": "56", "objects": objects, "rootObject": project}) + "\n")
 schemes = directory / "xcshareddata/xcschemes"
 schemes.mkdir(parents=True, exist_ok=True)
 (schemes / "Safari Chat.xcscheme").write_text(f'''<?xml version="1.0" encoding="UTF-8"?>

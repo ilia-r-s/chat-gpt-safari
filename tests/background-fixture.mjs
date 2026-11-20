@@ -2,7 +2,7 @@ import vm from "node:vm";
 import { readFile } from "node:fs/promises";
 import { webcrypto } from "node:crypto";
 
-export async function fixture({ nativeFailure = false, nativeUnavailable = false, launchFailure = false, responseGate, toolRequest, responseForRequest, scriptEncoding = "utf-8" } = {}) {
+export async function fixture({ nativeFailure = false, nativeUnavailable = false, launchFailure = false, responseGate, toolRequest, responseForRequest, catalog, scriptEncoding = "utf-8" } = {}) {
   const events = {};
   const data = {};
   const nativeRequests = [];
@@ -60,9 +60,9 @@ export async function fixture({ nativeFailure = false, nativeUnavailable = false
     storage: { local: { get: async key => key === null ? data : { [key]: data[key] }, set: async value => Object.assign(data, value), remove: async keys => { for (const key of Array.isArray(keys) ? keys : [keys]) delete data[key]; }, clear: async () => { for (const key of Object.keys(data)) delete data[key]; } },
       session: { get: async key => Object.fromEntries((Array.isArray(key) ? key : [key]).map(k => [k, structuredClone(session[k])])), set: async items => Object.assign(session, structuredClone(items)), remove: async key => { delete session[key]; } } },
   };
-  const context = vm.createContext({ browser: api, console, URL, TextEncoder, TextDecoder, AbortController, AbortSignal, crypto: webcrypto, setTimeout, clearTimeout,
+  const context = vm.createContext({ browser: api, console, URL, TextEncoder, TextDecoder, AbortController, AbortSignal, crypto: webcrypto, Date, setTimeout, clearTimeout, structuredClone,
     fetch: async (url, options) => {
-      if (url.endsWith("/models")) return new Response(JSON.stringify({ models: [{ visibility: "list", slug: "model-a", display_name: "Model A", supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }] }));
+      if (url.endsWith("/models")) return new Response(JSON.stringify(catalog ?? { models: [{ visibility: "list", slug: "model-a", display_name: "Model A", supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }] }));
       requests.push(JSON.parse(options.body));
       if (responseGate) { responseGate.started(); await responseGate.promise; }
       const response = responseForRequest?.(requests.length);

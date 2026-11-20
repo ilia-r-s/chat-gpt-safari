@@ -1,4 +1,4 @@
-import { safeWebURL } from "./context.js";
+import { publicURL, safeWebURL } from "./context.js";
 
 // Website grants belong to one connection in one Safari profile.
 export const accessKey = account => `website-access:${account}`;
@@ -46,6 +46,23 @@ export function changeWebsiteAccess(access, change) {
 export function visibleWebsite(url, access) {
   const safe = safeWebURL(url);
   return !!safe && !access?.blocked.includes(websiteHost(new URL(safe).hostname));
+}
+
+// Safari can return a real tab ID and position with both the URL and title redacted.
+export function listedTabs(tabs, access, limit, protectedId = null) {
+  const rows = [];
+  for (const [index, tab] of tabs.entries()) {
+    if (rows.length >= limit) break;
+    if (!Number.isInteger(tab.id) || tab.id < 0 || tab.id === protectedId) continue;
+    const active = typeof tab.active === "boolean" ? { active: tab.active } : {};
+    if (!tab.url) {
+      const position = Number.isInteger(tab.index) && tab.index >= 0 ? tab.index + 1 : index + 1;
+      rows.push({ id: tab.id, title: "Tab " + position, url: "", needsWebsiteAccess: true, ...active });
+    } else if (visibleWebsite(tab.url, access)) {
+      rows.push({ id: tab.id, title: (tab.title || "Untitled").slice(0, 160), url: publicURL(tab.url), ...active });
+    }
+  }
+  return rows;
 }
 
 // A tab listing spans websites. Only all-sites access can authorize it automatically.

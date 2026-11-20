@@ -9,12 +9,14 @@ import { pathToFileURL } from "node:url";
 import { snapshotPage, actOnPage } from "../extension/content/page.js";
 import { testPageInteractions } from "./page-interactions.mjs";
 import { testGalleryInteractions } from "./gallery-interactions.mjs";
-import { testSideChatIntegration, testDockWorkflow, testActionAllowance } from "./side-chat-integration.mjs";
+import { testSideChatIntegration, testDockWorkflow, testActionAllowance, testConversationModes, testVoiceComposer } from "./side-chat-integration.mjs";
 import { testBrowserAgent } from "./browser-agent.mjs";
 import { testContinuousScroll } from "./continuous-scroll.mjs";
 import { testDirectInput } from "./direct-input.mjs";
 import { testPointerPaths } from "./pointer-paths.mjs";
+import { testGestures } from "./gestures.mjs";
 import { testActionPointer } from "./action-pointer.mjs";
+import { serveWorkflow } from "./workflow-pages.mjs";
 import { testWebKitDock } from "./webkit-dock.mjs";
 import { testPanelMount } from "./panel-mount.mjs";
 import { testComposerFeatures } from "./composer-features.mjs";
@@ -24,11 +26,7 @@ if (!modulePath) throw new Error("Set SAFARI_CHAT_PLAYWRIGHT to an existing play
 const { chromium } = await import(pathToFileURL(modulePath).href);
 const root = path.resolve("extension");
 const server = createServer(async (request, response) => {
-  if (request.url.startsWith("/__workflow/")) {
-    const step = request.url.endsWith("/three") ? "Three" : request.url.endsWith("/two") ? "Two" : "One";
-    response.setHeader("Content-Type", "text/html");
-    response.end(`<!doctype html><title>Step ${step}</title><style>*{box-sizing:border-box}body{margin:0}main{width:100vw;height:230vh;padding:75px 24px}header{position:fixed;inset:0 0 auto;width:100vw}button{position:fixed;right:16px;bottom:16px}@media(max-width:1050px){main{display:grid;align-content:start;gap:16px}}</style><header>Workflow</header><main>Workflow step ${step}<a href="/__workflow/three">Continue</a></main><button>Page help</button>`); return;
-  }
+  if (await serveWorkflow(request, response)) return;
   const filename = path.resolve(root, `.${new URL(request.url, "http://localhost").pathname}`);
   if (!filename.startsWith(root + path.sep)) { response.writeHead(403).end(); return; }
   try {
@@ -44,7 +42,7 @@ try {
   const page = await context.newPage();
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   await page.context().addInitScript(() => {
-    const state = JSON.parse(sessionStorage.getItem("fixture") || "null") ?? { data: {}, drafts: {}, sessions: {}, prefs: { theme: "system", model: "test-model", pageChars: 12000, inputChars: 48000, historyTurns: 8, maxToolRounds: 6, browserTools: false } };
+    const state = JSON.parse(sessionStorage.getItem("fixture") || "null") ?? { data: {}, drafts: {}, sessions: {}, prefs: { theme: "system", interactionMode: "work", model: "test-model", pageChars: 12000, inputChars: 48000, historyTurns: 8, maxToolRounds: 6, browserTools: false } };
     const { data, drafts, sessions, prefs } = state;
     const persist = () => sessionStorage.setItem("fixture", JSON.stringify(state));
     let count = 0;
@@ -55,11 +53,13 @@ try {
       id: "ui-test", onMessage: { addListener: listener => { globalThis.__runtimeMessage = listener; } },
       sendMessage: async message => {
         const account = globalThis.__account ?? "test-account";
+        const models = [{ id: "test-model", name: "Test model", reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] }, { id: "basic-model", name: "Basic model", reasoningEfforts: [] }];
         let value;
+        if (message.type === "models.list") value = models;
         if (message.type === "auth.check") value = { generation: account };
         if (message.type === "bootstrap") value = globalThis.__companionError
           ? { prefs, auth: { connected: false, error: globalThis.__companionError }, models: [] }
-          : { prefs, auth: { connected: true, canInfer: true, account, generation: account, label: account === "test-account" ? "Test account" : "Other account" }, models: [{ id: "test-model", name: "Test model", reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] }, { id: "basic-model", name: "Basic model", reasoningEfforts: [] }], activeChat: sessions[account], access: state.access?.[account] };
+          : { prefs, auth: { connected: true, canInfer: true, account, generation: account, label: account === "test-account" ? "Test account" : "Other account" }, models, activeChat: sessions[account], access: state.access?.[account] };
         if (["auth.open", "auth.signin", "auth.apikey"].includes(message.type)) {
           if (globalThis.__companionError) return { ok: false, error: globalThis.__companionError };
           globalThis.__companionOpened = true; globalThis.__companionRoute = message.type; globalThis.__signInStarted = message.type === "auth.signin"; value = { ok: true };
@@ -117,7 +117,7 @@ try {
         let onMessage = () => {}; let onDisconnect = () => {}; let timer, run, answer = "";
         const finish = (type, message) => {
           const saved = data[run.chatId];
-          saved.messages = [...run.messages, { role: "assistant", text: answer || "No response received.", ...(type === "done" ? {} : { error: true }) }];
+          saved.messages = [...run.messages, { role: "assistant", text: answer || message, ...(type === "done" ? {} : { error: true, errorMessage: message }) }];
           saved.revision++; persist();
           onMessage({ type, message, saved: { id: saved.id, revision: saved.revision, title: saved.title }, workMs: globalThis.__browserActivity ? 2000 : undefined });
         };
@@ -128,7 +128,10 @@ try {
             if (message.type !== "run") return;
             run = message; globalThis.__runs.push(message); count++;
             if (globalThis.__browserActivity) onMessage({ type: "activity", operation: "fill", state: "working" });
-            if (globalThis.__responseError) { finish("error", "Connection interrupted"); return; }
+            if (globalThis.__responseError) {
+              answer = "I found the gallery."; onMessage({ type: "delta", text: answer });
+              finish("error", globalThis.__responseError); return;
+            }
             answer = globalThis.__answer ?? `Response ${count}: **Hello** <img src=x onerror=alert(1)>`; onMessage({ type: "delta", text: answer });
             timer = setTimeout(() => {
               if (globalThis.__browserActivity) onMessage({ type: "activity", operation: "fill", state: "done", detail: "Text entered; the form was not submitted." });
@@ -143,19 +146,25 @@ try {
   const origin = `http://127.0.0.1:${server.address().port}`;
   await page.goto(`${origin}/panel/panel.html?tab=1`);
   await page.waitForFunction(() => document.getElementById("account-label").textContent === "Test account");
-  const effort = page.getByRole("combobox", { name: "Reasoning effort" });
-  assert.equal(await effort.inputValue(), "auto");
-  assert.deepEqual(await effort.locator("option").evaluateAll(options => options.map(option => option.value)), ["auto", "low", "medium", "high", "xhigh", "max"]);
-  await effort.selectOption("high");
+  const effort = page.locator("#effort");
+  const choose = page.getByRole("button", { name: "Model and reasoning effort", exact: true });
+  await choose.click();
+  assert.equal(await effort.getAttribute("aria-valuetext"), "Model default");
+  assert.equal(await effort.getAttribute("max"), "5");
+  await effort.press("ArrowRight"); await effort.press("ArrowRight"); await effort.press("ArrowRight");
+  await page.waitForFunction(() => JSON.parse(sessionStorage.getItem("fixture")).prefs.reasoningEffort === "high");
   await page.reload();
-  await page.waitForFunction(() => document.getElementById("account-label").textContent === "Test account");
-  assert.equal(await effort.inputValue(), "high", "effort survives reopening the panel");
-  await page.locator("#model").selectOption("basic-model");
+  await choose.click();
+  assert.equal(await effort.getAttribute("aria-valuetext"), "High", "effort survives reopening the panel");
+  await page.locator("#select-model").click();
+  await page.getByRole("button", { name: "Basic model", exact: true }).click();
+  await choose.click();
   assert.equal(await page.locator("#effort-control").isVisible(), false);
-  assert.equal(await page.locator("#effort").inputValue(), "auto");
-  await page.locator("#model").selectOption("test-model");
-  assert.equal(await effort.inputValue(), "auto", "a model change cannot retain an unsupported effort");
-  await effort.selectOption("high");
+  await page.getByRole("button", { name: "Test model", exact: true }).click();
+  assert.equal(await effort.getAttribute("aria-valuetext"), "Model default", "a model change cannot retain an unsupported effort");
+  await effort.press("ArrowRight"); await effort.press("ArrowRight"); await effort.press("ArrowRight");
+  await page.keyboard.press("Escape");
+  await page.locator("#history-button").click();
   await page.locator("#settings-button").click();
   await page.getByText("Context and usage", { exact: true }).click();
   for (const [id, key, value] of [["page-setting", "pageChars", 6000], ["budget-setting", "inputChars", 96000], ["turns-setting", "historyTurns", 16]]) {
@@ -190,9 +199,10 @@ try {
   await page.evaluate(() => browser.runtime.sendMessage({ type: "settings.save", settings: { theme: "system" } }));
   assert.equal(await page.locator("#actions-guidance").isVisible(), true);
   await page.evaluate(() => { delete globalThis.__browserActivity; });
-  assert.equal(await page.getByRole("button", { name: "Send message", exact: true }).isDisabled(), true);
+  assert.equal(await page.getByRole("button", { name: "Start Voice", exact: true }).isVisible(), true);
+  assert.equal(await page.locator("#send-button").isVisible(), false);
   await page.emulateMedia({ colorScheme: "dark" });
-  assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), "rgb(27, 27, 27)", "system theme follows dark appearance");
+  assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector(".panel-surface")).backgroundColor), "rgb(14, 14, 14)", "system theme follows dark appearance");
   await page.emulateMedia({ colorScheme: "light" });
   await mkdir("build/screenshots", { recursive: true });
   await page.screenshot({ path: "build/screenshots/panel-light.png" });
@@ -203,7 +213,7 @@ try {
   });
   await page.locator("#connect-card").waitFor({ state: "visible" });
   for (const id of ["account-button", "connect-button", "api-key-button"]) {
-    if (id === "account-button") await page.locator("#settings-button").click();
+    if (id === "account-button") { await page.locator("#history-button").click(); await page.locator("#settings-button").click(); }
     await page.locator(`#${id}`).click();
     await page.locator("#companion-dialog").waitFor({ state: "visible" });
     assert.match(await page.locator("#companion-error").textContent(), /companion app is unavailable/);
@@ -292,14 +302,21 @@ try {
   const preserved = await page.evaluate(id => ({ chat: globalThis.__data[id], draft: globalThis.__drafts[id] }), originalId);
   assert.equal(preserved.chat.messages.length, 4, "editing keeps the original history");
   assert.equal(preserved.draft.text, "An unsent follow-up", "editing keeps the original unsent draft");
-  await page.evaluate(() => { globalThis.__responseError = true; });
+  const timeoutReason = "This message reached its 10-minute time limit. Check the page before continuing.";
+  await page.evaluate(reason => { globalThis.__responseError = reason; }, timeoutReason);
   await prompt.fill("One more question");
   await prompt.press("Enter");
   await page.locator(".message-error").waitFor();
-  assert.match(await page.locator("#notice").textContent(), /Connection interrupted/);
+  assert.equal(await page.locator(".message-error").innerText(), timeoutReason);
+  assert.equal(await page.locator("#activity").isVisible(), false);
+  assert.equal(await page.getByText(timeoutReason, { exact: true }).count(), 1);
+  await page.reload();
+  await page.getByText("I found the gallery.", { exact: true }).waitFor();
+  assert.equal(await page.getByText(timeoutReason, { exact: true }).count(), 1);
   await page.evaluate(() => { globalThis.__responseError = false; globalThis.__responseDelay = 1000; });
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await page.getByRole("button", { name: "Stop response" }).waitFor({ state: "visible" });
+  await page.locator("#history-button").click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   assert.equal(await effort.isDisabled(), true, "effort cannot change during a response");
   assert.equal(await page.getByRole("button", { name: "Done", exact: true }).isEnabled(), true, "settings can be dismissed while streaming");
@@ -337,6 +354,7 @@ try {
   await page.evaluate(() => { globalThis.__account = "test-account"; window.dispatchEvent(new Event("focus")); });
   await page.waitForFunction(() => document.getElementById("prompt").value === "Draft for my account");
   assert.equal(await page.locator("#attachments .attachment").count(), 1);
+  await page.locator("#history-button").click();
   await page.getByRole("button", { name: "New chat", exact: true }).click();
   await prompt.fill("First line");
   await prompt.press("Shift+Enter");
@@ -344,7 +362,8 @@ try {
   assert.equal(await prompt.inputValue(), "First line\nSecond line");
   await prompt.fill("A separate draft");
   await page.waitForFunction(() => document.getElementById("draft-status").textContent === "Draft saved");
-  await page.getByRole("button", { name: "Recent chats", exact: true }).click();
+  await page.locator("#history-button").click();
+  await page.getByRole("button", { name: "Search chats" }).click();
   await page.getByRole("searchbox", { name: "Search chats" }).fill("nothing matches this");
   assert.equal(await page.locator("#history-list").textContent(), "No matching chats.");
   await page.getByRole("searchbox", { name: "Search chats" }).fill("A separate draft");
@@ -357,19 +376,21 @@ try {
   await page.waitForFunction(() => document.getElementById("prompt").value === "An unsent follow-up");
   await page.getByRole("button", { name: "Return to source tab", exact: true }).click();
   assert.equal(await page.evaluate(() => globalThis.__returned), 1);
+  await page.locator("#history-button").click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByLabel("Appearance", { exact: true }).selectOption("dark");
   await page.getByRole("button", { name: "Done", exact: true }).click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
-  assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), "rgb(27, 27, 27)");
+  assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector(".panel-surface")).backgroundColor), "rgb(14, 14, 14)");
   await page.screenshot({ path: "build/screenshots/panel-dark-chat.png" });
-  await page.getByRole("button", { name: "Recent chats", exact: true }).click();
+  await page.locator("#history-button").click();
   await page.locator("#history-list .list-row > button:first-child").first().waitFor();
   await page.getByRole("button", { name: "Close recent chats" }).click();
   await page.setViewportSize({ width: 320, height: 640 });
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
   assert.equal(overflow, false, "small panel must not overflow horizontally");
   await page.screenshot({ path: "build/screenshots/panel-small.png" });
+  await page.locator("#history-button").click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByText("Remove your data", { exact: true }).click();
   page.once("dialog", dialog => dialog.dismiss());
@@ -403,8 +424,11 @@ try {
   await testBrowserAgent(browser, origin);
   await testContinuousScroll(browser, origin);
   await testPointerPaths(browser, origin);
+  await testGestures(browser, origin);
   await testDirectInput(browser, origin);
   await testSideChatIntegration(browser, origin);
+  await testConversationModes(browser, origin);
+  await testVoiceComposer(browser, origin);
   await testActionAllowance(browser, origin);
   await testPanelMount(browser, origin);
   await testDockWorkflow(browser, origin);

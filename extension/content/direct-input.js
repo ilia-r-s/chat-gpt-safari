@@ -1,5 +1,9 @@
 // One injection per click, key command, or small batch of typed characters.
-export function performPageInput(owner, step, args = {}) {
+export function performPageInput(owner, step, args = {}, reportError = false) {
+  if (reportError) {
+    try { return performPageInput(owner, step, args); }
+    catch (error) { return { pageError: String(error.message || error).slice(0, 700) }; }
+  }
   const b = globalThis.__safariChatInput;
   if (!b || b.owner !== owner || b.url !== location.href) throw new Error("The document or input target changed. Read it again.");
   if (step === "end_typing") { b.typing?.abort(); return { ok: true }; }

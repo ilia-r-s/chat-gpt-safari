@@ -1,10 +1,12 @@
-import { DEFAULTS } from "../core/config.js";
+import { DEFAULTS, MAX_TURN_MINUTES } from "../core/config.js";
 import { estimateTokens } from "../core/context.js";
 import { markdown } from "./markdown.js";
 import { branchChat, continuationMessage } from "./conversation.js";
-import { EFFORT_LABELS } from "../core/models.js";
+import { setupModelPicker } from "./model-picker.js";
+import { createVoice } from "./voice.js";
 import { setupAttachments } from "./attachments.js";
 import { setupWebsiteControls } from "./website-controls.js";
+import { setupTabAccess } from "./tab-access.js";
 import { accessKey } from "../core/website-access.js";
 import { showActionPointer } from "../content/action-pointer.js";
 
@@ -13,9 +15,11 @@ const tabParameter = new URL(location.href).searchParams.get("tab");
 const sourceTab = tabParameter !== null && /^\d+$/.test(tabParameter) ? Number(tabParameter) : null;
 const embedded = window.top !== window;
 let dockToken;
+let temporaryId = null;
 const editor = crypto.randomUUID();
 let prefs = { ...DEFAULTS };
 let modelChoices = [];
+let runMode;
 let loadingCatalog = null;
 let accountKnown = false;
 let auth = { connected: false, account: "local" };
@@ -49,13 +53,15 @@ let themeOverride = null;
 let themeSave = Promise.resolve();
 let modelIntent = null;
 let modelSave = Promise.resolve();
-const settingFields = { "desktop-setting": "desktopControl", "page-setting": "pageChars", "budget-setting": "inputChars", "turns-setting": "historyTurns", "actions-setting": "maxBrowserActions" };
+const settingFields = { "desktop-setting": "desktopControl", "page-setting": "pageChars", "budget-setting": "inputChars", "turns-setting": "historyTurns", "actions-setting": "maxBrowserActions", "time-setting": "turnMinutes" };
+$("time-setting").max = String(MAX_TURN_MINUTES);
 const savingFields = new Set();
+const actionNames = { gesture: "Perform gesture", zoom: "Zoom tab", back: "Go back", forward: "Go forward", read: "Read page", find_text: "Find text on page", click: "Click element", fill: "Fill field", select: "Choose option", set_checked: "Change checked state", scroll: "Scroll page", scroll_until: "Find on page", double_click: "Double-click", type_text: "Type into field", press_key: "Press key", select_text: "Select text", copy: "Copy selection", paste: "Paste text", delete_selection: "Delete selection", replace_selection: "Replace selection", drag: "Drag pointer", move_pointer: "Move pointer", set_speed: "Change speed", wait_motion: "Wait for motion", stop_motion: "Stop motion", navigate: "Visit page", open_tab: "Open tab", switch_tab: "Switch tab", close_tab: "Close tab", list_tabs: "List tabs", web_search: "Search the web" };
 
 const rpc = async (type, payload = {}) => {
   if (removing && !["data.erase", "auth.open", "panel.close"].includes(type)) throw new Error("Local data was erased. Close this panel before removing Safari Chat.");
   if (!globalThis.browser?.runtime) throw new Error("This preview is not connected to Safari. Build and enable the extension to use chat.");
-  const result = await browser.runtime.sendMessage({ type, generation: auth.generation, dockToken, ...payload });
+  const result = await browser.runtime.sendMessage({ type, generation: auth.generation, dockToken, temporaryId, ...payload });
   if (removing && !["data.erase", "auth.open", "panel.close"].includes(type)) throw new Error("Local data was erased. This earlier request was discarded.");
   if (!result?.ok) throw new Error(result?.error || "The extension did not respond. Reopen the panel.");
   return result.value;
@@ -124,9 +130,9 @@ globalThis.browser?.storage?.onChanged?.addListener((changes, area) => {
   if (!updated) return;
   for (const key of [...Object.values(settingFields), "webSearch"]) if (updated[key] !== undefined) prefs[key] = updated[key];
   syncFields(); applyTheme();
-  if (!modelIntent && !running && modelChoices.some(model => model.id === updated.model)) {
-    prefs.model = updated.model; prefs.reasoningEffort = updated.reasoningEffort;
-    $("model").value = prefs.model; renderEffort();
+  if (!modelIntent) {
+    for (const key of ["interactionMode", "chatModel", "chatEffort", "model", "reasoningEffort"]) if (updated[key] !== undefined) prefs[key] = updated[key];
+    if (!running) renderModelChoices(modelChoices);
   }
   const theme = updated.theme;
   if (themeOverride !== null || !["system", "light", "dark"].includes(theme)) return;
@@ -134,6 +140,7 @@ globalThis.browser?.storage?.onChanged?.addListener((changes, area) => {
   $("theme-setting").value = theme; applyTheme();
 });
 function freshChat() {
+  voice.stop();
   attachmentUI.reset();
   savedDraft = "";
   chat = { id: crypto.randomUUID(), account: auth.account ?? "local", title: "New chat", messages: [] };
@@ -144,7 +151,12 @@ function freshChat() {
 function resizePrompt() {
   $("prompt").style.height = "auto";
   $("prompt").style.height = `${Math.min(160, $("prompt").scrollHeight)}px`;
-  $("send-button").disabled = !ready || !auth.canInfer || !$("model").value || switching || removing || !$("prompt").value.trim();
+  $("send-button").disabled = !ready || !auth.canInfer || !picker.model || switching || removing || !$("prompt").value.trim();
+  const active = voice.mode === "voice";
+  $("voice-button").hidden = !active && (running || !!$("prompt").value.trim());
+  $("send-button").hidden = running || !$("prompt").value.trim();
+  $("dictate-button").disabled = switching || removing || !ready || preparing || running;
+  $("voice-button").disabled = !active && (!ready || !auth.canInfer || !picker.model || running || switching || removing);
 }
 function scheduleDraft() {
   if (!ready || removing || switching) return;
@@ -157,14 +169,14 @@ function persistDraft() {
   clearTimeout(draftTimer);
   if (!ready || removing) return draftTail;
   const version = ++draftVersion;
-  const owner = chat, generation = auth.generation;
+  const owner = chat, generation = auth.generation, session = temporaryId;
   const draft = { id: owner.id, account: owner.account, text: $("prompt").value, contexts: structuredClone(contexts) };
   const signature = JSON.stringify(draft);
   if (signature === savedDraft) { $("draft-status").textContent = draft.text || draft.contexts.length ? "Draft saved" : ""; return draftTail; }
   const result = draftTail.then(async () => {
     if (generation !== auth.generation || removing) return;
     const target = owner.id;
-    const saved = await rpc("draft.save", { draft: { ...draft, id: target, revision: owner.draftRevision ?? 0, chatRevision: owner.revision ?? 0 }, generation, tabId: sourceTab, editor, sequence: version });
+    const saved = await rpc("draft.save", { draft: { ...draft, id: target, revision: owner.draftRevision ?? 0, chatRevision: owner.revision ?? 0 }, generation, temporaryId: session, tabId: sourceTab, editor, sequence: version });
     if (generation !== auth.generation || owner.id !== target || removing) return;
     owner.draftRevision = saved.revision;
     if (owner.id !== saved.id) {
@@ -205,11 +217,13 @@ async function loadChat(id) {
 }
 async function navigateChat(id) {
   if (running || switching || removing || !ready) return;
+  voice.stop();
   const version = accountChange;
   switching = true; setRunning(false);
   try {
     await persistDraft();
     if (version !== accountChange || removing) return;
+    if (temporaryId) { await rpc("temporary.end", { account: auth.account }); temporaryId = null; }
     if (id) await loadChat(id); else freshChat();
     await persistDraft();
     $("history-dialog").close(); notice("");
@@ -220,10 +234,15 @@ function scrollDown(force = false) {
   if (force || main.scrollHeight - main.scrollTop - main.clientHeight < 180) main.scrollTop = main.scrollHeight;
 }
 function renderMessages() {
+  $("temporary-button").setAttribute("aria-pressed", String(!!temporaryId));
+  $("temporary-button").title = temporaryId ? "End temporary chat" : "Start temporary chat";
+  $("temporary-button").setAttribute("aria-label", $("temporary-button").title);
+  $("welcome-heading").hidden = !temporaryId;
+  $("temporary-info").hidden = !temporaryId;
+  document.body.toggleAttribute("data-temporary", !!temporaryId);
   $("messages").replaceChildren(); $("welcome").hidden = chat.messages.length > 0;
   $("conversation-title").textContent = chat.title;
-  $("history-button").title = chat.messages.length ? `${chat.title} · Recent chats` : "Recent chats";
-  $("prompt").placeholder = chat.messages.length ? "Ask for follow-up changes" : "Ask anything or @mention a tab";
+  renderPlaceholder();
   renderConnection();
   renderActionBudget();
   updateChatURL();
@@ -240,29 +259,30 @@ function renderConnection() {
   card.querySelector("h1").textContent = auth.connected ? "Enable chat for this account" : "Connect to Safari Chat";
   card.querySelector("p").textContent = auth.connected ? "Enable ChatGPT plan usage in the companion app or connect an API key." : "Use your ChatGPT account or an API key to chat beside this page.";
   $("connect-button").textContent = auth.connected ? "Manage account" : "Continue with ChatGPT";
-  $("run-options").hidden = !connected || removing;
+  $("mode-switch").hidden = !connected || removing;
+  $("work-sources").hidden = !connected || removing;
   $("composer").hidden = !connected || removing;
-  $("retry-models").hidden = !connected || !!loadingCatalog || modelChoices.length > 0;
+  $("retry-models").hidden = !connected || !!loadingCatalog;
 }
 function renderActionBudget() {
   const last = chat?.messages.at(-1);
-  const actions = !preparing && last?.role === "assistant" ? last.browserActions : undefined;
+  const previous = last?.role === "assistant" ? last.browserActions : undefined;
+  const actions = running && !preparing ? previous : undefined;
   const limit = actions?.limit ?? prefs.maxBrowserActions;
   const used = actions?.used ?? 0;
-  const exhausted = !!actions && used === limit && !running;
+  const exhausted = !running && !!previous && previous.used === previous.limit;
   $("action-budget").hidden = !ready || !auth.canInfer || removing;
-  const legacy = !actions && !running && last?.role === "assistant";
-  $("actions-left").textContent = legacy ? `Next message · ${limit} browser actions available` : `${limit - used}/${limit} browser actions left${used && used < limit ? ` · ${used} used` : ""}`;
+  $("actions-left").textContent = `${limit - used}/${limit} browser actions left${used && used < limit ? ` · ${used} used` : ""}`;
   $("actions-left").title = actions ? `${used} of ${limit} attempts used for this message. A new message allows ${prefs.maxBrowserActions}.` : `Your next message allows ${limit} browser actions.`;
-  const note = exhausted ? "Limit reached." : "";
+  const note = exhausted ? `This reply used all ${previous.limit} browser actions.` : "";
   if ($("action-limit-note").textContent !== note) $("action-limit-note").textContent = note;
-  $("continue-actions").hidden = !exhausted;
-  $("continue-actions").disabled = switching || !ready || removing || !$("model").value;
+  $("exhausted-turn").hidden = !exhausted || !ready || !auth.canInfer || removing;
+  $("continue-actions").disabled = switching || !ready || removing || !picker.model;
 }
 function updateChatURL() {
   if (window.top !== window || removing) return;
   const url = new URL(location.href);
-  if (chat.messages.length || $("prompt").value || contexts.length) url.searchParams.set("chat", chat.id);
+  if (!temporaryId && (chat.messages.length || $("prompt").value || contexts.length)) url.searchParams.set("chat", chat.id);
   else url.searchParams.delete("chat");
   history.replaceState(null, "", url);
 }
@@ -300,11 +320,24 @@ function appendMessage(message, index) {
   }
   else {
     article.setAttribute("aria-label", "Safari Chat response");
-    if (Number.isFinite(message.workMs)) {
-      const duration = document.createElement("p"); duration.className = "work-time";
-      duration.textContent = `Worked for ${Math.max(1, Math.round(message.workMs / 1000))}s`; article.append(duration);
+    if (Number.isFinite(message.workMs) || message.toolErrors?.length) {
+      const failed = message.toolErrors || [];
+      const work = document.createElement(failed.length ? "details" : "p"); work.className = "work-time";
+      const duration = Number.isFinite(message.workMs) ? `Worked for ${Math.max(1, Math.round(message.workMs / 1000))}s` : "Browser actions";
+      if (failed.length) {
+        const summary = document.createElement("summary"); summary.textContent = duration + " · Action details"; work.append(summary);
+        const list = document.createElement("ul");
+        for (const item of failed) {
+          const li = document.createElement("li"); li.textContent = (actionNames[item.operation] || "Page action") + " — " + item.detail; list.append(li);
+        }
+        work.append(list);
+      } else work.textContent = duration;
+      article.append(work);
     }
-    const body = document.createElement("div"); body.className = "message-content"; body.innerHTML = markdown(message.text);
+    const body = document.createElement("div"); body.className = "message-content";
+    const errorOnly = message.error && message.errorMessage === message.text;
+    if (errorOnly) { body.textContent = message.text; body.classList.add("message-error"); }
+    else body.innerHTML = markdown(message.text);
     article.append(body);
     if (chat.messages[index - 1]?.role === "user" && !(running && index === chat.messages.length - 1)) {
       const retry = messageButton(message.error ? "Retry" : "Try again", "M3 11a9 9 0 1 1 2 7M3 4v7h7");
@@ -313,7 +346,10 @@ function appendMessage(message, index) {
       retry.onclick = guard(() => startResponse(branchChat(chat, index - 1)));
       tools.append(retry);
     }
-    if (message.error) { const hint = document.createElement("div"); hint.className = "message-error"; hint.textContent = "This response did not complete."; article.append(hint); }
+    if (message.error && !errorOnly) {
+      const hint = document.createElement("div"); hint.className = "message-error";
+      hint.textContent = message.errorMessage || "This response did not complete."; article.append(hint);
+    }
     if (running && message === chat.messages.at(-1)) { currentAssistant = body; tools.hidden = true; }
   }
   article.append(tools);
@@ -341,10 +377,12 @@ function addContext(context) {
   scheduleDraft();
   if (context.truncated) notice("This source was trimmed to your context limit.", true);
 }
-async function attachPage(tabId = sourceTab, selection = false) {
+async function attachPage(tabId = sourceTab, selection = false, tab) {
   if (!Number.isInteger(tabId) || tabId < 0) throw new Error("Open the extension from the Safari tab you want to read.");
   const owner = chat;
-  const context = await rpc("context.read", { tabId, selection });
+  const expectedOrigin = tab?.needsWebsiteAccess ? await tabAccess.identify(tabId, tab.title) : undefined;
+  if (owner !== chat || removing) return;
+  const context = await rpc("context.read", { tabId, selection, expectedOrigin });
   if (owner === chat && !removing) addContext(context);
 }
 async function takeSharedContext() {
@@ -358,19 +396,24 @@ async function takeSharedContext() {
   else addContext(source);
 }
 function setRunning(value) {
+  if (!value && runMode) {
+    runMode = null;
+    paintModelPicker();
+  }
   running = value; $("send-button").hidden = value; $("stop-button").hidden = !value;
-  for (const id of ["new-button", "history-button", "model", "effort", "signout-button", "account-button", "web-search", "search-chip"]) $(id).disabled = value || switching || removing || !ready;
+  for (const id of ["new-button", "chat-mode", "work-mode", "model-trigger", "effort", "signout-button", "account-button", "web-search", "search-chip"]) $(id).disabled = value || switching || removing || !ready;
   $("source-button").disabled = removing || !ready;
-  $("history-button").disabled ||= !auth.generation;
+  $("history-button").disabled = switching;
+  $("temporary-button").disabled = value || switching || removing || !ready || !auth.connected;
   $("signout-button").disabled ||= !auth.connected;
-  $("model").disabled ||= !modelChoices.length;
+  if (value) picker.close();
   $("retry-models").disabled = value || switching || removing || !ready;
   websiteUI.refresh();
   for (const button of document.querySelectorAll("[data-chat-action]")) button.disabled = value || switching || removing;
   $("theme-setting").disabled = switching || removing || !ready;
   for (const id of Object.keys(settingFields)) $(id).disabled = switching || removing || !ready || savingFields.has(id);
   $("prompt").disabled = switching || removing || !ready;
-  for (const id of ["attach-file", "file-input", "add-button", "menu-page", "menu-tabs"]) $(id).disabled = preparing || switching || removing || !ready;
+  for (const id of ["attach-file", "file-input", "add-button", "menu-page", "menu-tabs", "work-files", "work-tabs"]) $(id).disabled = preparing || switching || removing || !ready;
   for (const button of document.querySelectorAll("#attachments button, [data-prompt]")) button.disabled = preparing || switching || removing || !ready;
   resizePrompt();
   renderActionBudget();
@@ -398,12 +441,12 @@ function settle(error, cancelled = false, terminal, runID) {
   }
   const last = chat.messages.at(-1);
   if (Number.isFinite(terminal?.workMs)) last.workMs = terminal.workMs;
-  if (error) { last.error = true; if (!last.text) last.text = cancelled ? "Response stopped." : "No response received."; notice(error); }
-  if (cancelled && !$("activity").hidden) { $("activity-label").textContent = "Page task stopped"; $("activity-detail").textContent = "Any completed changes remain on the page."; }
+  if (error) { last.error = true; last.errorMessage = error; if (!last.text) last.text = error; }
   if (terminal?.saved) acceptSave(chat, terminal.saved);
   if (terminal?.saveError) notice(`Could not save this chat: ${terminal.saveError}`);
-  if (!error) $("activity").hidden = true;
+  $("activity").hidden = true;
   setRunning(false); renderMessages(); scrollDown();
+  voice.reply(last?.text, error || cancelled);
   if (pendingShare) takeSharedContext().catch(failure => notice(failure.message));
   // Once a run is delivered, the background owns its final write even when the panel closes.
   if (terminal?.saved) persistDraft().catch(() => {});
@@ -412,14 +455,14 @@ function settle(error, cancelled = false, terminal, runID) {
     rpc("chat.save", { chat: owner }).then(saved => { if (chat === owner) { acceptSave(owner, saved); renderMessages(); } }).catch(error => notice(`Could not save this chat: ${error.message}`));
   }
 }
-function handleStream(event, runID, draftChatId) {
+function handleStream(event, runID, draftChatId, replay = false) {
   if (event.type === "data.erasing") { forgetLocalUI(); return; }
   if (removing || !running) return;
   if (event.type === "resumed") {
     if (!draftChatId || chat.id !== draftChatId) Object.assign(chat, event.chat);
-    chat.messages = [...event.chat.messages, { role: "assistant", text: event.text }];
+    chat.messages = [...event.chat.messages, { role: "assistant", text: event.text, toolErrors: event.toolErrors ?? [] }];
     renderMessages(); scrollDown(true);
-    for (const update of event.events) handleStream(update, runID);
+    for (const update of event.events) handleStream(update, runID, undefined, true);
   } else if (event.type === "run.ended") {
     const version = accountChange;
     switching = true; setRunning(false);
@@ -435,18 +478,23 @@ function handleStream(event, runID, draftChatId) {
     const state = event.state, controls = $("motion-controls"), speed = $("motion-speed");
     controls.hidden = !state.active;
     if (state.active) {
-      const name = state.kind === "scroll" ? "Scrolling " + state.direction : state.kind === "drag" ? "Dragging" : "Moving pointer";
+      const gesture = state.kind === "gesture";
+      const name = gesture ? "Playing " + state.device + " gesture" : state.kind === "scroll" ? "Scrolling " + state.direction : state.kind === "drag" ? "Dragging" : "Moving pointer";
+      $("motion-unit").textContent = gesture ? "×" : "px/s";
+      speed.setAttribute("aria-label", gesture ? "Gesture playback speed multiplier" : "Motion speed in pixels per second");
+      speed.title = gesture ? "Playback rate. Set to zero to pause." : "Pixels per second. Set to zero to pause.";
       $("motion-status").textContent = state.speed === 0 ? name + " · Paused" : name;
       if (controls.dataset.motionId !== state.id || document.activeElement !== speed) speed.value = state.speed;
       controls.dataset.motionId = state.id;
-      $("stop-motion").textContent = state.kind === "scroll" ? "Stop scrolling" : state.kind === "drag" ? "Stop dragging" : "Stop pointer";
+      $("stop-motion").textContent = gesture ? "Stop gesture" : state.kind === "scroll" ? "Stop scrolling" : state.kind === "drag" ? "Stop dragging" : "Stop pointer";
     }
   } else if (event.type === "activity") {
-    const names = { read: "Read page", click: "Click element", fill: "Fill field", select: "Choose option", set_checked: "Change checked state", scroll: "Scroll page", double_click: "Double-click", type_text: "Type into field", press_key: "Press key", select_text: "Select text", copy: "Copy selection", paste: "Paste text", delete_selection: "Delete selection", replace_selection: "Replace selection", drag: "Drag pointer", move_pointer: "Move pointer", set_speed: "Change speed", wait_motion: "Wait for motion", stop_motion: "Stop motion", navigate: "Visit page", open_tab: "Open tab", close_tab: "Close tab", list_tabs: "List tabs", web_search: "Search the web" };
+    const last = chat.messages.at(-1);
+    if (!replay && event.state === "error" && event.detail) last.toolErrors = [...(last.toolErrors || []), { operation: event.operation, detail: event.detail.slice(0, 300) }].slice(-8);
     $("activity").hidden = false;
     $("activity").dataset.state = event.state;
     if (currentAssistant && !chat.messages.at(-1).text) currentAssistant.textContent = "";
-    $("activity-label").textContent = `${names[event.operation] || "Page action"} · ${event.state === "working" ? "In progress" : event.state === "error" ? "Could not complete" : "Done"}`;
+    $("activity-label").textContent = `${actionNames[event.operation] || "Page action"} · ${event.state === "working" ? "In progress" : event.state === "error" ? "Could not complete" : event.state === "unmatched" ? "No match" : "Done"}`;
     $("activity-detail").textContent = event.detail || "";
   } else if (event.type === "delta" || event.type === "replace") {
     chat.messages.at(-1).text = event.type === "replace" ? event.text : chat.messages.at(-1).text + event.text;
@@ -466,18 +514,20 @@ function handleStream(event, runID, draftChatId) {
   else if (event.type === "usage") { $("usage").textContent = `${(event.usage.input + event.usage.output).toLocaleString()} tokens`; $("usage").title = `${event.usage.input} input · ${event.usage.cached} cached · ${event.usage.output} output · ${event.usage.requests} requests`; }
   else if (event.type === "approval") websiteUI.show(event);
   else if (event.type === "done") settle(null, false, event, runID);
-  else if (event.type === "error" || event.type === "cancelled") settle(event.type === "cancelled" && (!event.message || event.message.includes("abort")) ? "Response stopped." : event.message, event.type === "cancelled", event, runID);
+  else if (event.type === "error" || event.type === "cancelled") settle(event.message || (event.type === "cancelled" ? "Response stopped." : "The request could not finish."), event.type === "cancelled", event, runID);
 }
 async function send(event) {
   event?.preventDefault(); if (running || switching || removing || !ready) return;
   const text = $("prompt").value.trim(); if (!text) return;
+  voice.stop();
   await startResponse({ ...chat, messages: [...chat.messages, { role: "user", text, contexts: structuredClone(contexts) }], title: chat.messages.length ? chat.title : text.slice(0, 80) });
 }
 async function startResponse(candidate, { keepDraft = false } = {}) {
   if (running || switching || removing || !ready) return;
   if (!auth.connected || !auth.canInfer) throw new Error("Connect your ChatGPT account or API key in the companion app first.");
-  if (!$("model").value) throw new Error("Choose a model before sending a message.");
-  const model = $("model").value, effort = $("effort").value || "auto";
+  if (!picker.model) throw new Error("Choose a model before sending a message.");
+  const { model, effort } = picker;
+  const interactionMode = runMode = prefs.interactionMode;
   notice("");
   $("activity").hidden = true;
   port?.disconnect(); port = null;
@@ -507,7 +557,7 @@ async function startResponse(candidate, { keepDraft = false } = {}) {
   $("edit-dialog").close();
   $("prompt").focus();
   chat.messages.push({ role: "assistant", text: "" }); renderMessages(); scrollDown(true);
-  connectRun({ type: "run", chatId: chat.id, revision: chat.revision, title: chat.title, account: chat.account, generation: auth.generation, model, effort, webSearch: prefs.webSearch, messages: chat.messages.slice(0, -1) });
+  connectRun({ type: "run", chatId: chat.id, revision: chat.revision, title: chat.title, account: chat.account, generation: auth.generation, model, effort, interactionMode, webSearch: prefs.webSearch, messages: chat.messages.slice(0, -1) });
 }
 function connectRun(message) {
   try { port = browser.runtime.connect({ name: "chat" }); } catch (error) { settle(error.message, false, message.type === "resume" ? {} : undefined); return; }
@@ -515,46 +565,41 @@ function connectRun(message) {
   const runID = message.chatId;
   port.onMessage.addListener(event => { if (port === currentPort) handleStream(event, runID, message.draftChatId); });
   port.onDisconnect.addListener(() => { if (running && port === currentPort) settle("The extension disconnected. Reopen this chat to check its saved response.", false, {}); });
-  try { port.postMessage({ ...message, dockToken }); } catch (error) { settle(error.message, false, message.type === "resume" ? {} : undefined); }
+  try { port.postMessage({ ...message, dockToken, temporaryId }); } catch (error) { settle(error.message, false, message.type === "resume" ? {} : undefined); }
 }
-function renderEffort(preferred = prefs.reasoningEffort) {
-  const efforts = modelChoices.find(model => model.id === $("model").value)?.reasoningEfforts ?? [];
-  $("effort").replaceChildren();
-  for (const value of ["auto", ...efforts]) {
-    const option = document.createElement("option"); option.value = value;
-    option.textContent = EFFORT_LABELS[value]; $("effort").append(option);
-  }
-  $("effort").value = efforts.includes(preferred) ? preferred : "auto";
-  $("effort-control").hidden = efforts.length === 0;
-  $("model-name").textContent = $("model").selectedOptions[0]?.textContent ?? "Choose a model";
-  $("model").title = $("model-name").textContent;
-  $("effort-name").textContent = $("effort").selectedOptions[0]?.textContent ?? EFFORT_LABELS.auto;
+function currentMode() { return runMode ?? prefs.interactionMode; }
+function renderPlaceholder() {
+  $("prompt").placeholder = chat?.messages.length ? "Ask a follow-up" : currentMode() === "chat" ? "Ask ChatGPT" : "Work with Safari Chat";
+}
+function paintModelPicker() {
+  const chatMode = currentMode() === "chat";
+  $("chat-mode").setAttribute("aria-pressed", String(chatMode));
+  $("work-mode").setAttribute("aria-pressed", String(!chatMode));
+  document.body.dataset.mode = chatMode ? "chat" : "work";
+  picker.render(modelChoices, currentMode(), chatMode ? prefs.chatModel : prefs.model, chatMode ? prefs.chatEffort : prefs.reasoningEffort);
+  renderPlaceholder();
 }
 function renderModelChoices(choices) {
   modelChoices = choices;
-  $("model").replaceChildren();
-  for (const model of choices) { const option = document.createElement("option"); option.value = model.id; option.textContent = model.name; $("model").append(option); }
-  const hasSavedModel = choices.some(model => model.id === prefs.model);
-  const missing = prefs.model && !hasSavedModel;
-  if (!choices.length || missing) {
-    const option = document.createElement("option"); option.value = ""; option.disabled = true;
-    option.textContent = choices.length ? "Choose a model" : loadingCatalog ? "Loading models…" : "No models available";
-    $("model").prepend(option); $("model").value = "";
-  }
-  if (hasSavedModel) $("model").value = prefs.model;
-  renderEffort();
+  paintModelPicker();
   renderConnection(); setRunning(running);
 }
-async function loadModelChoices() {
+async function loadModelChoices(refresh = false) {
   const { account, generation } = auth;
   if (loadingCatalog === generation || !generation || removing) return;
-  loadingCatalog = generation; renderModelChoices(modelChoices);
+  loadingCatalog = generation; renderConnection();
   let choices = modelChoices;
-  try { choices = await rpc("models.list", { account, generation }); }
+  try {
+    const catalog = await rpc("models.list", { account, generation, refresh });
+    if (!Array.isArray(catalog)) throw new Error("Safari Chat could not read the account’s model list. Reload models to try again.");
+    choices = catalog;
+  }
   catch (error) { if (!removing && generation === auth.generation) notice(error.message); }
   finally {
     if (!removing && loadingCatalog === generation && auth.generation === generation) {
-      loadingCatalog = null; renderModelChoices(choices);
+      loadingCatalog = null;
+      if (JSON.stringify(choices) !== JSON.stringify(modelChoices)) renderModelChoices(choices);
+      else renderConnection();
     }
   }
 }
@@ -568,7 +613,8 @@ async function loadBootstrap() {
   if (result.removalPrepared) { forgetLocalUI(); return; }
   const previous = auth.account ?? "local";
   const changed = ready && (previous !== (result.auth.account ?? "local") || auth.generation !== result.auth.generation);
-  const restore = !ready || changed;
+  const sessionChanged = temporaryId !== (result.temporaryId ?? null);
+  const restore = !ready || changed || sessionChanged;
   if (restore) { clearTimeout(draftTimer); draftVersion++; ready = false; setRunning(false); }
   if (revision === preferenceRevision) prefs = { ...DEFAULTS, ...result.prefs, ...modelIntent, ...(themeOverride === null ? {} : { theme: themeOverride }) };
   auth = result.auth; accountKnown = true;
@@ -577,6 +623,8 @@ async function loadBootstrap() {
   document.querySelector(".account-avatar").textContent = ($("account-label").textContent[0] || "S").toUpperCase();
   if (restore) {
     if (changed) { clearAccountViews(); requestedChat = null; }
+    temporaryId = result.temporaryId ?? null;
+    if (sessionChanged) requestedChat = null;
     freshChat();
     $("edit-dialog").close();
     const id = result.run?.draftChatId || result.run?.chatId || requestedChat || result.activeChat; requestedChat = null;
@@ -586,6 +634,7 @@ async function loadBootstrap() {
     ready = true; setRunning(false);
     if (result.activeChat === chat.id) savedDraft = JSON.stringify({ id: chat.id, account: chat.account, text: $("prompt").value, contexts });
     if (result.run) {
+      runMode = result.run.interactionMode ?? "work"; // Pre-mode backgrounds only ran Work models.
       setRunning(true);
       chat.messages.push({ role: "assistant", text: "" }); renderMessages();
       connectRun({ type: "resume", ...result.run, account: auth.account, generation: auth.generation });
@@ -603,6 +652,8 @@ function bootstrap() {
   return bootstrapPending;
 }
 function forgetLocalUI() {
+  voice.stop();
+  temporaryId = null;
   removing = true;
   modelIntent = null; websiteUI.reset();
   attachmentUI.reset();
@@ -619,11 +670,10 @@ function forgetLocalUI() {
   $("approval-detail").textContent = ""; $("approval-title").textContent = "";
   renderMessages(); renderAttachments(); applyTheme();
   $("connect-card").hidden = true; $("account-label").textContent = "Data cleanup";
-  $("model").replaceChildren(); $("usage").textContent = ""; $("usage").removeAttribute("title");
-  renderEffort();
+  paintModelPicker(); $("usage").textContent = ""; $("usage").removeAttribute("title");
   $("file-input").value = "";
   for (const element of document.querySelectorAll("button,input,textarea,select")) element.disabled = true;
-  for (const id of ["close-button", "settings-button", "erase-data-button", "finish-removal-button", "retry-companion-button"]) $(id).disabled = false;
+  for (const id of ["close-button", "history-button", "settings-button", "erase-data-button", "finish-removal-button", "retry-companion-button"]) $(id).disabled = false;
   document.querySelectorAll("[data-close]").forEach(button => { button.disabled = false; });
   $("settings-status").textContent = ""; $("theme-status").textContent = ""; $("retry-theme").hidden = true;
   $("finish-removal-button").hidden = false;
@@ -633,13 +683,15 @@ function forgetLocalUI() {
 
 function clearAccountViews() {
   modelIntent = null; loadingCatalog = null; modelChoices = [];
-  $("model").replaceChildren(); renderEffort(); websiteUI.reset();
+  picker.close(); paintModelPicker(); websiteUI.reset();
   chats = []; editingIndex = null;
   $("history-list").replaceChildren(); $("history-search").value = ""; $("edit-prompt").value = "";
   $("approval-title").textContent = ""; $("approval-detail").textContent = ""; $("usage").removeAttribute("title");
   for (const id of ["history-dialog", "edit-dialog", "settings-dialog"]) $(id).close();
 }
 function accountChanged() {
+  voice.stop();
+  temporaryId = null;
   accountKnown = false; accountChange++; clearTimeout(draftTimer); draftVersion++; cancelPreparation = true;
   ready = false; switching = false; setRunning(false);
   const oldPort = port; port = null; oldPort?.disconnect();
@@ -665,7 +717,8 @@ function syncFields() {
 }
 function openSettings() {
   $("theme-setting").value = prefs.theme; syncFields();
-  $("settings-dialog").showModal();
+  $("history-dialog").close();
+  if (!$("settings-dialog").open) $("settings-dialog").showModal();
 }
 function renderHistory() {
   $("history-list").replaceChildren();
@@ -674,7 +727,8 @@ function renderHistory() {
     const row = document.createElement("div"); row.className = "list-row";
     const open = document.createElement("button"); open.textContent = item.title;
     if (item.id === chat.id) open.setAttribute("aria-current", "true");
-    const date = document.createElement("small"); date.textContent = `${item.id === chat.id ? "Current chat · " : ""}${item.draft ? "Draft · " : ""}${new Date(item.updated).toLocaleDateString()}`; open.append(date);
+    open.title = item.title + "\n" + new Date(item.updated).toLocaleDateString();
+    if (item.draft) { const draft = document.createElement("small"); draft.textContent = "Draft"; open.append(draft); }
     open.onclick = guard(() => navigateChat(item.id));
     const remove = document.createElement("button"); remove.className = "icon-button"; remove.textContent = "×"; remove.setAttribute("aria-label", `Delete ${item.title}`);
     remove.onclick = guard(async () => {
@@ -684,6 +738,7 @@ function renderHistory() {
       if (chat.id === item.id) { freshChat(); await persistDraft(); }
       renderHistory();
     });
+    open.disabled = remove.disabled = running || switching || removing;
     row.append(open, remove); $("history-list").append(row);
   }
   if (!$("history-list").children.length) $("history-list").textContent = query ? "No matching chats." : "No chats yet.";
@@ -692,7 +747,7 @@ function renderHistory() {
 $("composer").onsubmit = guard(send);
 $("prompt").onkeydown = guard(event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) return send(event); });
 $("prompt").oninput = () => { resizePrompt(); scheduleDraft(); };
-$("stop-button").onclick = () => { if (preparing) cancelPreparation = true; port?.postMessage({ type: "cancel" }); websiteUI.dismiss(); };
+$("stop-button").onclick = () => { voice.stop(); if (preparing) cancelPreparation = true; port?.postMessage({ type: "cancel" }); websiteUI.dismiss(); };
 $("stop-motion").onclick = () => port?.postMessage({ type: "motion.stop", id: $("motion-controls").dataset.motionId });
 $("motion-speed").onchange = () => {
   const field = $("motion-speed");
@@ -700,7 +755,24 @@ $("motion-speed").onchange = () => {
 };
 $("motion-speed").onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } };
 $("new-button").onclick = guard(() => navigateChat());
-$("close-button").onclick = guard(async () => { await persistDraft(); await rpc("panel.close"); if (window.top === window) window.close(); });
+$("temporary-button").onclick = guard(async () => {
+  if (running || switching || !ready) return;
+  voice.stop();
+  const version = accountChange;
+  switching = true; setRunning(false);
+  try {
+    await persistDraft();
+    if (version !== accountChange || removing) return;
+    const wasTemporary = !!temporaryId;
+    const result = await rpc(wasTemporary ? "temporary.end" : "temporary.start", { account: auth.account });
+    if (version !== accountChange || removing) return;
+    temporaryId = wasTemporary ? null : result;
+    ready = false; requestedChat = null;
+    freshChat();
+  } finally { switching = false; setRunning(false); }
+  await bootstrap(); $("prompt").focus();
+});
+$("close-button").onclick = guard(async () => { voice.stop(); await persistDraft(); await rpc("panel.close"); if (window.top === window) window.close(); });
 $("edit-form").onsubmit = guard(async event => {
   event.preventDefault(); $("edit-error").hidden = true;
   try { await startResponse(branchChat(chat, editingIndex, $("edit-prompt").value)); }
@@ -714,18 +786,25 @@ const attachmentUI = setupAttachments({
   state: () => ({ owner: chat, contexts, pageChars: prefs.pageChars, blocked: preparing || switching || removing || !ready }),
   add: addContext, readPage: attachPage, listTabs: () => rpc("tabs.list"), report: message => notice(message),
 });
-const websiteUI = setupWebsiteControls({
+$("work-files").onclick = () => $("file-input").click();
+$("work-tabs").onclick = () => $("menu-tabs").click();
+const tabAccess = setupTabAccess(() => websiteUI.access, rpc);
+const websiteUI = setupWebsiteControls({ tabAccess,
   state: () => ({ account: auth.account, generation: auth.generation, enabled: ready && auth.connected && !removing && !switching }),
   rpc, openSettings, answer: reply => port?.postMessage(reply), report: notice,
 });
 document.querySelectorAll("[data-prompt]").forEach(button => { button.onclick = guard(async () => {
+  attachmentUI.closeMenu();
   if (button.dataset.prompt === "summarize") { await attachPage(); $("prompt").value = "Summarize this page. Highlight the key points and anything I should pay attention to."; }
   if (button.dataset.prompt === "explain") { await attachPage(sourceTab, true); $("prompt").value = "Explain this in clear, simple terms."; }
   if (button.dataset.prompt === "write") $("prompt").value = "Help me write ";
   resizePrompt(); scheduleDraft(); $("prompt").focus();
 }); });
 $("settings-button").onclick = openSettings;
-$("retry-models").onclick = guard(async () => { notice(""); await loadModelChoices(); });
+$("retry-models").onclick = guard(async () => { notice(""); await loadModelChoices(true); });
+$("model-popover").addEventListener("beforetoggle", event => {
+  if (event.newState === "open" && ready && auth.canInfer && !running) loadModelChoices().catch(error => notice(error.message));
+});
 $("theme-setting").onchange = guard(() => changeTheme($("theme-setting").value));
 async function chooseSearch(enabled) {
   attachmentUI.closeMenu(); $("web-search").disabled = true; $("search-chip").disabled = true;
@@ -776,23 +855,90 @@ for (const [id, key] of Object.entries(settingFields)) $(id).onchange = async ()
     field.disabled = switching || removing || !ready;
   }
 };
-function saveModelSelection() {
-  renderActionBudget();
-  $("effort-name").textContent = EFFORT_LABELS[$("effort").value];
-  const choice = { model: $("model").value, reasoningEffort: $("effort").value };
-  modelIntent = choice; Object.assign(prefs, choice); preferenceRevision++;
-  modelSave = modelSave.catch(() => {}).then(() => {
-    if (modelIntent === choice && !removing) return rpc("settings.save", { settings: choice });
-  }).finally(() => { if (modelIntent === choice) modelIntent = null; });
+function saveResponseSettings(patch) {
+  const choice = modelIntent = { ...modelIntent, ...patch };
+  const generation = auth.generation;
+  Object.assign(prefs, patch); preferenceRevision++;
+  renderModelChoices(modelChoices);
+  modelSave = modelSave.catch(() => {}).then(async () => {
+    if (choice !== modelIntent || removing || generation !== auth.generation) return;
+    try { await rpc("settings.save", { settings: choice }); }
+    finally { if (modelIntent === choice) modelIntent = null; }
+  });
   return modelSave;
 }
-$("model").onchange = guard(() => { renderEffort($("effort").value); return saveModelSelection(); });
-$("effort").onchange = guard(saveModelSelection);
+const voice = createVoice({
+  report: text => notice(text),
+  insert(text) {
+    const input = $("prompt"), start = input.selectionStart, end = input.selectionEnd;
+    const prefix = start && !/\s$/.test(input.value.slice(0, start)) ? " " : "";
+    const suffix = end < input.value.length && !/^\s/.test(input.value.slice(end)) ? " " : "";
+    const insertion = prefix + text + suffix;
+    if (input.value.length - (end - start) + insertion.length > input.maxLength) {
+      voice.stop(); notice("Dictation reached the message length limit."); return;
+    }
+    input.setRangeText(insertion, start, end, "end");
+    resizePrompt(); scheduleDraft();
+  },
+  async submit(text) {
+    if (running || switching || removing || !ready) { voice.stop(); return; }
+    const keepDraft = !!$("prompt").value;
+    const sources = keepDraft ? [] : structuredClone(contexts);
+    await startResponse({ ...chat, messages: [...chat.messages, { role: "user", text, contexts: sources }], title: chat.messages.length ? chat.title : text.slice(0, 80) }, { keepDraft });
+  },
+  update(mode, phase, text) {
+    for (const [id, selected, label, key] of [
+      ["dictate-button", mode === "dictate", mode === "dictate" ? "Finish dictation" : "Dictate", "D"],
+      ["voice-button", mode === "voice", mode === "voice" ? "End Voice" : "Start Voice", "V"],
+    ]) {
+      const button = $(id);
+      button.setAttribute("aria-pressed", String(selected)); button.setAttribute("aria-label", label);
+      button.title = label + " (⌃⇧" + key + ")";
+    }
+    const status = $("voice-status");
+    status.hidden = !mode;
+    status.textContent = text || ({ starting: "Starting microphone…", listening: "Listening…", waiting: "Waiting for reply…", speaking: "Speaking…" })[phase] || "";
+    resizePrompt();
+  },
+});
+$("dictate-button").onclick = () => voice.toggle("dictate");
+$("voice-button").onclick = () => voice.toggle("voice");
+const picker = setupModelPicker((model, effort) => {
+  const change = currentMode() === "chat" ? { chatModel: model, chatEffort: effort } : { model, reasoningEffort: effort };
+  saveResponseSettings(change).catch(error => notice(error.message));
+});
+for (const mode of ["chat", "work"]) $(mode + "-mode").onclick = guard(() => saveResponseSettings({ interactionMode: mode }));
+function toggleSearch(open) {
+  const input = $("history-search");
+  input.hidden = !open;
+  $("search-history").setAttribute("aria-expanded", String(open));
+  if (open) input.focus();
+  else { input.value = ""; renderHistory(); }
+}
+$("search-history").onclick = () => toggleSearch($("history-search").hidden);
+$("recents-button").onclick = () => { toggleSearch(false); $("history-heading").scrollIntoView({block:"nearest"}); };
 $("history-button").onclick = guard(async () => {
-  const owner = chat;
-  await persistDraft(); if (owner !== chat || removing) return;
-  const items = await rpc("chats.list"); if (owner !== chat || removing) return;
-  chats = items; renderHistory(); $("history-dialog").showModal();
+  const owner = chat, drawer = $("history-dialog");
+  if (drawer.open) { drawer.close(); return; }
+  chats = []; toggleSearch(false);
+  drawer.showModal(); $("history-button").setAttribute("aria-expanded", "true");
+  if (!auth.generation || removing) return;
+  if (!running) await persistDraft();
+  const items = await rpc("chats.list");
+  if (owner === chat && drawer.open) { chats = items; renderHistory(); }
+});
+$("history-dialog").addEventListener("close", () => $("history-button").setAttribute("aria-expanded", "false"));
+$("history-dialog").addEventListener("click", event => {
+  if (event.target === $("history-dialog") && event.clientX >= $("history-dialog").getBoundingClientRect().right) $("history-dialog").close();
+});
+document.addEventListener("keydown", event => {
+  if (event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey && !event.repeat && ["d", "v"].includes(event.key.toLowerCase())) {
+    const button = $(event.key.toLowerCase() === "d" ? "dictate-button" : "voice-button");
+    if (!button.disabled && !$("composer").hidden && !document.querySelector("dialog[open]")) { event.preventDefault(); button.click(); }
+  }
+  if (event.metaKey && event.shiftKey && event.key.toLowerCase() === "s" && !event.altKey && !event.ctrlKey) {
+    event.preventDefault(); $("history-button").click();
+  }
 });
 $("history-search").oninput = renderHistory;
 $("signout-button").onclick = guard(async () => { await persistDraft(); const result = await rpc("auth.signout"); $("settings-dialog").close(); await bootstrap(); notice(result.message); });
@@ -810,15 +956,17 @@ async function refreshOnFocus() {
   if (!removing && generation === auth.generation && state?.generation !== generation) accountChanged();
 }
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") persistDraft().catch(() => {});
+  if (document.visibilityState === "hidden") { voice.stop(); persistDraft().catch(() => {}); }
   else refreshOnFocus().catch(error => notice(error.message));
 });
-window.addEventListener("pagehide", () => { persistDraft().catch(() => {}); });
+window.addEventListener("pagehide", () => { voice.stop(); persistDraft().catch(() => {}); });
 window.addEventListener("focus", () => refreshOnFocus().catch(error => notice(error.message)));
 freshChat();
 setRunning(false);
-function openPanel() {
-  bootstrap().catch(error => { accountKnown = true; renderConnection(); notice(error.message); });
+async function openPanel() {
+  try { await bootstrap(); }
+  catch (error) { accountKnown = true; renderConnection(); notice(error.message); }
+  if (embedded && dockToken) await rpc("panel.visible").catch(() => {});
 }
 if (embedded) {
   const mount = async event => {

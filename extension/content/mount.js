@@ -104,13 +104,13 @@
         if (!positioned && /^(hidden|clip)$/.test(style.overflowX)) resizedClips.set(element, rect.right);
         const extra = style.boxSizing === "border-box" ? 0 : [style.paddingLeft, style.paddingRight, style.borderLeftWidth, style.borderRightWidth].reduce((sum, value) => sum + (parseFloat(value) || 0), 0);
         setStyle(element, "min-width", "0");
-        setStyle(element, "max-width", `${Math.max(0, available - extra)}px`);
+        setStyle(element, "max-width", `max(0px, calc(var(--safari-chat-page-width) - ${leftGap + rightGap + extra}px))`);
         rect = element.getBoundingClientRect();
       }
       const shift = Math.max(leftGap - rect.left, Math.min(0, pageRight - rightGap - rect.right));
       if (positioned && Math.abs(shift) >= 0.5) {
         const translation = style.translate === "none" ? ["0px"] : components(style.translate);
-        translation[0] = `calc(${translation[0]} + ${shift}px)`;
+        translation[0] = shift < 0 ? `calc(${translation[0]} + var(--safari-chat-page-width) - ${pageRight - shift}px)` : `calc(${translation[0]} + ${shift}px)`;
         setStyle(element, "translate", translation.join(" "));
       }
       if (element.getBoundingClientRect().right > pageRight + 2) containOverflow(element, pageRight);
@@ -121,11 +121,13 @@
     animation = null;
     observer?.disconnect();
     const offsets = [];
-    for (const [box, change] of changes) {
-      if (box.scrollLeft && change.properties.has("overflow-x")) offsets.push([box, box.scrollLeft]);
+    if (!drag) {
+      for (const [box, change] of changes) {
+        if (box.scrollLeft && change.properties.has("overflow-x")) offsets.push([box, box.scrollLeft]);
+      }
+      restoreStyles();
     }
-    restoreStyles();
-    if (!host?.isConnected || !document.body) { close(); return; }
+    if (!host?.isConnected) { close(); return; }
     const root = document.documentElement;
     const viewportWidth = root.clientWidth || innerWidth;
     const { min, max } = widthLimits(viewportWidth);
@@ -141,7 +143,10 @@
     setStyle(root, "min-width", "0");
     setStyle(root, "max-width", `${pageRight}px`);
     setStyle(root, "margin-right", `${panelWidth}px`);
-    fitPage(viewportWidth, pageRight);
+    setStyle(root, "--safari-chat-page-width", `${pageRight}px`);
+    // Keep the seam under the pointer. The costly site-specific overflow pass
+    // runs on release; the root and constrained elements reflow live with CSS.
+    if (!drag && document.body) fitPage(viewportWidth, pageRight);
     for (const [box, left] of offsets) if (changes.get(box)?.properties.has("overflow-x")) box.scrollLeft = left;
     observer.observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ["style", "class"] });
   }
@@ -176,6 +181,7 @@
     if (handle?.hasPointerCapture(id)) handle.releasePointerCapture(id);
     handle?.removeAttribute("data-dragging");
     if (frame) frame.style.pointerEvents = "";
+    scheduleLayout();
     saveWidth();
   }
 
@@ -183,9 +189,11 @@
     const style = document.createElement("style");
     style.textContent = `
       .resize { position:absolute; inset:0 auto 0 0; width:9px; cursor:col-resize; touch-action:none; user-select:none; outline:none; }
-      .resize::after { content:""; position:absolute; inset:0 auto 0 0; width:3px; background:transparent; transition:background .15s; }
-      .resize:hover::after, .resize:focus-visible::after, .resize[data-dragging]::after { background:#888; }
-      .resize:focus-visible { outline:2px solid CanvasText; outline-offset:-2px; }
+      .resize::after { content:""; position:absolute; left:2px; top:50%; width:4px; height:24px; transform:translateY(-50%); border-radius:2px; background:#888; opacity:0; transition:opacity .12s; }
+      .resize:hover::after, .resize:focus-visible::after, .resize[data-dragging]::after { opacity:1; }
+      .resize:focus-visible:not([data-dragging])::after { outline:2px solid Highlight; outline-offset:2px; }
+      @media (forced-colors:active) { .resize::after { background:ButtonText; forced-color-adjust:none; } }
+      @media (prefers-reduced-motion:reduce) { .resize::after { transition:none; } }
       .load-status { position:absolute; inset:0; box-sizing:border-box; display:grid; place-content:center; gap:12px; padding:20px; text-align:center; font:14px/1.45 system-ui; background:Canvas; color:CanvasText; border-left:1px solid #8884; }
       .load-status[hidden], .load-status button[hidden] { display:none; }
       .load-status p { max-width:32ch; margin:0 auto; }
@@ -230,12 +238,12 @@
     shadow.append(style, handle);
   }
 
-  function loadFrame(url) {
+  function loadFrame(url, restore = false) {
     clearTimeout(openTimer);
     frame.inert = true;
     if (loadStatus.getRootNode().activeElement === retryButton) loadStatus.querySelector(".close").focus({ preventScroll: true });
     loadStatus.hidden = false;
-    loadMessage.textContent = "Opening Safari Chat\u2026";
+    loadMessage.textContent = restore ? "" : "Opening Safari Chat\u2026";
     retryButton.hidden = true;
     frame.src = url;
     openTimer = setTimeout(() => {
@@ -301,7 +309,7 @@
     if (typeof message.url !== "string" || message.url.split(/[?#]/)[0] !== browser.runtime.getURL("panel/panel.html")) return Promise.reject(new Error("Invalid panel URL."));
     if (!message.restore) removalCount = 0;
     if (!host?.isConnected) {
-      if (!document.body) return Promise.resolve({ ok: false });
+      if (!document.documentElement) return Promise.resolve({ ok: false });
       token = message.token;
       if (!token) return Promise.resolve({ ok: false });
       if (Number.isInteger(message.width)) preferredWidth = message.width;
@@ -319,12 +327,13 @@
       // must never receive it through URLs, resource timing, or a DOM attribute.
       const destination = new URL(message.url);
       const targetOrigin = destination.protocol + "//" + destination.host;
+      frame.setAttribute("allow", "microphone " + targetOrigin);
       frame.addEventListener("load", () => frame?.contentWindow?.postMessage({ type: "safari-chat.mount", token }, targetOrigin));
       frame.style.cssText = "display:block;box-sizing:border-box;width:100%;height:100%;border:0;border-left:1px solid #8884;background:Canvas;";
       shadow.append(frame);
       addLoadStatus(shadow, message.url);
       addResizeHandle(shadow);
-      loadFrame(message.url);
+      loadFrame(message.url, message.restore);
       document.documentElement.append(host);
       observer = new MutationObserver(records => {
         if (!host?.isConnected) {

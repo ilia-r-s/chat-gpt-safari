@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Safari Chat",
-  "version": "0.3.6",
+  "version": "0.3.9",
   "description": "An independent ChatGPT companion: chat, page context, and permission-based browser actions in Safari.",
   "permissions": [
     "activeTab",
+    "tabs",
     "scripting",
     "storage",
     "contextMenus",

@@ -3,6 +3,78 @@ import assert from "node:assert/strict";
 import { chatPort, fixture } from "./background-fixture.mjs";
 
 const turn = { type: "run", generation: "session-a", chatId: "00000000-0000-4000-8000-000000000011", title: "First", account: "account-a", model: "model-a", messages: [{ role: "user", text: "First" }] };
+test("temporary drafts and replies survive a pane reload without entering the regular history or active-chat pointer", async () => {
+  const f = await fixture({ catalog: { models: [{ slug: "gpt-6-sol", display_name: "GPT-6 Sol", visibility: "list", supported_reasoning_levels: ["medium"] }] } }), events = [];
+  const rpc = (type, fields = {}) => f.events.message({ type, generation: turn.generation, account: turn.account, tabId: 1, ...fields }, f.sender);
+  const draft = (id, text) => ({ id, text, account: turn.account, revision: 0, chatRevision: 0 });
+  assert.ok((await rpc("draft.save", { draft: draft(turn.chatId, "ordinary draft") })).ok);
+  const { value: temporaryId } = await rpc("temporary.start");
+  const chatId = "00000000-0000-4000-8000-000000000012";
+  const privateDraft = draft(chatId, "temporary follow-up");
+  assert.ok((await rpc("draft.save", { temporaryId, draft: privateDraft })).ok);
+  await chatPort(f, event => events.push(event))({ ...turn, interactionMode: "chat", model: "gpt-6", effort: "medium", temporaryId, chatId, messages: [{ role: "user", text: "temporary conversation" }] });
+  assert.equal(events.at(-1).type, "done");
+  assert.ok(f.requests[0].tools.some(tool => tool.name === "safari"));
+  assert.equal(f.requests[0].store, false);
+  const restored = (await rpc("bootstrap")).value;
+  assert.equal(restored.temporaryId, temporaryId); assert.equal(restored.activeChat, chatId);
+  assert.equal((await rpc("draft.load", { temporaryId, id: chatId })).value.text, privateDraft.text);
+  assert.equal((await rpc("chat.load", { temporaryId, id: chatId })).value.messages.at(-1).text, "Hello");
+  assert.deepEqual(Array.from((await rpc("chats.list", { temporaryId })).value, chat => chat.title), ["ordinary draft"]);
+  assert.doesNotMatch(JSON.stringify(f.data), /temporary follow-up|temporary conversation|000000000012/);
+  assert.ok((await rpc("temporary.end", { temporaryId })).ok);
+  assert.equal((await rpc("bootstrap")).value.activeChat, turn.chatId);
+  assert.equal((await rpc("draft.save", { temporaryId, draft: privateDraft })).ok, false);
+  const next = (await rpc("temporary.start")).value;
+  assert.notEqual(next, temporaryId);
+  assert.equal((await rpc("chat.load", { temporaryId: next, id: chatId })).value, undefined);
+  await f.events.removed(1);
+  assert.equal((await rpc("bootstrap")).value.temporaryId, null);
+});
+
+test("the configured deadline includes approvals and survives a panel reattachment and a preference change", async t => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1000 });
+  const toolRequest = { operation: "open_tab", url: "https://example.com/" };
+  const f = await fixture({ toolRequest, catalog: { data: [{ id: "gpt-6-sol" }] } });
+  const original = [], restored = [], approval = Promise.withResolvers();
+  const send = chatPort(f, event => { original.push(event); if (event.type === "approval") approval.resolve(); });
+  const chatTurn = { ...turn, model: "gpt-6", interactionMode: "chat", effort: "instant" };
+  const run = send(chatTurn);
+  await approval.promise;
+  const state = (await f.events.message({ type: "bootstrap", tabId: 1 }, f.sender)).value;
+  assert.equal(state.prefs.interactionMode, "chat"); assert.equal(state.prefs.turnMinutes, 10);
+  assert.deepEqual(f.requests[0].reasoning, { effort: "none" });
+  t.mock.timers.tick(5 * 60000);
+  assert.equal(original.at(-1).type, "approval");
+  send.disconnect();
+  await chatPort(f, e => restored.push(e))({ type: "resume", id: state.run.id, chatId: turn.chatId, account: turn.account, generation: turn.generation });
+  assert.equal(restored[0].type, "resumed");
+  await f.events.message({ type: "settings.save", settings: { turnMinutes: 2 } }, f.sender);
+  t.mock.timers.tick(5 * 60000);
+  await run;
+  const last = restored.at(-1), stored = f.data["chat:" + turn.chatId].messages.at(-1);
+  assert.equal(last.type, "error"); assert.match(last.message, /10-minute time limit/);
+  assert.equal(stored.errorMessage, last.message); assert.equal(stored.workMs, 600000);
+  assert.equal(f.createdTabs.length, 0);
+  const again = [], waiting = Promise.withResolvers();
+  const next = chatPort(f, e => { again.push(e); if (e.type === "approval") waiting.resolve(); });
+  f.requests.length = 0;
+  const followup = next({ ...chatTurn, chatId: crypto.randomUUID() });
+  await waiting.promise; t.mock.timers.tick(2 * 60000); await followup;
+  assert.match(again.at(-1).message, /2-minute time limit/); assert.equal(f.createdTabs.length, 0);
+});
+
+test("work tool failures reach the model and the stored action details", async () => {
+  const f = await fixture({ toolRequest: { operation: "mistyped_action" } }), events = [];
+  await chatPort(f, event => events.push(event))(turn);
+  const answer = f.data["chat:" + turn.chatId].messages.at(-1);
+  const output = JSON.parse(f.requests[1].input.find(item => item.type === "function_call_output").output);
+  assert.match(output.error, /Unknown browser action/);
+  assert.equal(answer.toolErrors[0].detail, output.error);
+  assert.equal(answer.toolErrors[0].operation, "mistyped_action");
+  assert.equal(answer.browserActions.used, 1);
+});
+
 for (const notify of [true, false]) test(`a pending approval cannot cross a same-account reconnection, native event ${notify}`, { timeout: 3000 }, async () => {
   const f = await fixture({ toolRequest: { operation: "open_tab", url: "https://example.com/" } });
   const terminal = [], pending = Promise.withResolvers();
@@ -104,6 +176,19 @@ test("bootstrap never returns the bearer credential to the UI", async () => {
   assert.equal(catalog.value[0].id, "model-a");
   assert.ok(!JSON.stringify(catalog).includes("mock-private-token"));
   assert.ok(!JSON.stringify(result).includes("mock-private-token"));
+});
+test("concurrent pickers share one model catalog request and explicit refresh picks up changed access", async () => {
+  const entry = { slug: "future-model", visibility: "list", display_name: "New model", supported_reasoning_levels: ["medium"] };
+  const catalog = { models: [entry] };
+  const f = await fixture({ catalog });
+  const list = (refresh = false) => f.events.message({ type: "models.list", account: turn.account, generation: turn.generation, refresh }, f.sender);
+  await Promise.all([list(), list(), list()]);
+  assert.equal(f.nativeRequests.filter(name => name === "auth.credential").length, 1);
+  entry.supported_reasoning_levels.push("ultra");
+  assert.deepEqual(Array.from((await list()).value[0].reasoningEfforts), ["medium"]);
+  assert.deepEqual(Array.from((await list(true)).value[0].reasoningEfforts), ["medium", "ultra"]);
+  catalog.models = [];
+  assert.equal((await list(true)).value.length, 0);
 });
 test("a temporary extension explains setup without opening an invalid Safari tab", async () => {
   const f = await fixture({ nativeUnavailable: true });

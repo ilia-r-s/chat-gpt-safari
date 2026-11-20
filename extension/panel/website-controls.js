@@ -4,16 +4,15 @@ import { sitePermissionPattern } from "../core/website-access.js";
 const $ = id => document.getElementById(id);
 const emptyAccess = () => ({ mode: "ask", allowed: [], blocked: [] });
 
-export function setupWebsiteControls({ state, rpc, answer, openSettings, report }) {
+export function setupWebsiteControls({ state, rpc, answer, openSettings, report, tabAccess }) {
   const closeMode = anchorPopover($("access-menu"), $("actions-guidance"), 292);
   const closeChoices = anchorPopover($("approval-options"), $("approval-more"), 264);
   let access = emptyAccess(), revision = 0, saving = null, pending = null;
 
   function refresh() {
     const disabled = !state().enabled || !!saving;
-    for (const id of ["actions-guidance", "ask-mode", "auto-mode", "default-access", "site-host", "site-rule", "save-site"]) $(id).disabled = disabled;
+    for (const id of ["actions-guidance", "ask-mode", "auto-mode", "site-host", "site-rule", "save-site"]) $(id).disabled = disabled;
     for (const button of $("site-list").querySelectorAll("button")) button.disabled = disabled;
-    $("default-access").value = access.mode;
     $("mode-label").textContent = access.mode === "auto" ? "Approve for me" : "Ask for approval";
     $("ask-mode").setAttribute("aria-pressed", String(access.mode === "ask"));
     $("auto-mode").setAttribute("aria-pressed", String(access.mode === "auto"));
@@ -56,38 +55,46 @@ export function setupWebsiteControls({ state, rpc, answer, openSettings, report 
     }
   }
   function dismiss() {
+    if (pending?.tabLabel) tabAccess.close();
     pending = null; closeChoices(); $("approval").hidden = true;
     $("approval-path").hidden = true;
-    $("approval-path").querySelector("polyline").removeAttribute("points");
+    $("approval-path").querySelector("svg").replaceChildren();
     $("approval-detail").textContent = ""; $("approval-title").textContent = ""; $("allow-host").textContent = "";
   }
-  function respond(allow, scope = "once") {
+  function respond(allow, scope = "once", origin) {
     if (!pending) return;
     const id = pending.id;
     dismiss();
-    answer({ type: "approval", id, allow, scope });
+    answer({ type: "approval", id, allow, scope, ...(origin && { origin }) });
     $("prompt").focus();
   }
   function show(request) {
     pending = request; closeChoices();
-    $("approve-button").textContent = request.siteOrigin ? "Allow in Safari…" : "Allow once";
+    $("approve-button").textContent = request.siteOrigin || request.tabLabel ? "Allow in Safari…" : "Allow once";
     $("approve-button").disabled = false;
-    $("approval-more").hidden = !!request.siteOrigin;
+    $("approval-more").hidden = !!(request.siteOrigin || request.tabLabel);
     $("approval-title").textContent = request.title;
     $("approval-detail").textContent = request.detail;
-    const preview = $("approval-path"), points = request.path;
+    const preview = $("approval-path"), paths = request.paths || (request.path ? [request.path] : []), points = paths.flat();
     preview.hidden = !points?.length;
     if (points?.length) {
       const xs = points.map(p => p[0]), ys = points.map(p => p[1]);
       const x = Math.min(...xs), y = Math.min(...ys);
       const width = Math.max(...xs) - x, height = Math.max(...ys) - y;
       const pad = Math.max(8, width * 0.08, height * 0.12);
-      preview.querySelector("svg").setAttribute("viewBox", [x - pad, y - pad, width + 2 * pad, height + 2 * pad].join(" "));
-      preview.querySelector("polyline").setAttribute("points", points.map(p => p.join(",")).join(" "));
-      preview.querySelectorAll("circle").forEach((circle, i) => {
-        const [cx, cy] = i ? points.at(-1) : points[0];
-        circle.setAttribute("cx", cx); circle.setAttribute("cy", cy); circle.setAttribute("r", pad * (i ? 0.44 : 0.3));
-      });
+      const svg = preview.querySelector("svg"), shape = tag => document.createElementNS("http://www.w3.org/2000/svg", tag);
+      svg.setAttribute("viewBox", [x - pad, y - pad, width + 2 * pad, height + 2 * pad].join(" "));
+      svg.setAttribute("aria-label", paths.length === 1 ? "Proposed path, from the dot to the ring" : "Proposed contact paths, from dots to rings");
+      svg.replaceChildren(...paths.map(path => {
+        const group = shape("g"), line = shape("polyline");
+        line.setAttribute("points", path.map(p => p.join(",")).join(" ")); group.append(line);
+        for (const [i, [cx, cy]] of [path[0], path.at(-1)].entries()) {
+          const circle = shape("circle");
+          circle.setAttribute("cx", cx); circle.setAttribute("cy", cy); circle.setAttribute("r", pad * (i ? 0.44 : 0.3));
+          group.append(circle);
+        }
+        return group;
+      }));
     }
     $("allow-site").hidden = request.hosts?.length !== 1;
     $("allow-host").textContent = request.hosts?.length === 1 ? `Automatically allow browser actions on ${request.hosts[0]}.` : "";
@@ -97,10 +104,9 @@ export function setupWebsiteControls({ state, rpc, answer, openSettings, report 
   async function chooseMode(mode) {
     closeMode();
     const request = pending;
-    if (await save({ mode }) && mode === "auto" && request && !request.siteOrigin && pending === request) respond(true);
+    if (await save({ mode }) && mode === "auto" && request && !request.siteOrigin && !request.tabLabel && pending === request) respond(true);
   }
   for (const mode of ["ask", "auto"]) $(`${mode}-mode`).onclick = () => chooseMode(mode);
-  $("default-access").onchange = () => chooseMode($("default-access").value);
   $("manage-sites").onclick = () => {
     closeMode(); openSettings(); $("website-section").open = true; $("browser-permissions").focus();
   };
@@ -110,6 +116,16 @@ export function setupWebsiteControls({ state, rpc, answer, openSettings, report 
   };
   $("approve-button").onclick = async () => {
     const request = pending;
+    if (request?.tabLabel) {
+      $("approve-button").disabled = true;
+      try {
+        const origin = await tabAccess.identify(request.tabId, request.tabLabel);
+        if (pending === request) respond(true, "once", origin);
+      } catch (error) {
+        if (pending === request) { report(error.message); respond(false); }
+      }
+      return;
+    }
     if (!request?.siteOrigin) { respond(true); return; }
     const pattern = sitePermissionPattern(request.siteOrigin);
     if (!pattern) { respond(false); return; }
@@ -132,9 +148,10 @@ export function setupWebsiteControls({ state, rpc, answer, openSettings, report 
   $("allow-all").onclick = () => respond(true, "all");
 
   function reset() {
+    tabAccess.close();
     saving = null; dismiss(); closeMode();
     $("site-host").value = ""; $("site-status").textContent = ""; $("website-section").open = false;
     update(null);
   }
-  return { update, refresh, show, dismiss, reset, get revision() { return revision; }, get saved() { return saving; } };
+  return { update, refresh, show, dismiss, reset, get access() { return access; }, get revision() { return revision; }, get saved() { return saving; } };
 }

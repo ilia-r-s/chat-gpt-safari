@@ -18,48 +18,97 @@ const documented = Object.fromEntries([
   [["o3"], ["low", "medium", "high"]],
 ].flatMap(([names, efforts]) => names.map(name => [name, efforts])));
 
-function normalizeEffort(value) { return EFFORTS.includes(value) ? value : "auto"; }
+// Keep server-advertised levels across reloads. Inference separately checks
+// membership against the selected model's current catalog entry.
+function normalizeEffort(value) { return typeof value === "string" && /^[a-z][a-z0-9_-]{0,39}$/.test(value) ? value : "auto"; }
 
 function modelCatalog(data) {
   const plan = Array.isArray(data?.models);
   const entries = plan ? data.models : Array.isArray(data?.data) ? data.data : [];
   return entries.filter(model => model && (plan ? model.visibility === "list"
-    : typeof model.id === "string" && /^(gpt-|o[134])/.test(model.id) && !/audio|realtime|transcribe|image|tts|search|instruct/.test(model.id)))
+    : typeof model.id === "string" && (model.id === "chat-latest" || /^(gpt-|o[134])/.test(model.id) && !/audio|realtime|transcribe|image|tts|search|instruct/.test(model.id))))
     .slice(0, 500).flatMap(model => {
       const id = plan ? model.slug : model.id;
       if (typeof id !== "string" || !id || id.length > 120) return [];
-      const name = typeof model.display_name === "string" && model.display_name ? model.display_name.slice(0, 160) : id;
+      const name = typeof model.display_name === "string" && model.display_name ? model.display_name.slice(0, 160) : id === "chat-latest" ? "Chat Latest (Instant)" : id;
       const supported = Array.isArray(model.supported_reasoning_levels)
         ? model.supported_reasoning_levels.map(level => typeof level === "string" ? level : level?.effort)
         : documented[id.replace(/-\d{4}-\d{2}-\d{2}$/, "")] ?? [];
-      return [{ id, name, reasoningEfforts: EFFORTS.filter(effort => supported.includes(effort)) }];
+      const advertised = [...new Set(supported.map(normalizeEffort))].filter(value => value !== "auto");
+      const reasoningEfforts = [...EFFORTS.filter(value => advertised.includes(value)), ...advertised.filter(value => !EFFORTS.includes(value))];
+      const descriptions = Object.fromEntries((Array.isArray(model.supported_reasoning_levels) ? model.supported_reasoning_levels : [])
+        .filter(level => reasoningEfforts.includes(level?.effort) && typeof level.description === "string")
+        .map(level => [level.effort, level.description.slice(0, 360)]));
+      const modes = model.supported_reasoning_modes;
+      return [{ id, name, reasoningEfforts,
+        ...(reasoningEfforts.includes(model.default_reasoning_level) && { defaultEffort: model.default_reasoning_level }),
+        ...(Object.keys(descriptions).length && { effortDescriptions: descriptions }),
+        ...(Array.isArray(modes) && { allowsPro: modes.some(mode => (mode?.mode ?? mode) === "pro") }) }];
     });
+}
+
+// Product families are a presentation of explicit Responses routes. Never place
+// an unrelated Work model under a Chat label when an account lacks a route.
+function chatFamilies(catalog) {
+  const find = (...names) => names.map(name => catalog.find(m => m.id === name) ||
+    catalog.find(m => m.id.replace(/-\d{4}-\d{2}-\d{2}$/, "") === name)).find(Boolean);
+  function family(id, name, standard, pro, dedicated, instant) {
+    const routes = {};
+    if (instant) routes.instant = { model: instant.id };
+    else if (standard?.reasoningEfforts.includes("none")) routes.instant = { model: standard.id, effort: "none" };
+    for (const effort of ["medium", "high", "xhigh"]) {
+      if (standard?.reasoningEfforts.includes(effort)) routes[effort] = { model: standard.id, effort };
+    }
+    if (dedicated) routes.pro = { model: dedicated.id };
+    else if (pro && pro.allowsPro !== false) routes.pro = { model: pro.id, reasoningMode: "pro" };
+    const reasoningEfforts = Object.keys(routes);
+    return reasoningEfforts.length ? [{ id, name, routes, reasoningEfforts, defaultEffort: standard?.defaultEffort === "none" ? "instant" : standard?.defaultEffort }] : [];
+  }
+  const sol = find("gpt-6-sol"), astra = find("gpt-6-astra"), latest = find("chat-latest");
+  const older = find("gpt-5.6-sol", "gpt-5.6");
+  const pro = find("gpt-6-pro", "gpt-6-astra-pro");
+  const standalone = !sol && !astra && !pro && latest;
+  return [
+    ...family(standalone ? latest.id : "gpt-6", standalone ? "Chat Latest" : "GPT-6", sol, astra, pro, latest),
+    ...family("gpt-5.6-sol", "GPT-5.6 Sol", older, older, find("gpt-5.6-sol-pro", "gpt-5.6-pro")),
+  ];
+}
+
+function chatLevel(family, preference) {
+  if (family && Object.hasOwn(family.routes, preference)) return preference;
+  if (family?.routes[family.defaultEffort]) return family.defaultEffort;
+  return family?.routes.medium ? "medium" : family?.reasoningEfforts[0];
 }
 
 function resolveEffort(model, value = "auto") {
   if (value === "auto") return undefined;
-  if (!EFFORTS.includes(value) || !model?.reasoningEfforts?.includes(value)) {
+  if (!model?.reasoningEfforts?.includes(value)) {
     throw new Error("This reasoning effort is not available for the selected model. Choose Model default or reload the model list.");
   }
   return value;
 }
 
-return {EFFORTS, EFFORT_LABELS, normalizeEffort, modelCatalog, resolveEffort};
+return {EFFORTS, EFFORT_LABELS, normalizeEffort, modelCatalog, chatFamilies, chatLevel, resolveEffort};
 })();
 
 // core/config.js
 modules["core/config.js"] = (() => {
 const { normalizeEffort } = modules["core/models.js"];
 const MAX_BROWSER_ACTIONS = 100;
+const MAX_TURN_MINUTES = 60;
 
 const DEFAULTS = Object.freeze({
   theme: "system",
   model: "",
   reasoningEffort: "auto",
+  interactionMode: "chat",
+  chatModel: "",
+  chatEffort: "auto",
   pageChars: 12000,
   inputChars: 48000,
   historyTurns: 8,
   maxBrowserActions: MAX_BROWSER_ACTIONS,
+  turnMinutes: 10,
   webSearch: false,
   desktopControl: false,
 });
@@ -74,10 +123,14 @@ function normalizeSettings(value = {}) {
     theme: ["system", "light", "dark"].includes(value.theme) ? value.theme : DEFAULTS.theme,
     model: typeof value.model === "string" ? value.model.slice(0, 120) : "",
     reasoningEffort: normalizeEffort(value.reasoningEffort),
+    interactionMode: value.interactionMode === "work" ? "work" : DEFAULTS.interactionMode,
+    chatModel: typeof value.chatModel === "string" ? value.chatModel.slice(0, 120) : "",
+    chatEffort: ["instant", "medium", "high", "xhigh", "pro"].includes(value.chatEffort) ? value.chatEffort : value.chatEffort === "none" ? "instant" : "auto",
     pageChars: integer(value.pageChars, DEFAULTS.pageChars, 2000, 24000),
     inputChars: integer(value.inputChars, DEFAULTS.inputChars, 12000, 96000),
     historyTurns: integer(value.historyTurns, DEFAULTS.historyTurns, 1, 20),
     maxBrowserActions: integer(value.maxBrowserActions, legacyRounds === 6 ? DEFAULTS.maxBrowserActions : legacyRounds, 1, MAX_BROWSER_ACTIONS),
+    turnMinutes: integer(value.turnMinutes, DEFAULTS.turnMinutes, 1, MAX_TURN_MINUTES),
     webSearch: value.webSearch === true,
     desktopControl: value.desktopControl === true,
   };
@@ -90,7 +143,7 @@ const INSTRUCTIONS = [
   "An excerpt marked truncated is incomplete. Explain a missing detail when it affects the answer.",
 ].join(" ");
 
-return {MAX_BROWSER_ACTIONS, DEFAULTS, normalizeSettings, INSTRUCTIONS};
+return {MAX_BROWSER_ACTIONS, MAX_TURN_MINUTES, DEFAULTS, normalizeSettings, INSTRUCTIONS};
 })();
 
 // core/context.js
@@ -217,7 +270,7 @@ return {textPrefix, compactText, safeWebURL, publicURL, boundedContexts, buildIn
 
 // core/storage.js
 modules["core/storage.js"] = (() => {
-const { MAX_BROWSER_ACTIONS, normalizeSettings } = modules["core/config.js"];
+const { MAX_BROWSER_ACTIONS, MAX_TURN_MINUTES, normalizeSettings } = modules["core/config.js"];
 const { boundedContexts, textPrefix } = modules["core/context.js"];
 const MAX_CHATS = 50;
 const MAX_MESSAGES = 80;
@@ -247,8 +300,12 @@ function prepareChat(all, chat, retainID) {
     role: m.role, text: m.text.length > 120000 ? m.text.slice(0, 119980) + "\n[Content trimmed]" : m.text,
     contexts: boundedContexts(m.contexts),
     ...(m.error ? { error: true } : {}),
-    ...(m.role === "assistant" && Number.isFinite(m.workMs) ? { workMs: Math.max(0, Math.min(300000, m.workMs)) } : {}),
+    ...(m.role === "assistant" && m.error && typeof m.errorMessage === "string" ? { errorMessage: m.errorMessage.slice(0, 1000) } : {}),
+    ...(m.role === "assistant" && Number.isFinite(m.workMs) ? { workMs: Math.max(0, Math.min(MAX_TURN_MINUTES * 60000, m.workMs)) } : {}),
     ...actionCount(m),
+    ...(m.role === "assistant" && Array.isArray(m.toolErrors) && m.toolErrors.length ? {
+      toolErrors: m.toolErrors.slice(-8).filter(e => typeof e?.detail === "string").map(e => ({ operation: String(e.operation || "").slice(0, 32), detail: e.detail.slice(0, 300) })),
+    } : {}),
   }));
   while (messages.length && messages[0].role !== "user") messages.shift();
   while (bytes(messages) > MAX_CHAT_BYTES) {
@@ -319,7 +376,12 @@ return {chatKey, settings, prepareChat, saveChat, listChats};
 // content/page.js
 modules["content/page.js"] = (() => {
 /** Self-contained functions: Safari serializes these into its isolated content-script world. */
-function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false, expectedURL = null, indicateCopy = false, pointerPaths = false) {
+function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false, expectedURL = null, indicateCopy = false, pointerPaths = false, reportError = false) {
+  // WebKit can replace a thrown exception with a generic scripting error at the process boundary.
+  if (reportError) {
+    try { return snapshotPage(limit, viewportOnly, selectionOnly, expectedURL, indicateCopy, pointerPaths); }
+    catch (error) { return { pageError: String(error.message || error).slice(0, 700) }; }
+  }
   if (expectedURL && location.href !== expectedURL) throw new Error("The tab navigated before it could be read. Choose the page again.");
   const selection = getSelection();
   const editable = node => node?.parentElement?.closest("input,textarea,[contenteditable]");
@@ -370,24 +432,25 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
       }
     }
   };
-  const visible = element => {
+  const rendered = (element, inViewport) => {
     if (!element || element.closest("[hidden],[aria-hidden='true'],[inert],#safari-chat-host")) return false;
     const style = getComputedStyle(element);
     if (style.display === "none" || style.visibility !== "visible" || style.opacity === "0" || !element.getClientRects().length) return false;
     const rect = element.getBoundingClientRect();
-    if (viewportOnly && (rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= viewportWidth)) return false;
+    if (inViewport && (rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= viewportWidth)) return false;
     let depth = 0;
     for (let parent = element.parentElement; parent; parent = parent.parentElement) {
       if (++depth > 64) return false;
       const parentStyle = getComputedStyle(parent);
       if (parentStyle.opacity === "0") return false;
-      if (!viewportOnly || parent === document.body || parent === document.documentElement) continue;
+      if (!inViewport || parent === document.body || parent === document.documentElement) continue;
       const clip = parent.getBoundingClientRect();
       if (/auto|scroll|hidden|clip/.test(parentStyle.overflowY) && (rect.bottom <= clip.top || rect.top >= clip.bottom)) return false;
       if (/auto|scroll|hidden|clip/.test(parentStyle.overflowX) && (rect.right <= clip.left || rect.left >= clip.right)) return false;
     }
     return true;
   };
+  const visible = element => rendered(element, viewportOnly);
   // Action reads include navigation and dialogs; attachments prefer the article's text.
   const root = viewportOnly ? document.body : document.querySelector("main,article,[role='main']") ?? document.body;
   if (!root) throw new Error("This page has no readable content.");
@@ -461,15 +524,11 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
   };
   // Transform-based carousels are moved through their own tab controls, never
   // by changing page styles or guessing at a product link / "Next" button.
-  const galleries = [];
-  let tablists = 0;
-  for (const list of document.querySelectorAll("[role='tablist']")) {
-    if (++tablists > 40 || galleries.length >= 4) break;
-    if (!visible(list)) continue;
+  function galleryFor(list) {
     const tabs = [...list.querySelectorAll("[role='tab']")];
-    if (tabs.length < 2 || tabs.length > 40 || tabs.some(tab => tab.closest("[role='tablist']") !== list)) continue;
+    if (tabs.length < 2 || tabs.length > 40 || tabs.some(tab => tab.closest("[role='tablist']") !== list)) return null;
     const controls = tabs.map(tab => tab.getAttribute("aria-controls"));
-    if (controls.some(id => !id || /\s/.test(id) || id.length > 256) || new Set(controls).size !== tabs.length) continue;
+    if (controls.some(id => !id || /\s/.test(id) || id.length > 256) || new Set(controls).size !== tabs.length) return null;
     const safeTab = tab => {
       if (tab.matches(":disabled,[aria-disabled='true']") || tab.closest("form") || tab.form) return false;
       if (tab.matches("a[href]")) {
@@ -480,9 +539,9 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
       }
       return tab.matches("button,[role='tab']:not(a):not(input)");
     };
-    if (!tabs.every(safeTab)) continue;
+    if (!tabs.every(safeTab)) return null;
     const selected = tabs.findIndex(tab => tab.getAttribute("aria-selected") === "true");
-    if (selected < 0 || tabs.filter(tab => tab.getAttribute("aria-selected") === "true").length !== 1) continue;
+    if (selected < 0 || tabs.filter(tab => tab.getAttribute("aria-selected") === "true").length !== 1) return null;
     let scope = list.parentElement, panels;
     for (let depth = 0; scope && depth < 6 && scope !== document.body; scope = scope.parentElement, depth++) {
       if (!/(^|[\s_-])(gallery|carousel|slideshow)([\s_-]|$)/i.test(`${scope.id} ${scope.getAttribute("class")} ${scope.getAttribute("aria-roledescription")}`)) continue;
@@ -491,10 +550,19 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
       if (panels.every(Boolean)) break;
       panels = null;
     }
-    if (!panels || !scope || scope === document.body) continue;
+    if (!panels || !scope || scope === document.body) return null;
     const orientation = list.getAttribute("aria-orientation") === "vertical" ? "vertical" : "horizontal";
     const label = (scope.getAttribute("aria-label") || scope.querySelector("h1,h2,h3,[role='heading']")?.textContent || "Gallery").trim().slice(0, 100);
-    const gallery = { scope, panels, orientation, label, rtl: getComputedStyle(list).direction === "rtl", tabs: tabs.map(tab => ({ element: tab, label: labelFor(tab), signature: signature(tab, true) })) };
+    return { scope, panels, orientation, label, selected, rtl: getComputedStyle(list).direction === "rtl", tabs: tabs.map(tab => ({ element: tab, label: labelFor(tab), signature: signature(tab, true) })) };
+  }
+  const galleries = [];
+  let tablists = 0;
+  for (const list of document.querySelectorAll("[role='tablist']")) {
+    if (++tablists > 40 || galleries.length >= 4) break;
+    if (!visible(list)) continue;
+    const gallery = galleryFor(list);
+    if (!gallery) continue;
+    const { orientation, label, selected, tabs } = gallery;
     galleries.push(gallery);
     add(list, `${label} navigation`, { actions: ["scroll"], kind: "carousel", directions: orientation === "vertical" ? ["up", "down"] : ["left", "right"], currentItem: selected + 1, itemCount: tabs.length }, 1500, { gallery });
   }
@@ -558,7 +626,7 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
     if (!visible(area) || galleries.some(gallery => gallery.scope.contains(area) && getComputedStyle(area).overflowX === "hidden")) continue;
     add(area, labelFor(area), { actions: ["scroll"], directions: scrollDirections(area), scrollTop: Math.round(area.scrollTop), scrollLeft: Math.round(area.scrollLeft) }, 5000);
   }
-  globalThis.__safariChatRefs = { url: location.href, refs, viewport: { width: viewportWidth, height: innerHeight, x: scrollX, y: scrollY } };
+  globalThis.__safariChatRefs = { url: location.href, refs, visible, rendered, galleryFor, scrollDirections, viewport: { width: viewportWidth, height: innerHeight, x: scrollX, y: scrollY } };
   const page = document.scrollingElement ?? document.documentElement;
   return {
     ...excerpt, elements, elementsTruncated,
@@ -567,7 +635,12 @@ function snapshotPage(limit = 12000, viewportOnly = false, selectionOnly = false
   };
 }
 
-function actOnPage(operation, elementId, text, expectedURL, { direction, checked, preview = false, motionId, speed, path, speedChanges, inputOwner } = {}) {
+function actOnPage(operation, elementId, text, expectedURL, options = {}, reportError = false) {
+  if (reportError) {
+    try { return actOnPage(operation, elementId, text, expectedURL, options); }
+    catch (error) { return { pageError: String(error.message || error).slice(0, 700) }; }
+  }
+  const { direction, checked, preview = false, motionId, speed, path, speedChanges, inputOwner, until } = options;
   const state = globalThis.__safariChatRefs;
   if (!state || state.url !== location.href || location.href !== expectedURL) throw new Error("The page changed. Read it again before acting.");
   const labelFor = element => {
@@ -577,7 +650,7 @@ function actOnPage(operation, elementId, text, expectedURL, { direction, checked
   };
   const signature = (element, ignoreSelection = false) => JSON.stringify([element.tagName, element.type, element.name, element.getAttribute("role"), element.getAttribute("href"), element.closest("a[href]")?.href, element.getAttribute("target"), element.getAttribute("download"), element.form?.action, element.form?.method, element.getAttribute("formaction"), element.formAction, element.getAttribute("aria-controls"), ignoreSelection ? null : element.getAttribute("aria-selected"), element.getAttribute("aria-orientation")]);
   const reference = state.refs.get(elementId);
-  const freePointer = operation === "move_pointer" && !elementId;
+  const freePointer = (operation === "move_pointer" || operation === "gesture") && !elementId;
   const element = freePointer ? document.documentElement : reference?.element;
   const pageScroll = operation === "scroll" && !elementId;
   let label = "Page";
@@ -619,6 +692,10 @@ function actOnPage(operation, elementId, text, expectedURL, { direction, checked
   // A preview resolves the same validated target, but leaves the real action single-use.
   if (preview && (document.hidden || !(operation === "click" || operation === "set_checked" || reference?.gallery && operation === "scroll"))) return {};
   if (!preview) globalThis.__safariChatRefs = null;
+  if (operation === "gesture") {
+    const motion = globalThis.__safariChatStartGesture(motionId, element, options.gestureSpec, state, options.hosts);
+    return { ok: true, operation, label, motion };
+  }
   if (operation === "drag" || operation === "move_pointer") {
     const motion = globalThis.__safariChatStartPath(motionId, element, operation, path, speed, state.viewport);
     return { ok: true, operation, label, motion };
@@ -651,13 +728,10 @@ function actOnPage(operation, elementId, text, expectedURL, { direction, checked
       const next = selected + (direction === forward ? 1 : -1);
       if (next < 0 || next >= tabs.length) return { ok: true, operation, moved: false, message: "This gallery is at its first or last item. Scroll in the other direction." };
       const control = tabs[next].element;
+      if (control.matches(":disabled,[aria-disabled='true']") || !state.rendered(control, false)) throw new Error("The next gallery control is not available. Read the page again.");
+      if (!state.rendered(control, true)) control.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
       const rect = control.getBoundingClientRect();
-      if (control.matches(":disabled,[aria-disabled='true']") || control.closest("[hidden],[inert],[aria-hidden='true'],#safari-chat-host") || !control.getClientRects().length || rect.width === 0 || rect.height === 0 || rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth) || getComputedStyle(control).visibility !== "visible") throw new Error("The next gallery control is not available. Read the page again.");
-      let depth = 0;
-      for (let parent = control; parent; parent = parent.parentElement) {
-        const style = getComputedStyle(parent), clip = parent.getBoundingClientRect();
-        if (++depth > 64 || style.opacity === "0" || (/auto|scroll|hidden|clip/.test(style.overflowX) && (rect.right <= clip.left || rect.left >= clip.right)) || (/auto|scroll|hidden|clip/.test(style.overflowY) && (rect.bottom <= clip.top || rect.top >= clip.bottom))) throw new Error("The next gallery control is not visible. Read the page again.");
-      }
+      if (!rect.width || !rect.height || rect.left >= Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth) || !state.rendered(control, true)) throw new Error("The next gallery control is not visible. Read the page again.");
       click(control);
       if (preview) return { pointer: true };
       return { ok: true, operation, dispatched: true, fromItem: selected + 1, requestedItem: next + 1, message: "Gallery navigation activated. Read the page again to verify the newly visible cards." };
@@ -666,7 +740,8 @@ function actOnPage(operation, elementId, text, expectedURL, { direction, checked
     const axis = ["left", "right"].includes(direction) ? "overflowX" : "overflowY";
     if (!pageScroll && !/^(auto|scroll|hidden)$/.test(getComputedStyle(target)[axis])) throw new Error("This area cannot scroll in that direction. Use its listed directions or gallery controls.");
     if (motionId) {
-      const motion = globalThis.__safariChatStartScroll(target, motionId, direction, speed, speedChanges ?? []);
+      if (until && !state.probe) throw new Error("The scroll target expired. Read the page again.");
+      const motion = globalThis.__safariChatStartScroll(target, motionId, direction, speed, speedChanges ?? [], until ? state.probe : null);
       return { ok: true, operation, label, motion };
     }
     const before = { x: target.scrollLeft, y: target.scrollTop };
@@ -843,6 +918,726 @@ function installPointerPath() {
 return {installPointerPath};
 })();
 
+// content/gesture.js
+modules["content/gesture.js"] = (() => {
+// Installed into the isolated content world alongside the per-device drivers.
+function installGesturePlayer() {
+  globalThis.__safariChatStartGesture = (owner, element, spec, snapshot, hosts) => {
+    const viewport = snapshot.viewport, url = location.href, { frames, device } = spec;
+    const width = () => Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth);
+    if (width() !== viewport.width || innerHeight !== viewport.height || scrollX !== viewport.x || scrollY !== viewport.y) throw new Error("The viewport changed. Read it again.");
+    function hit(p) {
+      if (location.href !== url || width() !== viewport.width || innerHeight !== viewport.height ||
+          p.x < 0 || p.x >= width() || p.y < 0 || p.y >= innerHeight) throw new Error("The gesture left the approved viewport. Read the page again.");
+      let node = document.elementFromPoint(p.x, p.y);
+      // Follow open shadow roots and check the host at each boundary.
+      for (let depth = 0; depth < 16; depth++) {
+        if (!node || node.closest("#safari-chat-host,iframe,frame,object,embed,[inert],[hidden],:disabled,[aria-disabled=true],input[type=password],input[type=file]")) throw new Error("The gesture crosses an unavailable area.");
+        const field = node.closest("input,textarea,select,[contenteditable]");
+        if (field && /password|passcode|credit.?card|debit.?card|card.?number|\bcc[-_]|\bcvc\b|\bcvv\b|security.?code|verification.?code|one.?time|\botp\b|secret|token/i.test([field.name, field.id, field.autocomplete, field.getAttribute("aria-label"), field.getAttribute("placeholder"), field.labels?.[0]?.innerText].join(" "))) throw new Error("The gesture crosses a sensitive field.");
+        const child = node.shadowRoot?.elementFromPoint?.(p.x, p.y);
+        if (!child || node === child) return node;
+        node = child;
+      }
+      throw new Error("The target is nested too deeply.");
+    }
+    const anchor = spec.anchor || frames[0].points[0];
+    const target = hit(anchor);
+    const within = node => element.contains(node) || node.getRootNode().host && within(node.getRootNode().host);
+    if (!within(target)) throw new Error("The starting point no longer hits the selected target. Read it again.");
+    const state = { kind: "gesture", device, active: true, speed: 1, elapsed: 0, events: 0, prevented: 0 };
+    let mods = [], over, index = 0;
+    const init = p => ({ bubbles: true, composed: true, cancelable: true, view: window,
+      clientX: p.x, clientY: p.y, shiftKey: mods.includes("Shift"), ctrlKey: mods.includes("Control"), altKey: mods.includes("Alt"), metaKey: mods.includes("Meta") });
+    const send = (node, event) => {
+      state.events++;
+      const accepted = node.dispatchEvent(event);
+      if (!accepted) state.prevented++;
+      return accepted;
+    };
+    function hover(node, p, pointerId = 1, pointerType = "mouse", buttons = 0) {
+      globalThis.__safariChatActionPointer?.track?.(p.x, p.y);
+      if (over === node) return;
+      function transition(receiver, name, relatedTarget) {
+        const edge = name === "enter" || name === "leave";
+        const options = { ...init(p), bubbles: !edge, composed: !edge, cancelable: !edge, buttons, relatedTarget };
+        send(receiver, new PointerEvent("pointer" + name, { ...options, pointerId, pointerType, isPrimary: true, button: -1 }));
+        send(receiver, new MouseEvent("mouse" + name, options));
+      }
+      if (over) {
+        transition(over, "out", node);
+        for (let el = over; el && !el.contains(node); el = el.parentElement) transition(el, "leave", node);
+      }
+      transition(node, "over", over ?? null);
+      const parents = [];
+      for (let el = node; el && !el.contains(over ?? null); el = el.parentElement) parents.push(el);
+      for (const el of parents.reverse()) transition(el, "enter", over ?? null);
+      over = node;
+    }
+    function activate(node, p, button, count, pointerType) {
+      if (hit(p) !== node) throw new Error("The target changed before activation.");
+      function verify() {
+        if (hit(p) !== node) throw new Error("The target changed before activation.");
+        const control = node.closest("button,input");
+        const form = control && ["submit","image"].includes(control.type) && control.form;
+        for (const address of [node.closest("a[href]")?.href, form && (control.hasAttribute("formaction") ? control.formAction : form.action)]) {
+          if (!address) continue;
+          const dest = new URL(address, url);
+          if (!["http:", "https:"].includes(dest.protocol) || dest.username || dest.password || !hosts.includes(dest.hostname)) throw new Error("The gesture would activate an unapproved destination. Read the page and choose its link explicitly.");
+        }
+      }
+      verify();
+      const opts = { ...init(p), button, buttons: 0, detail: count, pointerType, isPrimary: true };
+      if (button === 2) send(node, new PointerEvent("contextmenu", opts));
+      if (device === "trackpad") {
+        for (const type of ["mousedown", "mouseup"]) send(node, new MouseEvent(type, { ...opts, buttons: type === "mousedown" ? (button === 2 ? 2 : 1) : 0 }));
+      }
+      verify(); send(node, new PointerEvent(button ? "auxclick" : "click", opts));
+      if (!button && count === 2 && node.isConnected && location.href === url) send(node, new MouseEvent("dblclick", opts));
+    }
+    const remainder = { X: 0, Y: 0 };
+    function pan(node, dx, dy, mode = 0) {
+      // Scripted wheel and touch events have no native scrolling default.
+      // Preserve subpixel input and chain unused distance at scroll boundaries.
+      for (const [axis, distance] of [["X", dx], ["Y", dy]]) {
+        if (!distance) continue;
+        const prop = axis === "X" ? "scrollLeft" : "scrollTop";
+        let delta;
+        for (let el = node; el; el = el.parentElement || el.getRootNode().host) {
+          const style = getComputedStyle(el), root = el === document.scrollingElement;
+          if (!root && !/^(auto|scroll|overlay)$/.test(style["overflow" + axis])) continue;
+          if (delta === undefined) {
+            const unit = mode === 1 ? parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.2 :
+              mode === 2 ? (axis === "X" ? el.clientWidth : el.clientHeight) : 1;
+            const exact = distance * unit + remainder[axis];
+            delta = Math.trunc(exact); remainder[axis] = exact - delta;
+          }
+          if (Math.abs(delta) < 1) break;
+          const before = el[prop];
+          el.scrollBy({ left: axis === "X" ? delta : 0, top: axis === "Y" ? delta : 0, behavior: "instant" });
+          const moved = el[prop] - before;
+          state["scroll" + axis] = (state["scroll" + axis] || 0) + moved;
+          if (Math.abs(moved) >= Math.abs(delta) || root || /contain|none/.test(style["overscrollBehavior" + axis])) break;
+          delta -= moved;
+        }
+      }
+    }
+    function aim() {
+      hover(target, anchor);
+      send(target, new PointerEvent("pointermove", { ...init(anchor), pointerType: "mouse", pointerId: 1, isPrimary: true, button: -1 }));
+      send(target, new MouseEvent("mousemove", init(anchor)));
+    }
+    function wheel(dx, dy, dz = 0, mode = 0, zoom = false) {
+      if (!dx && !dy && !dz) return;
+      const options = init(anchor), ctrl = zoom || options.ctrlKey;
+      state.wheelEvents = (state.wheelEvents || 0) + 1;
+      const event = new WheelEvent("wheel", { ...options, ctrlKey: ctrl, deltaX: dx, deltaY: dy, deltaZ: dz, deltaMode: mode });
+      if (!send(target, event) || ctrl || options.metaKey) return;
+      if (options.shiftKey && !dx) { dx = dy; dy = 0; }
+      pan(target, dx, dy, mode);
+    }
+    const ctx = { state, hit, init, send, hover, activate, pan, wheel, aim };
+    let driver;
+    if (device === "trackpad") driver = globalThis.__safariChatTrackpad(ctx, target, anchor, spec.eventChannel);
+    else if (device !== "wheel") driver = globalThis.__safariChatContacts(ctx, spec);
+    const gallery = [...snapshot.refs.values()].find(ref => ref.gallery?.scope.contains(target))?.gallery;
+    const item = () => gallery?.tabs.findIndex(t => t.element.getAttribute("aria-selected") === "true") + 1;
+    if (gallery) state.fromItem = item();
+    function play(points) {
+      if (device === "trackpad" || device === "wheel") {
+        if (!target.isConnected) throw new Error("The hovered surface disappeared.");
+        hit(anchor);
+      } else if (points.length) globalThis.__safariChatActionPointer?.track?.(points[0].x, points[0].y);
+      driver.frame(points);
+    }
+    function keyframe() {
+      const frame = frames[index];
+      if (frame.modifiers) mods = frame.modifiers;
+      if (device === "wheel") {
+        aim(); wheel(frame.deltaX || 0, frame.deltaY || 0, frame.deltaZ || 0, spec.deltaMode);
+        return;
+      }
+      state.elapsed = frame.at; play(frame.points);
+    }
+    function advanceWheel(elapsed) {
+      hit(anchor);
+      if (!target.isConnected) throw new Error("The wheel target disappeared.");
+      while (index + 1 < frames.length && state.elapsed < elapsed) {
+        const next = frames[index + 1], until = Math.min(elapsed, next.at);
+        if (next.modifiers) mods = next.modifiers;
+        const share = spec.discrete ? Number(until === next.at) : (until - state.elapsed) / (next.at - frames[index].at);
+        wheel((next.deltaX || 0) * share, (next.deltaY || 0) * share, (next.deltaZ || 0) * share, spec.deltaMode);
+        state.elapsed = until;
+        if (until === next.at) index++;
+      }
+      if (index === frames.length - 1) return "gesture finished";
+    }
+    function advance(dt) {
+      if (state.speed === 0) return;
+      const elapsed = Math.min(frames.at(-1).at, state.elapsed + dt * 1000 * state.speed);
+      if (device === "wheel") return advanceWheel(elapsed);
+      while (index + 1 < frames.length && frames[index + 1].at <= elapsed) { index++; keyframe(); }
+      if (index === frames.length - 1) return "gesture finished";
+      state.elapsed = elapsed;
+      const a = frames[index], b = frames[index + 1];
+      const fraction = (elapsed - a.at) / (b.at - a.at);
+      if (!fraction) return;
+      const points = a.points.map(p => {
+        const end = b.points.find(q => q.id === p.id);
+        if (!end) return p;
+        const out = { ...p };
+        for (const key of ["x", "y", "pressure", "tiltX", "tiltY", "twist", "width", "height", "tangentialPressure"]) {
+          if (p[key] != null && end[key] != null) out[key] = p[key] + (end[key] - p[key]) * fraction;
+        }
+        return out;
+      });
+      play(points);
+    }
+    return globalThis.__safariChatStartMotion(owner, state, element, advance, keyframe, reason => {
+      if (reason !== "gesture finished") driver?.cancel();
+      driver?.close?.();
+      if (gallery) state.currentItem = item();
+      globalThis.__safariChatActionPointer?.finishTrack?.();
+    });
+  };
+  return true;
+}
+
+return {installGesturePlayer};
+})();
+
+// content/gesture-contacts.js
+modules["content/gesture-contacts.js"] = (() => {
+// Coordinate contacts stay bound to their original touch target. Hovering mouse
+// and pen inputs instead follow hit testing throughout the approved path.
+function installGestureContacts() {
+  globalThis.__safariChatContacts = (ctx, spec) => {
+    const { state, send, init, hit, hover, activate } = ctx, device = spec.device;
+    const contacts = new Map(), base = crypto.getRandomValues(new Uint32Array(1))[0] % 10000000 + 64;
+    const buttons = [1, 4, 2, 8, 16, 32];
+    let primary, tap, multi = false, drag;
+    let nativeTouch = false;
+    if (device === "touch") {
+      try { nativeTouch = new TouchEvent("touchstart", { touches: [new Touch({ identifier: 1, target: document })] }).touches?.[0]?.identifier === 1; } catch {}
+      state.touchEvents = nativeTouch || !!spec.eventChannel;
+    }
+    const relay = (target, detail) => target.dispatchEvent(new CustomEvent(spec.eventChannel, { detail, bubbles: true, composed: true, cancelable: true }));
+    function pointer(node, c, type, p, button = -1, mask = c.buttons) {
+      return send(node, new PointerEvent(type, { ...init(p), pointerId: base + c.id, pointerType: device,
+        isPrimary: c.id === primary, button, buttons: mask, pressure: mask ? p.pressure ?? 0.5 : 0,
+        width: p.width ?? 1, height: p.height ?? 1, tiltX: p.tiltX || 0, tiltY: p.tiltY || 0,
+        twist: p.twist || 0, tangentialPressure: p.tangentialPressure || 0,
+      }));
+    }
+    function mouse(node, name, p, button, mask) {
+      return send(node, new MouseEvent(name, { ...init(p), button, buttons: mask }));
+    }
+    function dragEvent(node, type, p) {
+      return send(node, new DragEvent(type, { ...init(p), dataTransfer: drag.data }));
+    }
+    function dragMove(c, target, p) {
+      if (!drag && c.source && c.distance >= 4) {
+        drag = { source: c.source, data: new DataTransfer() };
+        if (!dragEvent(drag.source, "dragstart", p)) { drag = null; c.source = null; return; }
+      }
+      if (!drag) return;
+      dragEvent(drag.source, "drag", p);
+      if (target !== drag.target) {
+        if (drag.target) dragEvent(drag.target, "dragleave", p);
+        dragEvent(target, "dragenter", p); drag.target = target;
+      }
+      drag.accepted = !dragEvent(target, "dragover", p);
+    }
+    function endDrag(p, cancel) {
+      if (!drag) return;
+      if (drag.accepted && !cancel) { dragEvent(drag.target, "drop", p); state.dropDispatched = true; }
+      else if (drag.target) dragEvent(drag.target, "dragleave", p);
+      dragEvent(drag.source, "dragend", p); drag = null;
+    }
+    function touchEvents(groups, type) {
+      if (!state.touchEvents || !groups.size) return;
+      const asTouch = c => {
+        const data = { identifier: base + c.id, clientX: c.p.x, clientY: c.p.y,
+          pageX: c.p.x + scrollX, pageY: c.p.y + scrollY, radiusX: (c.p.width || 2) / 2, radiusY: (c.p.height || 2) / 2, force: c.p.pressure ?? 0.5 };
+        return nativeTouch ? new Touch({ ...data, target: c.target }) : { ...data, startX: c.startX, startY: c.startY };
+      };
+      const active = [...contacts.values()];
+      for (const [target, changed] of groups) {
+        const { ctrlKey, altKey, metaKey, shiftKey } = init(changed[0].p);
+        const lists = { touches: active.map(asTouch), targetTouches: active.filter(c => c.target === target).map(asTouch), changedTouches: changed.map(asTouch), ctrlKey, altKey, metaKey, shiftKey };
+        const accepted = nativeTouch ? send(target, new TouchEvent(type, { bubbles: true, composed: true, cancelable: true, ...lists })) : relay(target, { type, ...lists });
+        if (!nativeTouch) { state.events++; if (!accepted) state.prevented++; }
+        if (!accepted) for (const c of changed) c.suppressTap = true;
+      }
+    }
+    function group(groups, target, c) {
+      if (!groups.has(target)) groups.set(target, []);
+      groups.get(target).push(c);
+    }
+    function click(c, node, p, button) {
+      if (multi || c.suppressTap || c.distance > 5 || c.down !== node || !node.isConnected) return;
+      const count = tap?.node === node && tap.button === button && state.elapsed - tap.at < 450 && Math.hypot(p.x-tap.x, p.y-tap.y) < 5 ? tap.count+1 : 1;
+      activate(node, p, button, count, device);
+      tap = { node, at: state.elapsed, count, button, x: p.x, y: p.y };
+    }
+    function touchAxes(target) {
+      let x = true, y = true;
+      for (let el = target; el; el = el.parentElement || el.getRootNode().host) {
+        const style = getComputedStyle(el), action = style.touchAction;
+        if (action && !["auto", "manipulation"].includes(action)) {
+          x &&= /pan-(x|left|right)/.test(action); y &&= /pan-(y|up|down)/.test(action);
+        }
+        if (/(auto|scroll)/.test(style.overflowX + style.overflowY)) break;
+      }
+      return { x, y };
+    }
+    function update(p, c, node) {
+      const isTouch = device === "touch", mask = isTouch ? 1 : p.buttons ?? (device === "pen" ? 1 : 0);
+      if (!isTouch) hover(node, p, base+c.id, device, c.buttons);
+      const changed = c.buttons ^ mask;
+      const moved = !c.p || ["x","y","pressure","tiltX","tiltY","twist","width","height","tangentialPressure"].some(k => c.p[k] !== p[k]);
+      if (c.p && c.buttons) c.distance += Math.hypot(p.x-c.p.x, p.y-c.p.y);
+      if (changed) {
+        for (let button = 0; button < buttons.length; button++) {
+          const bit = buttons[button]; if (!(changed & bit)) continue;
+          const before = c.buttons;
+          c.buttons ^= bit;
+          if (mask & bit) {
+            if (!before) { c.down = node; c.distance = 0; c.suppressTap = false; }
+            if (spec.dragDrop && button === 0) c.source = node.closest("[draggable=true],a[href],img");
+            if (!pointer(node, c, before ? "pointermove" : "pointerdown", p, button)) c.suppressTap = true;
+            if (!isTouch && !c.suppressTap) { mouse(node, "mousedown", p, button, c.buttons); c.mouseButtons |= bit; }
+          } else {
+            pointer(node, c, c.buttons ? "pointermove" : "pointerup", p, button);
+            if (c.mouseButtons & bit) { mouse(node, "mouseup", p, button, c.buttons); c.mouseButtons &= ~bit; }
+            if (drag && button === 0) endDrag(p, false);
+            else if (!isTouch) click(c, node, p, button);
+          }
+        }
+      } else if (moved) {
+        pointer(node, c, "pointermove", p);
+        if (!isTouch) mouse(node, "mousemove", p, 0, mask);
+        if (c.source && (mask & 1)) dragMove(c, node, p);
+      }
+      c.receiver = node;
+      c.p = p;
+      return moved;
+    }
+    function frame(points, cancel = false) {
+      const started = new Map(), moved = new Map(), ended = new Map(), released = [];
+      if (points.length > 1) multi = true;
+      for (const c of contacts.values()) {
+        if (points.some(p => p.id === c.id)) continue;
+        contacts.delete(c.id);
+        const node = c.target.isConnected ? c.target : document;
+        if (cancel) {
+          pointer(node, c, "pointercancel", c.p, 0, 0); endDrag(c.p, true);
+          for (const [button, bit] of buttons.entries()) {
+            if (c.mouseButtons & bit) {
+              c.mouseButtons &= ~bit;
+              mouse(c.receiver?.isConnected ? c.receiver : node, "mouseup", c.p, button, c.mouseButtons);
+            }
+          }
+        } else if (device === "touch") {
+          pointer(node, c, "pointerup", c.p, 0, 0);
+        } else if (c.buttons) update({ ...c.p, buttons: 0 }, c, hit(c.p));
+        if (device === "touch") {
+          group(ended, node, c);
+          if (!cancel) released.push(c);
+        }
+      }
+      touchEvents(ended, cancel ? "touchcancel" : "touchend");
+      for (const c of released) {
+        if (c.target.isConnected && hit(c.p) === c.target) click(c, c.target, c.p, 0);
+      }
+      if (!contacts.size) { primary = undefined; multi = points.length > 1; }
+      for (const p of points) {
+        const under = hit(p);
+        let c = contacts.get(p.id);
+        if (!c) {
+          if (!contacts.size && spec.eventChannel) relay(under, "start");
+          c = { id: p.id, target: under, startX: p.x, startY: p.y, buttons: 0, mouseButtons: 0, distance: 0, began: state.elapsed, axes: device === "touch" && touchAxes(under) };
+          primary ??= c.id; contacts.set(c.id, c); group(started, under, c);
+        }
+        if (!c.target.isConnected) throw new Error("The gesture target disappeared.");
+        const receiver = device === "touch" ? c.target : under;
+        const prior = c.p;
+        if (update(p, c, receiver)) group(moved, receiver, c);
+        if (prior && device === "touch") {
+          c.dx = prior.x - p.x; c.dy = prior.y - p.y;
+          if (!multi && !c.suppressTap && c.distance < 5 && state.elapsed - c.began >= 600) {
+            send(receiver, new PointerEvent("contextmenu", { ...init(p), pointerType: "touch", pointerId: base+c.id, button: 2 }));
+            c.suppressTap = true;
+          }
+        }
+      }
+      touchEvents(started, "touchstart");
+      for (const [target, changes] of moved) {
+        const old = changes.filter(c => !started.get(target)?.includes(c));
+        if (old.length) moved.set(target, old); else moved.delete(target);
+      }
+      touchEvents(moved, "touchmove");
+      if (!multi && device === "touch" && contacts.size === 1) {
+        const c = contacts.values().next().value;
+        if (!c.suppressTap && c.distance > 5) ctx.pan(c.target, c.axes.x ? c.dx : 0, c.axes.y ? c.dy : 0);
+      }
+    }
+    return { frame, cancel: () => frame([], true), close: () => { if (spec.eventChannel) relay(document, "close"); } };
+  };
+  return true;
+}
+
+return {installGestureContacts};
+})();
+
+// content/trackpad.js
+modules["content/trackpad.js"] = (() => {
+// An indirect trackpad routes deltas to the surface under the stationary cursor.
+function installTrackpad() {
+  globalThis.__safariChatTrackpad = (ctx, target, anchor, channel) => {
+    const { state, send, init, activate, wheel } = ctx;
+    let last = [], peak = 0, travel = 0, scale = 1, rotation = 0, transforming = false;
+    let taps = 0, lastTap = -Infinity, transformed = false;
+    const relay = detail => target.dispatchEvent(new CustomEvent(channel, { detail, bubbles: true, composed: true, cancelable: true }));
+    let safariGesture = true;
+    try { safariGesture = typeof document.createEvent("GestureEvent").initGestureEvent === "function"; } catch { safariGesture = false; }
+    const center = points => ({
+      x: points.reduce((sum, p) => sum + p.x, 0) / points.length,
+      y: points.reduce((sum, p) => sum + p.y, 0) / points.length,
+    });
+    function transform(type) {
+      const opts = init(anchor);
+      if (!safariGesture) {
+        if (!channel) return true;
+        state.events++;
+        const accepted = relay({ type, x: anchor.x, y: anchor.y, scale, rotation, ctrl: opts.ctrlKey, shift: opts.shiftKey, alt: opts.altKey, meta: opts.metaKey });
+        if (!accepted) state.prevented++;
+        return accepted;
+      }
+      const e = document.createEvent("GestureEvent");
+      e.initGestureEvent(type, true, true, window, 0, 0, 0, anchor.x, anchor.y,
+        opts.ctrlKey, opts.altKey, opts.shiftKey, opts.metaKey, target, scale, rotation);
+      return send(target, e);
+    }
+    function finishTransform() {
+      if (transforming) transform("gestureend");
+      transforming = false; scale = 1; rotation = 0;
+    }
+    return {
+      frame(points) {
+        if (!last.length && points.length) {
+          if (channel) relay("start");
+          ctx.aim();
+          peak = 0; travel = 0; transformed = false;
+        }
+        peak = Math.max(peak, points.length);
+        // Finger order may change without a finger lifting.
+        const matched = last.map(a => [a, points.find(b => a.id === b.id)]).filter(pair => pair[1]);
+        if (matched.length >= 1) {
+          const before = center(matched.map(pair => pair[0])), after = center(matched.map(pair => pair[1]));
+          const dx = before.x - after.x, dy = before.y - after.y;
+          travel += Math.max(...matched.map(([a, b]) => Math.hypot(b.x-a.x, b.y-a.y)));
+          if (matched.length >= 2) {
+            const [[a, c], [b, d]] = matched, x0 = b.x-a.x, y0 = b.y-a.y, x1 = d.x-c.x, y1 = d.y-c.y;
+            const oldLength = Math.hypot(x0, y0), ratio = oldLength >= 1 ? Math.hypot(x1, y1) / oldLength : 1;
+            const angle = Math.atan2(x0*y1 - y0*x1, x0*x1 + y0*y1) * 180 / Math.PI;
+            if (ratio > 0 && (Math.abs(ratio - 1) > 0.00001 || Math.abs(angle) > 0.001)) {
+              if (!transforming) transform("gesturestart");
+              transformed = transforming = true; scale *= ratio; rotation += angle;
+              state.scale = scale; state.rotation = rotation;
+              const accepted = transform("gesturechange");
+              if (accepted && ratio !== 1 && !safariGesture && (!channel || typeof GestureEvent === "undefined")) wheel(0, -100 * Math.log(ratio), 0, 0, true);
+              if (!safariGesture && !channel && Math.abs(angle) > 0.001) state.rotationUnavailable = true;
+            }
+          }
+          if (dx || dy) wheel(dx, dy);
+        }
+        if (points.length < 2) finishTransform();
+        if (last.length && !points.length && !transformed && travel < 4 && peak <= 2) {
+          taps = state.elapsed - lastTap < 450 ? taps + 1 : 1; lastTap = state.elapsed;
+          activate(target, anchor, peak === 2 ? 2 : 0, taps, "mouse");
+        }
+        last = points;
+      },
+      cancel: finishTransform,
+      close: () => { if (channel) document.dispatchEvent(new CustomEvent(channel, { detail: "close", bubbles: true })); },
+    };
+  };
+  return true;
+}
+
+return {installTrackpad};
+})();
+
+// content/page-gesture-events.js
+modules["content/page-gesture-events.js"] = (() => {
+// Desktop WebKit has no constructible native touch or trackpad gesture events.
+// Only numeric webpage input crosses into the site's world. This listener has
+// no extension APIs and cannot initiate any extension operation.
+function installPageGestureEvents(channel) {
+  const listeners = new AbortController();
+  const contacts = new Map();
+  const options = { capture: true, signal: listeners.signal };
+  const timer = setTimeout(close, 15000);
+  function close() { clearTimeout(timer); listeners.abort(); }
+  window.addEventListener(channel, message => {
+    const data = message.detail;
+    if (data === "start") { clearTimeout(timer); return; }
+    if (data === "close") { close(); return; }
+    if (!data) return;
+    const target = message.composedPath()[0];
+    if (["touchstart", "touchmove", "touchend", "touchcancel"].includes(data.type)) {
+      if (data.type === "touchstart") for (const p of data.changedTouches) contacts.set(p.identifier, target);
+      const event = new UIEvent(data.type, { bubbles: true, cancelable: true, composed: true, view: window });
+      for (const name of ["touches", "targetTouches", "changedTouches"]) {
+        const points = Array.from(data[name], p => ({ ...p, target: contacts.get(p.identifier) ?? document.elementFromPoint(p.startX, p.startY) }));
+        Object.defineProperty(points, "item", { value: i => points[i] ?? null });
+        Object.defineProperty(event, name, { value: points });
+      }
+      for (const name of ["altKey", "ctrlKey", "metaKey", "shiftKey"]) Object.defineProperty(event, name, { value: data[name] });
+      if (!target.dispatchEvent(event)) message.preventDefault();
+      if (data.type === "touchend" || data.type === "touchcancel") for (const p of data.changedTouches) contacts.delete(p.identifier);
+      return;
+    }
+    if (!["gesturestart", "gesturechange", "gestureend"].includes(data.type) ||
+        ![data.x, data.y, data.scale, data.rotation].every(Number.isFinite)) return;
+    const event = new MouseEvent(data.type, { bubbles: true, cancelable: true, composed: true, view: window,
+      clientX: data.x, clientY: data.y, ctrlKey: data.ctrl, shiftKey: data.shift, altKey: data.alt, metaKey: data.meta });
+    Object.defineProperties(event, { scale: { value: data.scale }, rotation: { value: data.rotation } });
+    if (!target.dispatchEvent(event)) message.preventDefault();
+  }, options);
+  window.addEventListener("pagehide", close, options);
+  return true;
+}
+
+return {installPageGestureEvents};
+})();
+
+// core/gestures.js
+modules["core/gestures.js"] = (() => {
+const number = { type: "number" };
+const modifiers = ["Shift", "Control", "Alt", "Meta"];
+const pointProperties = { id: { type: "integer" }, x: number, y: number, buttons: { type: "integer" },
+  pressure: number, width: number, height: number, tiltX: number, tiltY: number, twist: number, tangentialPressure: number };
+
+const GESTURE_TOOL = {
+  type: "function", name: "gesture", strict: false,
+  description: "After read, play timed webpage input. Trackpad: anchor over a picture; move two IDs left for a swipe (positive deltaX), apart for pinch, around for rotation. Wheel: anchor at cursor and supply deltaX/Y/Z per frame, spread over the preceding interval, or use discrete notches. Touch: independent fingers. Frames use cumulative ms; list all active points, omit lifted IDs, finish empty. Vary timing for speed or holds. Mouse/pen buttons: 0 hover, 1 tip/left, 2 right, 4 middle, 8 back, 16 forward, 32 eraser. Supports taps, chords, pressure 0-1, tilt, twist and HTML dragDrop. Verify effects with read; wait defaults true.",
+  parameters: { type: "object", additionalProperties: false, required: ["device", "frames"], properties: {
+    tabId: { type: ["integer", "null"] }, elementId: { type: ["string", "null"] },
+    device: { type: "string", enum: ["trackpad", "wheel", "touch", "mouse", "pen"] },
+    deltaMode: { type: "string", enum: ["pixel", "line", "page"] }, discrete: { type: "boolean" },
+    anchor: { type: "object", additionalProperties: false, required: ["x", "y"], properties: { x: number, y: number } },
+    frames: { type: "array", items: { type: "object", additionalProperties: false, required: ["at"], properties: {
+      at: number, deltaX: number, deltaY: number, deltaZ: number, points: { type: "array", items: { type: "object", additionalProperties: false, required: ["id", "x", "y"], properties: pointProperties } },
+      modifiers: { type: "array", items: { type: "string", enum: modifiers } },
+    } } }, dragDrop: { type: "boolean" }, wait: { type: "boolean" },
+  } },
+};
+
+function validateGesture(args, viewport, bounds) {
+  const { device, frames, anchor, dragDrop } = args;
+  const inside = (p, box) => p && Number.isFinite(p.x) && Number.isFinite(p.y) && p.x >= box[0] && p.x < box[2] && p.y >= box[1] && p.y < box[3];
+  const wheel = device === "wheel";
+  if (!viewport || !["trackpad", "wheel", "touch", "mouse", "pen"].includes(device) || !Array.isArray(frames) || frames.length < 2 || frames.length > 128) throw new Error("Choose an input device and 2-128 gesture frames after reading the page.");
+  if (dragDrop && device !== "mouse") throw new Error("HTML drag and drop needs a mouse path.");
+  const screen = [0, 0, viewport.width, viewport.height], target = bounds ?? screen;
+  if ((wheel || anchor != null) && (!["trackpad", "wheel"].includes(device) || !inside(anchor, screen))) throw new Error("Choose an anchor inside the visible website for the trackpad or wheel.");
+  if (frames[0]?.at !== 0 || !wheel && (!Array.isArray(frames[0]?.points) || !frames[0].points.length || frames.at(-1)?.points?.length !== 0)) throw new Error("Start at 0 ms. Contact paths must start with points and finish with an empty list.");
+  if (args.deltaMode != null && (!wheel || !["pixel", "line", "page"].includes(args.deltaMode)) || args.discrete != null && (!wheel || typeof args.discrete !== "boolean")) throw new Error("Choose pixel, line or page units and an optional discrete setting for the wheel.");
+  let total = 0, fingers = 0;
+  const ranges = { pressure: [0, 1], width: [0, 512], height: [0, 512], tiltX: [-90, 90], tiltY: [-90, 90], twist: [0, 359], tangentialPressure: [-1, 1] };
+  for (const [i, frame] of frames.entries()) {
+    if (!Number.isFinite(frame?.at) || frame.at > 60000 || i && frame.at <= frames[i - 1].at) throw new Error("Frame times must strictly increase within 60,000 milliseconds.");
+    if (frame.modifiers != null && (!Array.isArray(frame.modifiers) || frame.modifiers.length > 4 || frame.modifiers.some(m => !modifiers.includes(m)))) throw new Error("Use Shift, Control, Alt or Meta for modifiers.");
+    const deltas = ["deltaX", "deltaY", "deltaZ"].filter(key => frame[key] != null);
+    if (wheel) {
+      if ((frame.points != null && (!Array.isArray(frame.points) || frame.points.length)) || deltas.some(key => !Number.isFinite(frame[key]) || Math.abs(frame[key]) > 1000000)) throw new Error("Supply finite wheel deltas and a fixed anchor.");
+      continue;
+    }
+    if (deltas.length) throw new Error("Wheel deltas need the wheel device.");
+    if (!Array.isArray(frame.points) || frame.points.length > (["mouse", "pen"].includes(device) ? 1 : 10)) throw new Error("Use one mouse or pen pointer, or up to ten contact points per frame.");
+    total += frame.points.length; fingers = Math.max(fingers, frame.points.length);
+    const ids = new Set();
+    for (const p of frame.points) {
+      if (!inside(p, screen) || !Number.isInteger(p.id) || p.id < 0 || p.id > 31 || ids.has(p.id)) throw new Error("Choose distinct contact IDs from 0 to 31 and points inside the website.");
+      ids.add(p.id);
+      if (p.buttons != null && (!Number.isInteger(p.buttons) || p.buttons < 0 || p.buttons > 63)) throw new Error("Invalid pointer button mask.");
+      for (const [key, [min, max]] of Object.entries(ranges)) if (p[key] != null && (!Number.isFinite(p[key]) || p[key] < min || p[key] > max)) throw new Error("Invalid pointer " + key + ".");
+    }
+  }
+  if (total > 512) throw new Error("Use at most 512 contact samples per gesture.");
+  const start = anchor ?? frames[0].points[0];
+  if (!inside(start, target)) throw new Error("Start the gesture inside the selected target.");
+  return { device, frames, anchor: anchor ?? null, dragDrop: !!dragDrop, fingers,
+    ...(wheel && { deltaMode: ["pixel", "line", "page"].indexOf(args.deltaMode ?? "pixel"), discrete: args.discrete === true }) };
+}
+
+function gesturePreview(spec) {
+  const paths = [], current = new Map();
+  for (const frame of spec.frames) {
+    const points = frame.points || [];
+    for (const id of current.keys()) if (!points.some(p => p.id === id)) current.delete(id);
+    for (const p of points) {
+      if (!current.has(p.id)) { const path = []; current.set(p.id, path); paths.push(path); }
+      current.get(p.id).push([p.x, p.y]);
+    }
+  }
+  return paths;
+}
+
+return {GESTURE_TOOL, validateGesture, gesturePreview};
+})();
+
+// content/scroll-search.js
+modules["content/scroll-search.js"] = (() => {
+// Install a local visibility check on the last authorized viewport snapshot.
+// It returns only the match and never clicks or changes a page.
+function configureGallerySearch(url) {
+  const refs = globalThis.__safariChatRefs;
+  if (!refs || refs.url !== url || location.href !== url) throw new Error("The page changed. Read it again.");
+  function exposed(element, rect) {
+    const left = Math.max(0, rect.left), right = Math.min(globalThis.__safariChatPageRight ?? innerWidth, rect.right);
+    const top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
+    if (right <= left || bottom <= top || !refs.visible(element)) return false;
+    return element.contains(document.elementFromPoint((left + right) / 2, (top + bottom) / 2));
+  }
+  function revealControls(scope, element) {
+    const edge = Math.min(innerWidth, globalThis.__safariChatPageRight ?? innerWidth);
+    const initial = element.getBoundingClientRect();
+    if (initial.width <= edge && (initial.left < 0 || initial.right > edge)) {
+      element.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    }
+    const rect = element.getBoundingClientRect();
+    const area = scope === document.scrollingElement ? { top: 0, bottom: innerHeight } : scope.getBoundingClientRect();
+    const top = Math.max(0, area.top), bottom = Math.min(innerHeight, area.bottom);
+    const margin = Math.min(32, (bottom - top) / 8);
+    if (rect.height > bottom - top - 2 * margin) return;
+    // A sliver entering the viewport is enough to discover the carousel.
+    // Bring the full controls into reach before returning to the model.
+    const dy = Math.max(0, rect.bottom - bottom + margin) + Math.min(0, rect.top - top - margin);
+    if (dy) scope.scrollBy({ top: dy, behavior: "instant" });
+  }
+  refs.probe = scope => {
+    for (const list of Array.from(scope.querySelectorAll("[role=tablist]")).slice(0, 40)) {
+      if (!refs.visible(list)) continue;
+      const result = refs.galleryFor(list);
+      if (result?.tabs.some(tab => exposed(tab.element, tab.element.getBoundingClientRect()))) {
+        revealControls(scope, list);
+        return result.label + " navigation";
+      }
+    }
+    const candidates = scope.querySelectorAll('[aria-roledescription~="carousel" i],[class*="carousel" i],[class*="gallery" i],[id*="carousel" i],[id*="gallery" i],[role="region"],[role="group"]');
+    for (const element of Array.from(candidates).slice(0, 400)) {
+      if (!refs.visible(element)) continue;
+      const name = element.getAttribute("aria-label") || "";
+      const marked = /carousel|gallery|slideshow/i.test([element.id, element.className, name, element.getAttribute("aria-roledescription")].join(" "));
+      const style = getComputedStyle(element);
+      if ((marked || style.scrollSnapType !== "none") && /^(auto|scroll)$/.test(style.overflowX) && refs.scrollDirections(element).includes("left") && exposed(element, element.getBoundingClientRect())) return name.slice(0, 100) || "Horizontal gallery";
+      if (marked && !element.querySelector("[role=tablist]")) {
+        for (const control of Array.from(element.querySelectorAll("button,[role=button]")).slice(0, 40)) {
+          if (/previous|next|slide (?:left|right)/i.test(control.getAttribute("aria-label") || control.textContent) && exposed(control, control.getBoundingClientRect())) {
+            revealControls(scope, control);
+            return name.slice(0, 100) || "Carousel controls";
+          }
+        }
+      }
+    }
+    return null;
+  };
+  return true;
+}
+
+return {configureGallerySearch};
+})();
+
+// content/find-text.js
+modules["content/find-text.js"] = (() => {
+// Safari serializes this function into the page. Only a matched passage leaves
+// the isolated world. With no occurrence it installs a viewport probe for motion.
+function findPageText(url, query, occurrence) {
+  const refs = globalThis.__safariChatRefs;
+  if (!refs || refs.url !== url || location.href !== url) throw new Error("The page changed. Read it again.");
+  const words = query.trim().split(/\s+/).map(word => word.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&"));
+  const pattern = new RegExp(words.join("\\s+"), "giu");
+  const excluded = "script,style,noscript,template,svg,input,textarea,select,[contenteditable],[hidden],[inert],[aria-hidden=true],#safari-chat-host";
+  const blocks = "p,li,div,h1,h2,h3,h4,h5,h6,article,section,header,footer,td,th,dt,dd,summary,figcaption,pre,blockquote,button,a";
+  function exposed(range, element) {
+    const edge = globalThis.__safariChatPageRight ?? innerWidth;
+    return Array.from(range.getClientRects()).some(rect => {
+      const l = Math.max(0, rect.left), r = Math.min(edge, rect.right), t = Math.max(0, rect.top), b = Math.min(innerHeight, rect.bottom);
+      return l < r && t < b && element.contains(document.elementFromPoint((l + r) / 2, (t + b) / 2));
+    });
+  }
+  function search(scope, viewportOnly) {
+    let block, parts = [], text = "", count = 0, visited = 0, chars = 0, truncated = false;
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+    const visible = new WeakMap();
+    function readable(node) {
+      const el = node.parentElement;
+      if (!visible.has(el)) visible.set(el, refs.rendered(el, viewportOnly));
+      return visible.get(el);
+    }
+    function matchPassage() {
+      pattern.lastIndex = 0;
+      let match, firstIndex = 0;
+      while ((match = pattern.exec(text))) {
+        const a = match.index, z = a + match[0].length;
+        while (firstIndex < parts.length && parts[firstIndex].end <= a) firstIndex++;
+        let endIndex = firstIndex;
+        while (endIndex < parts.length && parts[endIndex].start < z) endIndex++;
+        if (endIndex === firstIndex || !parts.slice(firstIndex, endIndex).every(p => readable(p.node))) continue;
+        const first = parts[firstIndex], last = parts[endIndex - 1];
+        const range = document.createRange();
+        range.setStart(first.node, a - first.start);
+        range.setEnd(last.node, z - last.start);
+        if (!range.getClientRects().length || (viewportOnly && !exposed(range, block))) continue;
+        if (++count < (occurrence ?? 1)) continue;
+        const from = Math.max(0, a - 70), to = Math.min(text.length, z + 100);
+        const excerpt = parts.filter(p => p.end > from && p.start < to && readable(p.node))
+          .map(p => text.slice(Math.max(from, p.start), Math.min(to, p.end))).join("").replace(/\s+/g, " ").trim();
+        return { range, element: first.node.parentElement, block, excerpt };
+      }
+    }
+    let node;
+    while ((node = walker.nextNode())) {
+      if (++visited > 20000 || chars >= 400000) { truncated = true; break; }
+      const el = node.parentElement;
+      const next = el && !el.closest(excluded) && (!viewportOnly || readable(node)) ? el.closest(blocks) || scope : null;
+      if (block !== next) {
+        const found = matchPassage();
+        if (found) return found;
+        block = next; text = ""; parts = [];
+      }
+      if (!next || !node.length) continue;
+      const value = node.data.slice(0, 400000 - chars);
+      parts.push({ node, start: text.length, end: text.length + value.length });
+      text += value; chars += value.length;
+      if (value.length < node.length) { truncated = true; break; }
+    }
+    return matchPassage() || { truncated, count };
+  }
+  if (occurrence == null) {
+    refs.probe = scope => search(scope, true).excerpt || null;
+    return true;
+  }
+  const found = search(document.body, false);
+  if (!found.range) return { ok: true, found: false, matchesSeen: found.count, truncated: found.truncated,
+    message: found.truncated ? "Reached the loaded-text search limit. Use scroll_until to search further sections." : "No such occurrence in the rendered text currently loaded. For a feed that loads on scroll, use scroll_until with the same words." };
+  if (!exposed(found.range, found.block)) {
+    found.element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+    if (!exposed(found.range, found.block)) {
+      const box = found.range.getBoundingClientRect();
+      if (box.bottom <= 0 || box.top >= innerHeight) scrollBy({ top: box.top - innerHeight / 2, behavior: "instant" });
+    }
+  }
+  return { ok: true, found: true, occurrence, excerpt: found.excerpt, inViewport: exposed(found.range, found.block),
+    message: "Found the passage in the loaded page text. Read the viewport for current controls." };
+}
+
+return {findPageText};
+})();
+
 // content/action-pointer.js
 modules["content/action-pointer.js"] = (() => {
 // Also serialized by Safari into the isolated world. Keep all drawing code local.
@@ -1000,32 +1795,42 @@ async function watchNavigation(api, tabId, previousURL, signal, dispatch, naviga
   if (!api.tabs.onUpdated) return dispatch();
   // Collect tab events before dispatch. A fast redirect can already have
   // returned to the original URL by the time Safari acknowledges the action.
-  let started = false, finished = false, wake, timer;
+  let started = false, finished = false, openedTabId, wake, timer;
+  const created = tab => {
+    if (tab.openerTabId !== tabId || !Number.isInteger(tab.id)) return;
+    openedTabId = tab.id; wake?.();
+  };
   const updated = (id, change) => {
-    if (id !== tabId || (!change.status && !change.url)) return;
+    // Safari can report the current URL and title after website access changes,
+    // even when a plain field click stayed in the same complete document.
+    if (id !== tabId || (!change.status && (!change.url || change.url === previousURL))) return;
     started = true;
     if (change.status) finished = change.status === "complete";
     wake?.();
   };
   api.tabs.onUpdated.addListener(updated);
+  api.tabs.onCreated?.addListener(created);
   try {
     let result, lostDocument;
     try { result = await dispatch(); }
     catch (error) {
-      if (navigationRequested || !/context was destroyed|frame (?:was )?removed|document (?:was )?unloaded|page did not confirm/i.test(error.message)) throw error;
+      // WebKit can lose the injection reply during document replacement and
+      // report only a generic exception. Require a matching tab event below.
+      if (navigationRequested || !/context was destroyed|frame (?:was )?removed|document (?:was )?unloaded|page did not confirm|^a javascript exception occurred\.?$/i.test(error.message)) throw error;
       lostDocument = error;
     }
     // Link default actions run after the click handler returns. Give Safari a
     // short opportunity to report navigation even when injection succeeded.
-    if (!started && !navigationRequested) await new Promise(resolve => { wake = resolve; timer = setTimeout(resolve, 300); });
+    if (!started && openedTabId == null && !navigationRequested) await new Promise(resolve => { wake = resolve; timer = setTimeout(resolve, 300); });
     signal.throwIfAborted();
+    if (openedTabId != null && !navigationRequested) return { ok: !result?.error, ...result, openedTabId, navigationObserved: true, message: "The website opened another tab. Read openedTabId to verify the outcome before submitting again." };
     if (started || navigationRequested) await readyTab(api, tabId, signal, tab => finished || tab.url !== previousURL);
     if (lostDocument) {
       if (!started) throw lostDocument;
       return { navigationObserved: true, message: "The tab navigated during the click. Read the new page to verify the result before taking another action." };
     }
     return result;
-  } finally { clearTimeout(timer); api.tabs.onUpdated.removeListener(updated); }
+  } finally { clearTimeout(timer); api.tabs.onUpdated.removeListener(updated); api.tabs.onCreated?.removeListener(created); }
 }
 
 return {readyTab, watchNavigation};
@@ -1034,7 +1839,11 @@ return {readyTab, watchNavigation};
 // content/direct-input.js
 modules["content/direct-input.js"] = (() => {
 // One injection per click, key command, or small batch of typed characters.
-function performPageInput(owner, step, args = {}) {
+function performPageInput(owner, step, args = {}, reportError = false) {
+  if (reportError) {
+    try { return performPageInput(owner, step, args); }
+    catch (error) { return { pageError: String(error.message || error).slice(0, 700) }; }
+  }
   const b = globalThis.__safariChatInput;
   if (!b || b.owner !== owner || b.url !== location.href) throw new Error("The document or input target changed. Read it again.");
   if (step === "end_typing") { b.typing?.abort(); return { ok: true }; }
@@ -1430,7 +2239,8 @@ class PageInputs {
 
   async inject(tabId, func, args) {
     const [injection] = await this.api.scripting.executeScript({ target: { tabId }, func, args });
-    if (injection?.error || !injection?.result) throw new Error(injection?.error?.message || "The input target is unavailable. Read the page again.");
+    const error = injection?.error ?? injection?.result?.pageError;
+    if (error || !injection?.result) throw new Error((typeof error === "string" ? error : error?.message) || "The input target is unavailable. Read the page again.");
     return injection.result;
   }
 
@@ -1440,7 +2250,7 @@ class PageInputs {
     this.targets.clear();
   }
 
-  async execute(args, tabId, url, snapshot, authorize, signal, indicate) {
+  async execute(args, tabId, url, snapshot, authorize, signal, indicate, observeActivation) {
     const { operation, elementId, text, point, range, occurrence } = args;
     const current = this.targets.get(tabId);
     const clicking = operation === "double_click" || operation === "click";
@@ -1483,22 +2293,24 @@ class PageInputs {
     await grant.verify();
     const target = prior ?? { url, ref: ref || null, selected: false };
     if (!prior) {
-      await this.inject(tabId, actOnPage, ["bind_input", ref?.id ?? null, null, url, { inputOwner: this.owner }]);
+      await this.inject(tabId, actOnPage, ["bind_input", ref?.id ?? null, null, url, { inputOwner: this.owner }, true]);
       this.targets.set(tabId, target);
     }
-    const run = (step, payload = {}) => this.inject(tabId, performPageInput, [this.owner, step, payload]);
+    const run = (step, payload = {}) => this.inject(tabId, performPageInput, [this.owner, step, payload, true]);
     if (clicking) {
       const { point: p } = await run("aim_click", { point });
       await indicate({ left: p.x-1, top: p.y-1, right: p.x+1, bottom: p.y+1 }, "aim");
       await grant.verify();
-      const first = await run("click", { count: 1, hosts });
-      if (operation === "click") return { ...first, message: "Pressed and released the target. Verify the result." };
-      await new Promise(resolve => setTimeout(resolve, 100));
-      try {
-        await grant.verify();
-        const result = await run("click", { count: 2, hosts });
-        return { ...result, message: result.doubleClicked ? "Two clicks and a double-click event dispatched. Verify the result." : "Both clicks were sent but the target changed before the double-click event." };
-      } catch (error) { signal.throwIfAborted(); return { ok: false, clicks: 1, doubleClicked: false, error: "The first click was confirmed. Check the page before retrying. " + error.message }; }
+      return observeActivation(async () => {
+        const first = await run("click", { count: 1, hosts });
+        if (operation === "click") return { ...first, message: "Pressed and released the target. Verify the result." };
+        await new Promise(resolve => setTimeout(resolve, 100));
+        try {
+          await grant.verify();
+          const result = await run("click", { count: 2, hosts });
+          return { ...result, message: result.doubleClicked ? "Two clicks and a double-click event dispatched. Verify the result." : "Both clicks were sent but the target changed before the double-click event." };
+        } catch (error) { signal.throwIfAborted(); return { ok: false, clicks: 1, doubleClicked: false, error: "The first click was confirmed. Check the page before retrying. " + error.message }; }
+      });
     }
     await this.inject(tabId, installTextSelection, [this.owner]);
     if (operation === "copy") {
@@ -1531,13 +2343,99 @@ class PageInputs {
       return { ok: true, typed, message: "Typed at the caret." };
     }
     await grant.verify();
-    const result = await run(operation, { text, range, occurrence, hosts });
+    const dispatch = () => run(operation, { text, range, occurrence, hosts });
+    const result = operation === "press_key" && text === "Enter" ? await observeActivation(dispatch) : await dispatch();
     target.selected = (operation === "select_text" && result.ok) || result.selected > 0;
     return result;
   }
 }
 
 return {INPUT_ACTIONS, PageInputs};
+})();
+
+// core/browser-actions.js
+modules["core/browser-actions.js"] = (() => {
+const { INPUT_ACTIONS } = modules["core/page-input.js"];
+// These commands are implemented locally. Tab-level operations depend on the
+// WebExtension methods exposed by this installation of Safari.
+const TAB_METHODS = { open_tab: "create", close_tab: "remove", list_tabs: "query", switch_tab: "update", navigate: "update", back: "goBack", forward: "goForward", zoom: "setZoom" };
+const PAGE_ACTIONS = ["read", "find_text", "click", "fill", "select", "set_checked", "scroll", "scroll_until", "drag", "move_pointer", "set_speed", "stop_motion", "wait_motion", ...INPUT_ACTIONS];
+const BROWSER_ACTIONS = [...PAGE_ACTIONS, ...Object.keys(TAB_METHODS)];
+
+function availableBrowserActions(api) {
+  return BROWSER_ACTIONS.filter(action => Object.hasOwn(TAB_METHODS, action)
+    ? typeof api.tabs?.[TAB_METHODS[action]] === "function"
+    : typeof api.scripting?.executeScript === "function");
+}
+
+return {TAB_METHODS, PAGE_ACTIONS, BROWSER_ACTIONS, availableBrowserActions};
+})();
+
+// core/tab-focus.js
+modules["core/tab-focus.js"] = (() => {
+// A run can select a tab in its source window. Keep the dock on the source
+// and yield the selection if the user has since chosen another tab.
+class TabFocus {
+  constructor(api, sourceId) {
+    this.api = api;
+    this.sourceId = sourceId;
+    this.selection = null;
+  }
+
+  async show(tabId, url, verify, temporary = false) {
+    const tabs = this.api.tabs;
+    if (!Number.isInteger(this.sourceId) || typeof tabs.update !== "function") throw new Error("This Safari window does not support switching tabs from chat.");
+    const { windowId } = await tabs.get(this.sourceId);
+    if (!Number.isInteger(windowId)) throw new Error("Safari could not identify the window containing this chat.");
+    await verify();
+    const [source, target, activeTabs] = await Promise.all([tabs.get(this.sourceId), tabs.get(tabId), tabs.query?.({ windowId, active: true })]);
+    if (source.windowId !== windowId || target.windowId !== windowId) throw new Error("Choose a tab in the same Safari window as this chat.");
+    if (target.url !== url) throw new Error("The tab navigated before it could be selected. Read its current page again.");
+    if (!target.active) {
+      const previous = activeTabs?.[0] ?? (source.active ? source : null);
+      const previousId = this.selection?.id === previous?.id && this.selection?.temporary
+        ? this.selection.previousId : previous?.id;
+      await tabs.update(tabId, { active: true });
+      this.selection = { id: tabId, windowId, previousId, temporary };
+    } else if (!temporary) this.selection = { id: tabId, windowId, temporary: false };
+    await verify();
+    const selected = await tabs.get(tabId);
+    if (selected.url !== url || selected.windowId !== windowId || !selected.active) throw new Error("The selected tab changed. Read the target tab again before continuing.");
+  }
+
+  async returnSelection(forApproval, verify) {
+    const selection = this.selection;
+    if (!selection || (!forApproval && !selection.temporary)) return;
+    this.selection = null;
+    const returnId = forApproval ? this.sourceId : selection.previousId;
+    if (!Number.isInteger(returnId) || returnId === selection.id) return;
+    const tabs = this.api.tabs;
+    // The user can switch tabs, close either one, or drag it to another window.
+    await verify();
+    const [current, previous] = await Promise.all([tabs.get(selection.id), tabs.get(returnId)]).catch(() => []);
+    if (current?.active && current.windowId === selection.windowId && previous?.windowId === selection.windowId) {
+      await tabs.update(returnId, { active: true }).catch(() => {});
+    }
+  }
+}
+
+// WebKit can acknowledge tabs.update before the document becomes visible.
+// Poll from the background since a hidden document's own timers may suspend.
+async function waitForVisiblePage(api, tabId, url, signal) {
+  const deadline = Date.now() + 1800;
+  do {
+    signal.throwIfAborted();
+    const [probe] = await api.scripting.executeScript({ target: { tabId }, func: expected =>
+      location.href !== expected ? "changed" : document.visibilityState, args: [url] });
+    if (probe?.result === "visible") return;
+    if (probe?.result !== "hidden") throw new Error("The tab changed while becoming visible. Read the current page again.");
+    if (!(await api.tabs.get(tabId)).active) throw new Error("Another tab was selected before the gesture started.");
+    await new Promise(resolve => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  throw new Error("Safari selected the tab, but its document is still hidden. Show the Safari window to perform this motion.");
+}
+
+return {TabFocus, waitForVisiblePage};
 })();
 
 // content/page-motion.js
@@ -1590,9 +2488,12 @@ function controlPageMotion(command, id, options) {
       if (state.active) frame = requestAnimationFrame(tick);
       return state;
     };
-    globalThis.__safariChatStartScroll = (target, owner, direction, speed, speedChanges) => {
+    globalThis.__safariChatStartScroll = (target, owner, direction, speed, speedChanges, probe) => {
       const state = { active: true, kind: "scroll", direction, speed };
       let fraction = 0, stalled = 0, lastDirection, travelled = 0, checkpoint = 0;
+      const viewport = target === document.scrollingElement ? innerHeight : Math.min(innerHeight, target.clientHeight);
+      const stride = Math.max(1, Math.floor(viewport / 3));
+      let nextCheck = 0, lastCheck = 0, activeSeconds = 0;
       const applySpeeds = () => {
         while (checkpoint < speedChanges.length && travelled >= speedChanges[checkpoint].after) {
           state.speed = speedChanges[checkpoint++].speed;
@@ -1601,13 +2502,22 @@ function controlPageMotion(command, id, options) {
       };
       applySpeeds();
       return globalThis.__safariChatStartMotion(owner, state, target, (dt, now) => {
+        if (probe) {
+          if (state.speed) activeSeconds += dt;
+          if (travelled >= nextCheck || now - lastCheck >= 250 || stalled) {
+            const found = probe(target);
+            if (found) { state.match = found; return "target visible"; }
+            nextCheck = travelled + stride; lastCheck = now;
+          }
+          if (travelled >= 12 * viewport || activeSeconds >= 15) return "search limit";
+        }
         if (state.direction !== lastDirection || !state.speed) { stalled = 0; fraction = 0; }
         lastDirection = state.direction;
         const horizontal = ["left", "right"].includes(lastDirection);
         const sign = ["up", "left"].includes(lastDirection) ? -1 : 1;
         fraction += sign * Math.min(horizontal ? target.scrollWidth : target.scrollHeight, state.speed * dt);
         const remaining = speedChanges[checkpoint] ? Math.ceil(speedChanges[checkpoint].after - travelled) : Infinity;
-        const distance = sign * Math.min(Math.abs(Math.trunc(fraction)), remaining);
+        const distance = sign * Math.min(Math.abs(Math.trunc(fraction)), remaining, probe ? nextCheck - travelled : Infinity);
         if (!distance) return;
         fraction -= distance;
         const before = horizontal ? target.scrollLeft : target.scrollTop;
@@ -1640,6 +2550,11 @@ return {controlPageMotion};
 modules["core/motion-session.js"] = (() => {
 const { controlPageMotion } = modules["content/page-motion.js"];
 function motionResult(state) {
+  if (state.reason === "gesture finished") return { ok: true, motion: state, message: "Delivered " + state.events + " scripted events. " +
+    (state.currentItem && state.fromItem !== state.currentItem ? "Gallery selection changed from " + state.fromItem + " to " + state.currentItem + ". " : "") +
+    (state.rotationUnavailable ? "This browser has no trackpad rotation event. " : "") + "Read the page to verify the requested effect." };
+  if (state.reason === "target visible") return { ok: true, found: true, motion: state, message: "Stopped at " + state.match + ". Read this viewport for fresh controls and continue the requested actions." };
+  if (state.reason === "search limit") return { ok: true, found: false, motion: state, message: "Paused after searching this section. Read the viewport and refine or continue the search." };
   const expected = state.active || ["path finished", "scroll boundary", "stopped by model", "stopped by user"].includes(state.reason);
   return expected ? { ok: true, motion: state } : { ok: false, motion: state, error: "Motion interrupted: " + state.reason + ". Read the page before continuing." };
 }
@@ -1744,7 +2659,7 @@ return {motionResult, MotionSession};
 
 // core/website-access.js
 modules["core/website-access.js"] = (() => {
-const { safeWebURL } = modules["core/context.js"];
+const { publicURL, safeWebURL } = modules["core/context.js"];
 // Website grants belong to one connection in one Safari profile.
 const accessKey = account => `website-access:${account}`;
 
@@ -1793,6 +2708,23 @@ function visibleWebsite(url, access) {
   return !!safe && !access?.blocked.includes(websiteHost(new URL(safe).hostname));
 }
 
+// Safari can return a real tab ID and position with both the URL and title redacted.
+function listedTabs(tabs, access, limit, protectedId = null) {
+  const rows = [];
+  for (const [index, tab] of tabs.entries()) {
+    if (rows.length >= limit) break;
+    if (!Number.isInteger(tab.id) || tab.id < 0 || tab.id === protectedId) continue;
+    const active = typeof tab.active === "boolean" ? { active: tab.active } : {};
+    if (!tab.url) {
+      const position = Number.isInteger(tab.index) && tab.index >= 0 ? tab.index + 1 : index + 1;
+      rows.push({ id: tab.id, title: "Tab " + position, url: "", needsWebsiteAccess: true, ...active });
+    } else if (visibleWebsite(tab.url, access)) {
+      rows.push({ id: tab.id, title: (tab.title || "Untitled").slice(0, 160), url: publicURL(tab.url), ...active });
+    }
+  }
+  return rows;
+}
+
 // A tab listing spans websites. Only all-sites access can authorize it automatically.
 function allowsAction(access, hosts) {
   const blocked = hosts.find(host => access.blocked.includes(websiteHost(host)));
@@ -1800,19 +2732,28 @@ function allowsAction(access, hosts) {
   return access.mode === "auto" || (hosts.length > 0 && hosts.every(host => access.allowed.includes(websiteHost(host))));
 }
 
-return {accessKey, websiteHost, sitePermissionPattern, readWebsiteAccess, changeWebsiteAccess, visibleWebsite, allowsAction};
+return {accessKey, websiteHost, sitePermissionPattern, readWebsiteAccess, changeWebsiteAccess, visibleWebsite, listedTabs, allowsAction};
 })();
 
 // core/browser-tools.js
 modules["core/browser-tools.js"] = (() => {
 const { snapshotPage, actOnPage } = modules["content/page.js"];
 const { installPointerPath } = modules["content/pointer-path.js"];
+const { installGesturePlayer } = modules["content/gesture.js"];
+const { installGestureContacts } = modules["content/gesture-contacts.js"];
+const { installTrackpad } = modules["content/trackpad.js"];
+const { installPageGestureEvents } = modules["content/page-gesture-events.js"];
+const { gesturePreview, validateGesture } = modules["core/gestures.js"];
+const { configureGallerySearch } = modules["content/scroll-search.js"];
+const { findPageText } = modules["content/find-text.js"];
 const { showActionPointer } = modules["content/action-pointer.js"];
 const { readyTab, watchNavigation } = modules["core/tab-navigation.js"];
 const { INPUT_ACTIONS } = modules["core/page-input.js"];
+const { BROWSER_ACTIONS, TAB_METHODS } = modules["core/browser-actions.js"];
+const { TabFocus, waitForVisiblePage } = modules["core/tab-focus.js"];
 const { motionResult } = modules["core/motion-session.js"];
 const { publicURL, safeWebURL } = modules["core/context.js"];
-const { allowsAction, sitePermissionPattern, visibleWebsite } = modules["core/website-access.js"];
+const { allowsAction, listedTabs, sitePermissionPattern } = modules["core/website-access.js"];
 function describePath(path, viewport, bounds) {
   if (!viewport || !bounds || !Array.isArray(path) || path.length < 2 || path.length > 128) throw new Error("Read the target and choose 2-128 visible viewport points.");
   for (const point of path) {
@@ -1827,8 +2768,8 @@ function describePath(path, viewport, bounds) {
 
 function scriptResult(results, fallback) {
   const injection = results?.[0];
-  if (injection?.error != null) {
-    const error = injection.error;
+  const error = injection?.error ?? injection?.result?.pageError;
+  if (error != null) {
     const detail = typeof error === "string" ? error : error?.message;
     throw new Error(typeof detail === "string" && detail.trim() ? detail.slice(0, 700) : fallback);
   }
@@ -1851,7 +2792,7 @@ async function readTab(api, tabId, limit, { viewportOnly = false, selectionOnly 
   if (!Number.isInteger(tabId) || tabId < 0) throw new Error("Select a Safari tab first.");
   const url = expectedURL ?? (await api.tabs.get(tabId)).url;
   if (url && !safeWebURL(url)) throw new Error("Safari protects this page. Open an ordinary website to attach it.");
-  const results = await api.scripting.executeScript({ target: { tabId }, func: snapshotPage, args: [limit, viewportOnly, selectionOnly, url ?? null, true, pointerPaths] });
+  const results = await api.scripting.executeScript({ target: { tabId }, func: snapshotPage, args: [limit, viewportOnly, selectionOnly, url ?? null, true, pointerPaths, true] });
   const { pointerRect, ...page } = scriptResult(results, "Could not read this page. Check that the tab finished loading and read it again.");
   if (pointerRect) await indicatePageAction(api, tabId, page.url, pointerRect);
   return page;
@@ -1867,11 +2808,12 @@ async function sourceWindowId(api, tabId) {
   throw new Error("Safari could not identify the source window. Open Safari Chat from the website again.");
 }
 
-function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verifySession, readAccess, motionSession, inputs, initialTabs = [], defaultTabId = null, protectedTabId = null }) {
+function createBrowserTools({ api, pageChars, approve, requestSiteAccess, requestTabAccess, verifySession, readAccess, motionSession, inputs, initialTabs = [], defaultTabId = null, protectedTabId = null, tabFocus = new TabFocus(api, defaultTabId) }) {
   const readableTabs = new Map(initialTabs.filter(tab => Number.isInteger(tab.id) && safeWebURL(tab.url)).map(tab => [tab.id, new URL(tab.url).origin]));
   // A requested destination is a hint for Safari's permission sheet, never proof
   // of the live tab's URL or a grant to share its contents.
   const destinations = new Map(), declinedSites = new Set();
+  const hiddenTabs = new Map(), declinedTabs = new Set();
   const snapshots = new Map();
   async function authorize(details, hosts, signal, sharedRead = false, siteOrigin = null) {
     const automatic = readAccess && allowsAction(await readAccess(), hosts);
@@ -1909,7 +2851,7 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
     const hint = destinations.get(tabId) ?? readableTabs.get(tabId);
     const committed = tab => !hint || tab.url !== "about:blank";
     let tab = await readyTab(api, tabId, signal, committed);
-    let url = safeWebURL(tab.url), grant;
+    let url = safeWebURL(tab.url), grant, requestedSite = false;
     const visibleTab = () => readyTab(api, tabId, signal, current => !!current.url && current.url !== "about:blank",
       "Safari still hides the address of this tab. It may have redirected. Check website access for the site shown in that tab.");
     const readGrant = (address, askSafari = false) => {
@@ -1918,17 +2860,30 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
       return authorize({ operation: "read", title: "Read this page?", detail: publicURL(address) },
         [hostname], signal, readableTabs.get(tabId) === origin, askSafari ? origin : null);
     };
+    if (!tab.url && !hint && requestTabAccess && hiddenTabs.has(tabId)) {
+      if (declinedTabs.has(tabId)) throw new Error("Access to this tab was declined for this task.");
+      await verifySession?.();
+      signal.throwIfAborted();
+      let expected;
+      try { expected = await requestTabAccess(tabId, hiddenTabs.get(tabId), signal); }
+      catch (error) { declinedTabs.add(tabId); throw error; }
+      signal.throwIfAborted();
+      tab = await visibleTab();
+      url = safeWebURL(tab.url);
+      if (!url || new URL(url).origin !== expected) throw new Error("The site's address does not match the permission for this tab. List the tabs again.");
+      grant = await authorize({ operation: "read" }, [new URL(url).hostname], signal, true);
+      requestedSite = !!await api.permissions?.contains({ origins: [sitePermissionPattern(expected)] });
+    }
     if (!tab.url && hint && api.permissions?.contains) {
       const pattern = sitePermissionPattern(hint);
       if (!pattern) throw new Error("Safari cannot request website access for this address.");
-      if (!await api.permissions.contains({ origins: [pattern] })) grant = await readGrant(hint, true);
+      if (!await api.permissions.contains({ origins: [pattern] })) { grant = await readGrant(hint, true); requestedSite = true; }
       tab = await visibleTab();
       url = safeWebURL(tab.url);
       if (grant && (!url || new URL(url).origin !== hint)) throw new Error("The tab changed websites during the permission request. Read this same tab again to review its current site.");
     }
     if (!url) throw new Error(tab.url ? "Safari protects this page. Choose an HTTP or HTTPS website." : "Safari has not exposed this tab's address. Check Safari Chat's website access for the site in that tab.");
     const origin = new URL(url).origin;
-    const requestedAccess = !!grant;
     grant ??= await readGrant(url);
     await grant.verify();
     const capture = () => readTab(api, tabId, pageChars, { viewportOnly: true, expectedURL: url, pointerPaths: !!motionSession });
@@ -1936,7 +2891,7 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
     try { page = await capture(); } catch (error) {
       // A tab's address may still be visible when Safari rejects injection.
       // Recover a permission failure once, without replaying a browser mutation.
-      if (requestedAccess || !requestSiteAccess || !api.permissions?.contains ||
+      if (requestedSite || !requestSiteAccess || !api.permissions?.contains ||
           !/permission|does not have access|access (?:was |is )?denied|cannot access contents/i.test(error.message)) throw error;
       signal.throwIfAborted();
       const pattern = sitePermissionPattern(origin);
@@ -1949,20 +2904,25 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
       page = await capture();
     }
     signal.throwIfAborted();
-    if (readAccess) await grant.verify();
-    if (new URL(page.url).origin !== origin) throw new Error("The tab changed websites while reading. Request permission for the new page.");
+    await grant.verify();
+    if (requestedSite && !await api.permissions.contains({ origins: [sitePermissionPattern(origin)] })) throw new Error("Safari website permission changed while reading the tab.");
+    if (new URL(page.url).origin !== origin || (await api.tabs.get(tabId)).url !== url) throw new Error("The tab changed while reading. Read the current page again.");
     if (grant.rememberRead) readableTabs.set(tabId, origin);
     snapshots.set(tabId, { url: page.url, elements: page.elements, viewport: page.viewport });
     return { ...page, url: publicURL(page.url), tabId, ...(motionSession?.last?.tabId === tabId && { motion: motionSession.last }) };
   }
   return async function execute(args, signal) {
-    const { operation, tabId: requestedTab, elementId, url, text, direction, speed, checked, path, wait, speedChanges } = args ?? {};
-    const tabId = requestedTab ?? defaultTabId;
-    if (!["read", "click", "fill", "select", "set_checked", "scroll", "drag", "move_pointer", "set_speed", "stop_motion", "wait_motion", "navigate", "open_tab", "close_tab", "list_tabs", ...INPUT_ACTIONS].includes(operation)) throw new Error("Unknown browser action.");
+    const { operation: requestedOperation, tabId: requestedTab, elementId, url, text, direction, speed, checked, path, wait, speedChanges } = args ?? {};
+    const seeking = requestedOperation === "scroll_until", operation = seeking ? "scroll" : requestedOperation;
+    const tabId = requestedTab ?? (["stop_motion", "wait_motion", "set_speed"].includes(operation) ? motionSession?.last?.tabId : null) ?? defaultTabId;
+    if (requestedOperation !== "gesture" && !BROWSER_ACTIONS.includes(requestedOperation)) throw new Error("Unknown browser action.");
     signal.throwIfAborted();
     const motion = motionSession?.current;
     const pointerPath = operation === "drag" || operation === "move_pointer";
-    const continuous = operation === "scroll" && speed != null;
+    const gesture = operation === "gesture";
+    const continuous = operation === "scroll" && (speed != null || seeking);
+    const until = seeking ? (text?.trim() || "carousel") : null;
+    if (seeking && (!["up","down"].includes(direction) || until.length > 180 || speed === 0 || motion)) throw new Error("Start a search up or down with a short visible phrase or 'carousel' and a positive speed. Stop other motion first.");
     if (speedChanges != null && (!continuous || motion || !Array.isArray(speedChanges) || speedChanges.length > 128 ||
         speedChanges.some((change, i) => !Number.isFinite(change?.after) || change.after < 0 || (i && change.after <= speedChanges[i-1].after) || !Number.isFinite(change?.speed) || change.speed < 0))) {
       throw new Error("On starting a continuous scroll, supply up to 128 speed changes with increasing distances in CSS pixels and nonnegative speeds.");
@@ -1978,10 +2938,11 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
       if (!state.active) snapshots.delete(tabId);
       return motionResult(state);
     }
-    if (continuous || pointerPath) {
+    if (continuous || pointerPath || gesture) {
       if (!motionSession) throw new Error("Use Safari side chat for continuous scroll and pointer paths.");
       if (speed != null && (!Number.isFinite(speed) || speed < 0)) throw new Error("Use a finite speed of zero or more CSS pixels per second.");
       if (motionSession.last?.reason === "stopped by user") throw new Error("The user stopped motion. Leave it stopped for this message.");
+      if (motionSession.last?.tabId === tabId && motionSession.last.reason === "tab hidden") throw new Error("The tab was hidden during motion. Leave it stopped for this message.");
       if (continuous && !["up", "down", "left", "right"].includes(direction)) throw new Error("Continuous scroll needs up, down, left or right.");
       if (motion) {
         if (!continuous || motion.kind !== "scroll" || motion.tabId !== tabId || elementId) throw new Error("Stop the current motion before starting another. Use set_speed to adjust it.");
@@ -1996,12 +2957,15 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
       signal.throwIfAborted();
     }
     if (operation === "list_tabs") {
-      const grant = await authorize({ operation, title: "Share your open tabs?", detail: "Share the titles and addresses of accessible tabs in this window." }, [], signal);
+      const grant = await authorize({ operation, title: "Share your open tabs?", detail: "List tabs in this window with the titles and addresses Safari makes available." }, [], signal);
       const windowId = await sourceWindowId(api, defaultTabId);
       await grant.verify();
       const tabs = await api.tabs.query(Number.isInteger(windowId) ? { windowId } : { currentWindow: true });
-      const access = readAccess ? await grant.verify() : undefined;
-      return tabs.filter(tab => visibleWebsite(tab.url, access)).slice(0, 40).map(tab => ({ tabId: tab.id, title: (tab.title ?? "Untitled").slice(0, 160), url: publicURL(tab.url) }));
+      const access = await grant.verify();
+      const rows = listedTabs(tabs, access, 40, protectedTabId);
+      hiddenTabs.clear();
+      for (const row of rows) if (row.needsWebsiteAccess) hiddenTabs.set(row.id, row.title);
+      return rows.map(({ id, ...row }) => ({ tabId: id, ...row }));
     }
     if (operation === "open_tab") {
       const target = safeWebURL(url);
@@ -2021,17 +2985,60 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
     if (!currentURL) throw new Error("Safari has not exposed a website address for this tab. Read the tab before trying this action.");
     const hosts = [new URL(currentURL).hostname];
     const snapshot = snapshots.get(tabId);
+    if (operation === "switch_tab") {
+      const grant = await authorize({ operation, title: "Switch to this tab?", detail: (tab.title || "Website") + "\n" + publicURL(currentURL) }, hosts, signal);
+      await tabFocus.show(tabId, currentURL, grant.verify);
+      return { ok: true, tabId, active: true, message: "Safari selected this tab. Use its tabId for subsequent actions." };
+    }
+    if (["back", "forward", "zoom"].includes(operation)) {
+      const zoom = operation === "zoom", method = TAB_METHODS[operation];
+      if (typeof api.tabs[method] !== "function") throw new Error("This Safari version does not expose this tab operation.");
+      if (zoom && (!Number.isFinite(speed) || speed < 0.3 || speed > 5)) throw new Error("Choose a zoom factor from 0.3 to 5.");
+      const title = zoom ? "Change this tab's zoom to " + Math.round(speed * 100) + "%?" : "Go " + operation + " in this tab's history?";
+      const grant = await authorize({ operation, title, detail: publicURL(currentURL) }, hosts, signal);
+      if ((await api.tabs.get(tabId)).url !== currentURL) throw new Error("The tab changed before the operation. Read it again.");
+      await grant.verify();
+      snapshots.delete(tabId);
+      if (zoom) {
+        await api.tabs.setZoom(tabId, speed);
+        const factor = await api.tabs.getZoom?.(tabId).catch(() => undefined);
+        if (Number.isFinite(factor) && Math.abs(factor-speed) > 0.001) return { ok: false, zoom: factor, error: "Safari applied a different zoom factor: " + factor + "." };
+        return { ok: true, zoom: factor ?? speed, message: "Safari accepted the tab zoom." };
+      }
+      readableTabs.delete(tabId); destinations.delete(tabId);
+      await watchNavigation(api, tabId, currentURL, signal, () => api.tabs[method](tabId), false);
+      const after = await api.tabs.get(tabId);
+      return { ok: true, navigationObserved: !!after.url && after.url !== currentURL, message: "Safari received the history request. Read this tab to verify the destination." };
+    }
+    const observeActivation = async dispatch => {
+      const result = await watchNavigation(api, tabId, currentURL, signal, dispatch, false);
+      if (Number.isInteger(result?.openedTabId)) hiddenTabs.set(result.openedTabId, "Results tab");
+      return result;
+    };
+    if (operation === "find_text") {
+      const occurrence = args.occurrence ?? 1;
+      if (typeof text !== "string" || !text.trim() || text.length > 180 || !Number.isInteger(occurrence) || occurrence < 1 || occurrence > 100) throw new Error("Use a phrase of up to 180 characters and an occurrence from 1 to 100.");
+      if (snapshot?.url !== currentURL) throw new Error("Read this tab before searching its loaded text.");
+      const grant = await authorize({ operation, title: "Find this text on the page?", detail: publicURL(currentURL) + "\n" + text }, hosts, signal);
+      await grant.verify();
+      const result = scriptResult(await api.scripting.executeScript({ target: { tabId }, func: findPageText, args: [currentURL, text, occurrence] }), "Could not search the current document.");
+      snapshots.delete(tabId);
+      await grant.verify();
+      if ((await api.tabs.get(tabId)).url !== currentURL) throw new Error("The page changed during the search. Read it again.");
+      return { ...result, tabId };
+    }
     const fieldClick = inputs && operation === "click" && (args.point || snapshot?.elements.find(item => item.id === elementId)?.actions?.includes("type_text"));
     if (INPUT_ACTIONS.includes(operation) || fieldClick) {
       if (!inputs) throw new Error("Use Safari side chat for direct keyboard, selection and pointer input.");
       const indicate = (target, effect) => indicatePageAction(api, tabId, currentURL, target, effect);
       snapshots.delete(tabId);
-      return inputs.execute(args, tabId, currentURL, snapshot, authorize, signal, indicate);
+      return inputs.execute(args, tabId, currentURL, snapshot, authorize, signal, indicate, observeActivation);
     }
     let detail;
     let target;
     let galleryScroll = false;
     let directions;
+    let gestureSpec;
     if (operation === "navigate") {
       target = safeWebURL(url);
       if (!target) throw new Error("Only HTTP and HTTPS navigation is supported.");
@@ -2044,32 +3051,47 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
       if (["fill", "select"].includes(operation) && (typeof text !== "string" || text.length > 12000)) throw new Error("Invalid field text.");
       if (!snapshot || snapshot.url !== currentURL) throw new Error("Read the current page before acting on an element.");
       const ref = snapshot?.elements.find(element => element.id === elementId);
-      if (!(["scroll", "move_pointer"].includes(operation) && !elementId) && !ref) throw new Error("Read the current page before acting on an element.");
-      if (operation !== "move_pointer" && ref?.actions && !ref.actions.includes(operation)) throw new Error("This control does not support that action. Read the page and use one of its listed actions.");
+      if (!(["scroll", "move_pointer", "gesture"].includes(operation) && !elementId) && !ref) throw new Error("Read the current page before acting on an element.");
+      if (!gesture && operation !== "move_pointer" && ref?.actions && !ref.actions.includes(operation)) throw new Error("This control does not support that action. Read the page and use one of its listed actions.");
       if (operation === "scroll" && ref?.directions && !ref.directions.includes(direction)) throw new Error("Use one of this area's listed scroll directions.");
       galleryScroll = operation === "scroll" && ref?.kind === "carousel";
       if (continuous && galleryScroll) throw new Error("This gallery has discrete navigation controls. Use scroll with speed null for each item.");
       directions = ref?.directions ?? ["up", "down", "left", "right"];
       detail = `${publicURL(currentURL)}\n${ref?.label ?? "Page"}${["fill", "select"].includes(operation) ? `\n${text}` : ""}${operation === "scroll" ? `\n${galleryScroll ? "Advance gallery" : "Scroll"} ${direction}` : ""}${operation === "set_checked" ? `\n${checked ? "Check" : "Uncheck"}` : ""}`;
-      if (operation === "click" && ref.destinationHost && ref.destinationHost !== hosts[0]) {
+      if ((operation === "click" || gesture) && ref?.destinationHost && ref.destinationHost !== hosts[0]) {
         hosts.push(ref.destinationHost);
         detail += `\nDestination: ${ref.destinationHost}`;
       }
       if (pointerPath) detail += "\n" + describePath(path, snapshot.viewport, ref?.bounds ?? [0, 0, snapshot.viewport?.width, snapshot.viewport?.height]);
-      if (continuous) detail += "\nStart at " + speed + " px/s. Speed and direction can change within this area. You can stop scrolling in chat or on the page.";
+      if (gesture) {
+        gestureSpec = validateGesture(args, snapshot.viewport, ref?.bounds);
+        const start = gestureSpec.anchor ?? gestureSpec.frames[0].points[0];
+        const units = gestureSpec.device === "wheel" ? (args.deltaMode || "pixel") + " wheel deltas" : gestureSpec.fingers + (gestureSpec.fingers === 1 ? " contact" : " contacts");
+        detail += "\n" + gestureSpec.device + " at (" + Math.round(start.x) + ", " + Math.round(start.y) + "), " + units + ", " + gestureSpec.frames.length + " frames over " + gestureSpec.frames.at(-1).at + " ms.";
+      }
+      if (seeking) detail += "\nStop when visible: " + until;
+      else if (continuous) detail += "\nStart at " + speed + " px/s. Speed and direction can change within this area. You can stop scrolling in chat or on the page.";
     }
-    const title = continuous ? "Scroll continuously?" : galleryScroll ? "Move this gallery?" : {
-      drag: "Drag along this path?", move_pointer: "Move the pointer along this path?", click: "Click this element?",
+    const needsVisiblePage = continuous || pointerPath || gesture;
+    if (needsVisiblePage && tab.active === false) detail += "\nSafari Chat will bring this tab into view for the motion.";
+    const title = seeking ? "Scroll to find this target?" : continuous ? "Scroll continuously?" : galleryScroll ? "Move this gallery?" : {
+      drag: "Drag along this path?", move_pointer: "Move the pointer along this path?", gesture: "Perform this webpage gesture?", click: "Click this element?",
       fill: "Enter this text?", select: "Choose this option?", set_checked: "Change this checkbox or radio option?",
       scroll: "Scroll this page or area?", navigate: "Navigate this tab?", close_tab: "Close this tab?",
     }[operation];
-    const grant = await authorize({ operation, title, detail, ...(pointerPath && { path: path.map(({ x, y }) => [x, y]) }) }, hosts, signal);
+    const grant = await authorize({ operation, title, detail, ...(pointerPath && { path: path.map(({ x, y }) => [x, y]) }),
+      ...(gesture && gestureSpec.device !== "wheel" && { paths: gesturePreview(gestureSpec) }) }, hosts, signal);
     signal.throwIfAborted();
     // The user may navigate while an approval is visible; reject stale permission.
     const now = await api.tabs.get(tabId);
     await grant.verify();
     if (now.url !== currentURL) throw new Error("The tab navigated while awaiting approval. Read it again.");
     snapshots.delete(tabId);
+    if (needsVisiblePage && now.active === false) {
+      await tabFocus.show(tabId, currentURL, grant.verify, true);
+      await waitForVisiblePage(api, tabId, currentURL, signal);
+      await grant.verify();
+    }
     if (operation === "navigate") {
       readableTabs.delete(tabId);
       await watchNavigation(api, tabId, currentURL, signal, () => api.tabs.update(tabId, { url: target }), true);
@@ -2079,7 +3101,7 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
     if (operation === "close_tab") { readableTabs.delete(tabId); destinations.delete(tabId); await api.tabs.remove(tabId); return { ok: true }; }
     const inject = (preview = false, motionId = null) => api.scripting.executeScript({
       target: { tabId }, func: actOnPage,
-      args: [operation, elementId ?? null, text ?? null, currentURL, { direction: direction ?? null, checked: checked ?? null, preview, ...(inputs && operation === "click" && { inputOwner: inputs.owner }), ...(motionId && { motionId, speed: speed ?? 600, ...(pointerPath && { path }), ...(speedChanges && { speedChanges }) }) }],
+      args: [operation, elementId ?? null, text ?? null, currentURL, { direction: direction ?? null, checked: checked ?? null, preview, ...(inputs && operation === "click" && { inputOwner: inputs.owner }), ...(motionId && { motionId, speed: speed ?? (seeking ? 1400 : 600), until, ...(pointerPath && { path }), ...(gesture && { gestureSpec, hosts }), ...(speedChanges && { speedChanges }) }) }, true],
     });
     if (now.active !== false && (operation === "click" || operation === "set_checked" || galleryScroll)) {
       const preview = await inject(true).catch(() => null);
@@ -2088,15 +3110,38 @@ function createBrowserTools({ api, pageChars, approve, requestSiteAccess, verify
       await grant.verify();
     }
     const dispatch = async motionId => scriptResult(await inject(false, motionId), "The page did not confirm the action. Read it again before retrying.");
+    if (gesture) {
+      if (gestureSpec.device === "touch" || gestureSpec.device === "trackpad" && gestureSpec.fingers > 1) {
+        const channel = "safari-chat-gesture-" + crypto.randomUUID();
+        const installed = await api.scripting.executeScript({ target: { tabId }, world: "MAIN", func: installPageGestureEvents, args: [channel] }).catch(() => []);
+        if (installed[0]?.result === true) gestureSpec.eventChannel = channel;
+      }
+      const drivers = { trackpad: installTrackpad, touch: installGestureContacts, pen: installGestureContacts, mouse: installGestureContacts };
+      for (const func of [drivers[gestureSpec.device], installGesturePlayer].filter(Boolean)) {
+        scriptResult(await api.scripting.executeScript({ target: { tabId }, func }), "Safari could not prepare the gesture.");
+      }
+      await grant.verify();
+      const { x, y } = gestureSpec.anchor ?? gestureSpec.frames[0].points[0];
+      await indicatePageAction(api, tabId, currentURL, { left: x-1, top: y-1, right: x+1, bottom: y+1 }, "aim");
+      return motionSession.start(tabId, operation, [], grant.verify, signal, dispatch, wait ?? true);
+    }
     if (pointerPath) {
       scriptResult(await api.scripting.executeScript({ target: { tabId }, func: installPointerPath }), "Safari could not prepare the pointer path.");
       await grant.verify();
       const { x, y } = path[0];
       await indicatePageAction(api, tabId, currentURL, { left: x - 1, top: y - 1, right: x + 1, bottom: y + 1 }, "aim");
     }
+    if (seeking) {
+      const gallery = /^(carousel|gallery)$/i.test(until);
+      scriptResult(await api.scripting.executeScript({ target: { tabId }, func: gallery ? configureGallerySearch : findPageText,
+        args: gallery ? [currentURL] : [currentURL, until, null] }), "Could not locate this document.");
+      const result = await motionSession.start(tabId, "scroll", directions, grant.verify, signal, dispatch, true);
+      if (result.motion?.reason === "scroll boundary") return { ...result, found: false, message: "Reached the scroll boundary without finding the target." };
+      return result;
+    }
     if (continuous || pointerPath) return motionSession.start(tabId, operation, directions, grant.verify, signal, dispatch, wait ?? pointerPath);
     if (operation !== "click") return dispatch();
-    const result = await watchNavigation(api, tabId, currentURL, signal, dispatch, false);
+    const result = await observeActivation(dispatch);
     if (inputs && result.focused) inputs.targets.set(tabId, { url: currentURL, ref: snapshot.elements.find(item => item.id === elementId), selected: false });
     return result;
   };
@@ -2109,6 +3154,7 @@ return {indicatePageAction, readTab, sourceWindowId, createBrowserTools};
 modules["core/chat-dock.js"] = (() => {
 const storageKey = "chatDocks";
 const frameKeys = ["left", "top", "width", "height"];
+const restoreScript = "safari-chat-dock-restore";
 
 function sourceTabId(sender) {
   const value = new URL(sender.url).searchParams.get("tab");
@@ -2174,10 +3220,20 @@ class ChatDock {
   async mount(tab, entry, restore) {
     if (tab.url && !/^https?:\/\//i.test(tab.url)) throw new Error("Safari protects this page. Open Safari Chat on a website.");
     const url = this.panelURL + "?tab=" + tab.id;
-    try { await this.api.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/mount.js"] }); }
+    try { await this.api.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/mount.js"], ...(restore && { injectImmediately: true }) }); }
     catch { throw new Error("Safari could not open the pane here. Check Safari Chat's access to this website and try again."); }
     const reply = await this.api.tabs.sendMessage(tab.id, { type: "panel.show", url, token: entry.token, width: entry.width, restore }, { frameId: 0 }).catch(() => null);
     if (!reply?.ok) throw new Error("Safari could not display the pane on this page. Reload the page and try again.");
+  }
+  async earlyRestore(enable) {
+    const scripting = this.api.scripting;
+    if (!scripting?.getRegisteredContentScripts || this.registered === enable) return;
+    try {
+      const scripts = await scripting.getRegisteredContentScripts({ ids: [restoreScript] });
+      if (enable && !scripts.length) await scripting.registerContentScripts([{ id: restoreScript, matches: ["http://*/*", "https://*/*"], js: ["content/restore.js"], runAt: "document_start", persistAcrossSessions: false }]);
+      if (!enable && scripts.length) await scripting.unregisterContentScripts({ ids: [restoreScript] });
+      this.registered = enable;
+    } catch { /* tabs.onUpdated also restores the dock on supported documents. */ }
   }
   open(tab, { restore = false } = {}) {
     return this.serial(async () => {
@@ -2189,6 +3245,7 @@ class ChatDock {
         await this.save();
       }
       await this.mount(tab, entry, restore);
+      await this.earlyRestore(true);
       return true;
     });
   }
@@ -2208,13 +3265,17 @@ class ChatDock {
       if (this.closing) delete this.closing[source];
       await this.save();
       await this.api.tabs.sendMessage(source, { type: "panel.close" }, { frameId: 0 }).catch(() => {});
+      if (!Object.keys(this.entries).length) await this.earlyRestore(false);
       return true;
     });
   }
   removed(id) {
     return this.serial(async () => {
       if (this.closing) delete this.closing[id];
-      if (this.entries[id]) { delete this.entries[id]; await this.save(); }
+      if (this.entries[id]) {
+        delete this.entries[id]; await this.save();
+        if (!Object.keys(this.entries).length) await this.earlyRestore(false);
+      }
     });
   }
   clear() {
@@ -2222,6 +3283,7 @@ class ChatDock {
     return this.serial(async () => {
       this.closing ??= Object.fromEntries(Object.entries(this.entries).map(([id, entry]) => [id, entry.token]));
       this.entries = {};
+      await this.earlyRestore(false);
       await this.save();
       if ((await this.api.storage.session.get(storageKey))[storageKey]) throw new Error("Safari still contains dock records. Retry cleanup.");
     });
@@ -2233,6 +3295,7 @@ return {sourceTabId, ChatDock};
 
 // core/chat-run.js
 modules["core/chat-run.js"] = (() => {
+const { safeWebURL } = modules["core/context.js"];
 // The background owns a single execution. A replacement panel subscribes to
 // its current output and approval; subscribing never issues a model/tool call.
 class ChatRun {
@@ -2242,10 +3305,14 @@ class ChatRun {
     this.panelTab = panelTab;
     this.account = message.account;
     this.generation = message.generation;
+    // Current panels always send their selection. Older panels sent a raw Work model ID.
+    this.mode = message.interactionMode === "chat" ? "chat" : "work";
+    this.temporaryId = message.temporaryId ?? null;
     this.chat = { id: message.chatId, revision: message.revision, title: String(message.title || "New chat"), account: message.account, messages: message.messages };
     this.controller = new AbortController();
     this.ports = new Set();
     this.state = new Map();
+    this.toolErrors = [];
     this.text = "";
   }
   matches(source, host, account, generation) {
@@ -2255,15 +3322,20 @@ class ChatRun {
   release() {
     this.ports.clear();
     this.state.clear();
+    this.toolErrors.length = 0;
     this.chat = null;
     this.text = "";
   }
   attach(port, resume = false) {
     this.ports.add(port);
-    if (resume) port.postMessage({ type: "resumed", chat: this.chat, text: this.text,
+    if (resume) port.postMessage({ type: "resumed", chat: this.chat, text: this.text, toolErrors: this.toolErrors,
       events: [...this.state.values(), ...(this.approval ? [this.approval.event] : [])] });
   }
   emit(event) {
+    if (event.type === "activity" && event.state === "error" && event.detail) {
+      this.toolErrors.push({ operation: String(event.operation || "").slice(0, 32), detail: String(event.detail).slice(0, 300) });
+      if (this.toolErrors.length > 8) this.toolErrors.shift();
+    }
     if (event.type === "delta") this.text += event.text;
     else if (event.type === "replace") this.text = event.text;
     else if (["status", "activity", "context", "usage", "browser.actions", "motion.state"].includes(event.type)) this.state.set(event.type, event);
@@ -2290,6 +3362,11 @@ class ChatRun {
   }
   answer(message) {
     if (!this.approval || this.approval.event.id !== message.id) return;
+    if (Number.isInteger(this.approval.event.tabId)) {
+      const address = safeWebURL(message.origin);
+      this.approval.finish(message.allow === true && address ? new URL(address).origin : null);
+      return;
+    }
     const scope = message.scope ?? "once";
     this.approval.finish(message.allow === true && ["once", "site", "all"].includes(scope) && (!this.approval.event.siteOrigin || scope === "once") ? scope : null);
   }
@@ -2577,7 +3654,7 @@ function actionReceipt(args, result) {
     receipt.motion = result.motion.active ? result.motion.speed : result.motion.reason;
   }
   if (Array.isArray(result)) receipt.tabCount = result.length;
-  for (const key of ["ok", "moved", "checked", "scrollX", "scrollY", "fromItem", "requestedItem", "navigationObserved"]) {
+  for (const key of ["ok", "found", "inViewport", "moved", "checked", "scrollX", "scrollY", "fromItem", "requestedItem", "navigationObserved", "openedTabId"]) {
     const value = result?.[key] ?? result?.viewport?.[key];
     if (typeof value === "boolean" || Number.isFinite(value)) receipt[key] = value;
   }
@@ -2622,26 +3699,27 @@ const { INSTRUCTIONS, normalizeSettings } = modules["core/config.js"];
 const { readResponse } = modules["core/sse.js"];
 const { citedOutput } = modules["core/citations.js"];
 const { actionReceipt, BrowserTranscript } = modules["core/browser-transcript.js"];
+const { GESTURE_TOOL } = modules["core/gestures.js"];
+const { BROWSER_ACTIONS, availableBrowserActions } = modules["core/browser-actions.js"];
 const BROWSER_TOOL = {
   type: "namespace", name: "safari", description: "User-approved Safari operations. Read a page before acting on element IDs.",
   tools: [{
     type: "function", name: "browser", strict: true,
     description: [
-      "Use tabId null for the originating page or a known tab ID. Read before acting, use fresh element IDs, then read to verify. fill does not submit; select uses exact value/label.",
-      "scroll moves the page (elementId null), a listed area or a carousel one step with speed null. Use gallery navigation controls to advance items.",
-      "Start continuous scrolling with up/down/left/right and a speed in CSS pixels/second. Optional speedChanges set speeds at cumulative travel distances in CSS pixels. Use wait true to scroll until the user stops it. Otherwise read while moving, slow or reverse with scroll, and stop_motion on reaching the goal.",
-      "drag holds the primary button on a listed drag target through a path and releases. move_pointer follows a path with the button up; elementId null allows any visible starting point. Read bounds are [left,top,right,bottom] in visible viewport CSS pixels. When an element is selected start inside it. Supply 2-128 waypoints {x,y,speed}. Each speed applies from that point until changed; null inherits. Initial pointer speed defaults to 600 px/s.",
-      "A pointer path waits by default. Set wait false to return immediately for live control. set_speed changes the current scroll or pointer speed mid-segment; zero pauses. wait_motion waits without model polling. stop_motion releases an active drag at its current point. Respect manual takeover. Events are scripted; verify the website accepted them.",
-      "double_click sends two clicks and dblclick to the same target. click and double_click can use a listed target or a visible viewport point. Click an editable field to focus it. type_text types at its current caret. press_key takes a printable or editing key in text, e.g. Backspace, Shift+ArrowLeft, Meta+A or Enter (can submit).",
-      "select_text takes an exact quote in text (occurrence is one-based when ambiguous), range {start,end} in UTF-16 offsets in a listed element, or neither to use its current selection. Null elementId with a quote searches visible page text. For fields use the field ID. Equal offsets place the caret. copy sends the verified selection to the system clipboard. delete_selection and replace_selection edit it. paste inserts plain clipboard text over the selection or at the caret. Ordinary page edits change the local display. After selection or a field click, follow-up editing operations can reuse that target with elementId null. Never enter sensitive fields.",
-      "open_tab once, then read the returned tabId to wait for loading and handle Safari permission. Unused fields must be null.",
+      "Null tabId targets the source. For tab questions list_tabs in the source window; redacted entries are real tabs. Read their IDs to request access. After open_tab read the returned ID; after click/Enter check openedTabId or list tabs before repeating.",
+      "Read and act on other tabs by ID. Motion brings its target into view automatically. Use switch_tab when asked to show a tab; keep passing its ID for later actions. If its layout changed, read it again and use fresh bounds.",
+      "Read before acting. Use fresh element IDs and viewport CSS bounds [left,top,right,bottom]. Read again to verify. fill does not submit; select uses the listed value or label. click/double_click may use a viewport point.",
+      "For words on this page, find_text searches loaded rendered text and reveals a match (optional one-based occurrence). For virtual feeds or to find a carousel use scroll_until with up/down and text (carousel or a phrase). It stops at the target, boundary or search checkpoint. A viewport read alone cannot prove absence. Continue with fresh controls.",
+      "scroll moves one page/area step, or one carousel item using its navigation. For actual swipes, pinch, rotation, pressure, taps and timed input over the pictures use safari.gesture. Never substitute a control click for a requested gesture.",
+      "For continuous scroll give direction and speed (CSS px/s); speedChanges are cumulative distances. Read while moving; wait=true only for requested manual stop. drag holds the primary button on a listed target; move_pointer allows a free start. Use 2-128 visible waypoints, each speed applies until changed; null inherits (default 600 px/s). Paths wait unless wait=false. set_speed changes active motion, zero pauses; wait_motion waits and stop_motion releases. Respect manual takeover.",
+      "Click a writable field before type_text or press_key (e.g. Enter, Shift+ArrowLeft, Meta+A). select_text uses a quote plus optional occurrence, a UTF-16 range, or the current selection. Null elementId and quote select visible page text. copy/delete_selection/replace_selection use the selection; paste inserts plain clipboard text. Reuse bound fields with null elementId. Ordinary page edits are local. Never enter sensitive fields. Other unused fields are null.",
     ].join(" "),
     parameters: { type: "object", additionalProperties: false, required: ["operation", "tabId", "elementId", "url", "text", "direction", "speed", "path", "wait", "speedChanges", "point", "range", "occurrence", "checked"], properties: {
-      operation: { type: "string", enum: ["read", "click", "fill", "select", "set_checked", "scroll", "drag", "move_pointer", "set_speed", "stop_motion", "wait_motion", "double_click", "type_text", "press_key", "select_text", "copy", "paste", "delete_selection", "replace_selection", "navigate", "open_tab", "close_tab", "list_tabs"] },
+      operation: { type: "string", enum: BROWSER_ACTIONS },
       tabId: { type: ["integer", "null"] }, elementId: { type: ["string", "null"] },
       url: { type: ["string", "null"] }, text: { type: ["string", "null"] },
       direction: { type: ["string", "null"], enum: ["up", "down", "left", "right", "top", "bottom", null] },
-      speed: { type: ["number", "null"] }, wait: { type: ["boolean", "null"] },
+      speed: { type: ["number", "null"], description: "Motion px/s, gesture playback multiplier, or tab zoom factor for zoom (1 = 100%)." }, wait: { type: ["boolean", "null"] },
       point: { type: ["object", "null"], additionalProperties: false, required: ["x","y"], properties: { x: { type: "number" }, y: { type: "number" } } },
       range: { type: ["object", "null"], additionalProperties: false, required: ["start","end"], properties: { start: { type: "integer" }, end: { type: "integer" } } },
       occurrence: { type: ["integer","null"] },
@@ -2652,12 +3730,18 @@ const BROWSER_TOOL = {
         x: { type: "number" }, y: { type: "number" }, speed: { type: ["number", "null"] },
       } } }, checked: { type: ["boolean", "null"] },
     } },
-  }],
+  }, GESTURE_TOOL],
 };
 
-async function runAgent({ input, model, effort, settings: rawSettings, signal }, dependencies) {
+async function runAgent({ input, model, effort, reasoningMode, settings: rawSettings, signal }, dependencies) {
   const settings = normalizeSettings(rawSettings);
   const { credential, executeTool, stopMotion, emit, fetchImpl = fetch } = dependencies;
+  const tool = structuredClone(BROWSER_TOOL);
+  if (dependencies.browserAPI) {
+    const actions = availableBrowserActions(dependencies.browserAPI);
+    tool.tools[0].parameters.properties.operation.enum = actions;
+    if (!actions.includes("read")) tool.tools = actions.length ? [tool.tools[0]] : [];
+  }
   if (!model || typeof model !== "string") throw new Error("Connect your account and choose an available model first.");
   const transcript = new BrowserTranscript(input);
   const usage = { input: 0, cached: 0, output: 0, requests: 0 };
@@ -2670,12 +3754,13 @@ async function runAgent({ input, model, effort, settings: rawSettings, signal },
     signal.throwIfAborted();
     const canAct = used < limit;
     if (!canAct) await stopMotion?.("action limit");
-    const tools = canAct ? [BROWSER_TOOL, ...(settings.webSearch ? [{ type: "web_search", search_context_size: "medium" }] : [])] : [];
+    const tools = canAct && tool.tools.length ? [tool] : [];
+    if (settings.webSearch && canAct) tools.push({ type: "web_search", search_context_size: "medium" });
     const capabilities = canAct
       ? "Safari browser tools are available in this chat. For requested page interactions, use safari.browser to read the page and perform the action through its approval flow. Continue through the requested steps while permitted actions can make progress. Stop when the task is complete, needs user input, or is blocked. An attachment is not required to request a read of the originating tab. Earlier assistant replies may describe capabilities that have since changed; use the tools available now. If a tool fails, explain its specific error rather than claiming this chat cannot interact with the browser."
       : "The browser action limit for this message has been reached. Summarize the verified outcome and any unfinished steps.";
     const request = { model, instructions: `${INSTRUCTIONS}\n\n${capabilities}`, store: false, stream: true, include: ["reasoning.encrypted_content"], ...(tools.length ? { tools, parallel_tool_calls: false } : {}) };
-    if (effort) request.reasoning = { effort };
+    if (effort || reasoningMode) request.reasoning = { ...(effort && { effort }), ...(reasoningMode && { mode: reasoningMode }) };
     const body = transcript.requestBody(request, settings.inputChars + 4000);
     emit({ type: "status", text: used ? "Continuing\u2026" : "Thinking\u2026" });
     const token = await credential();
@@ -2709,9 +3794,10 @@ async function runAgent({ input, model, effort, settings: rawSettings, signal },
     const items = [...output], receipts = [];
     for (const call of calls) {
       signal.throwIfAborted();
-      if (call.name !== "browser" || (call.namespace && call.namespace !== "safari")) throw new Error("The model requested an unknown tool.");
+      if (!["browser", "gesture"].includes(call.name) || (call.namespace && call.namespace !== "safari")) throw new Error("The model requested an unknown tool.");
       let args;
       try { args = JSON.parse(call.arguments); } catch { throw new Error("The model returned invalid action arguments."); }
+      if (call.name === "gesture") args = { ...args, operation: "gesture" };
       let result;
       if (used < limit) {
         used++;
@@ -2719,7 +3805,7 @@ async function runAgent({ input, model, effort, settings: rawSettings, signal },
         emit({ type: "activity", operation: args?.operation, state: "working" });
         try { result = await executeTool(args, signal); }
         catch (error) { signal.throwIfAborted(); result = { error: error.message }; }
-        emit({ type: "activity", operation: args?.operation, state: result?.error ? "error" : "done", detail: result?.error || result?.message || "" });
+        emit({ type: "activity", operation: args?.operation, state: result?.error || result?.ok === false ? "error" : result?.found === false ? "unmatched" : "done", detail: result?.error || result?.message || "" });
         receipts.push(actionReceipt(args ?? {}, result));
       } else {
         result = { error: "Skipped because this message used its browser action allowance. This call was not attempted." };
@@ -2856,12 +3942,46 @@ class DesktopController {
 return {DesktopController};
 })();
 
+// core/temporary-chats.js
+modules["core/temporary-chats.js"] = (() => {
+const { FrameDrafts } = modules["core/frame-drafts.js"];
+// The same bounded chat/draft writers can use this store. Each open temporary
+// conversation owns its own records and edit receipts, all in background memory.
+class TemporaryChats {
+  constructor() { this.tabs = new Map(); }
+  start(tab, account, generation) {
+    if (!Number.isInteger(tab)) throw new Error("Open temporary chat in a Safari tab.");
+    if (this.tabs.has(tab)) throw new Error("This tab already has a temporary chat.");
+    const records = new Map();
+    const store = {
+      get: async key => structuredClone(Object.fromEntries(key == null ? records : records.has(key) ? [[key, records.get(key)]] : [])),
+      set: async values => { for (const [key, value] of Object.entries(structuredClone(values))) records.set(key, value); },
+      remove: async keys => { for (const key of [].concat(keys)) records.delete(key); },
+    };
+    const session = { id: crypto.randomUUID(), account, generation, store, drafts: new FrameDrafts() };
+    this.tabs.set(tab, session);
+    return session.id;
+  }
+  get(tab, id, generation) {
+    const current = this.tabs.get(tab);
+    if (id !== (current?.id ?? null) || current && current.generation !== generation) throw new Error("This chat session ended. Reopen the pane to continue.");
+    return current;
+  }
+  changeAccount(generation) {
+    for (const [tab, session] of this.tabs) if (session.generation !== generation) this.tabs.delete(tab);
+  }
+}
+
+return {TemporaryChats};
+})();
+
 // background.js
 modules["background.js"] = (() => {
 const { buildInput, publicURL, safeWebURL } = modules["core/context.js"];
 const { normalizeSettings } = modules["core/config.js"];
 const { settings, saveChat, listChats, chatKey } = modules["core/storage.js"];
 const { readTab, createBrowserTools, indicatePageAction, sourceWindowId } = modules["core/browser-tools.js"];
+const { TabFocus } = modules["core/tab-focus.js"];
 const { ChatDock, sourceTabId } = modules["core/chat-dock.js"];
 const { ChatRun } = modules["core/chat-run.js"];
 const { FrameDrafts } = modules["core/frame-drafts.js"];
@@ -2871,16 +3991,19 @@ const { MotionSession } = modules["core/motion-session.js"];
 const { LocalData } = modules["core/local-data.js"];
 const { draftKey, sessionKey, saveDraft } = modules["core/drafts.js"];
 const { DesktopController } = modules["core/desktop.js"];
-const { modelCatalog, resolveEffort } = modules["core/models.js"];
-const { accessKey, allowsAction, changeWebsiteAccess, readWebsiteAccess, visibleWebsite } = modules["core/website-access.js"];
+const { chatFamilies, modelCatalog, resolveEffort } = modules["core/models.js"];
+const { TemporaryChats } = modules["core/temporary-chats.js"];
+const { readyTab } = modules["core/tab-navigation.js"];
+const { accessKey, allowsAction, changeWebsiteAccess, listedTabs, readWebsiteAccess, visibleWebsite } = modules["core/website-access.js"];
 const api = browser;
 const panelURL = api.runtime.getURL("panel/panel.html");
 const activeRuns = new Map();
 const dock = new ChatDock(api, panelURL);
 const recentResults = new Map();
 const frameDrafts = new FrameDrafts();
+const temporaryChats = new TemporaryChats();
 const localData = new LocalData(api.storage.local);
-const modelRequests = new Set();
+const modelRequests = new Map();
 let cleanupTask;
 let catalogCache;
 let nativePort;
@@ -2902,7 +4025,8 @@ async function notifyAccountChange() {
     if (!auth.generation || run.generation !== auth.generation) run.abort(new Error("The selected account changed."));
   }
   frameDrafts.changeSession(auth.generation);
-  for (const request of modelRequests) if (request.generation !== auth.generation) request.abort();
+  temporaryChats.changeAccount(auth.generation);
+  for (const [generation, request] of modelRequests) if (generation !== auth.generation) request.controller.abort();
   const cancelled = desktop.cancelAll();
   await api.runtime.sendMessage({ type: "auth.changed", generation: auth.generation }).catch(() => {});
   await cancelled;
@@ -2975,34 +4099,41 @@ async function credential(auth) {
   return result.token;
 }
 
-async function models(auth) {
+async function models(auth, refresh = false) {
   if (localData.closed) throw new Error("Local data is being erased.");
-  if (catalogCache?.generation === auth.generation && catalogCache.expires > Date.now()) return catalogCache.models;
-  const token = await credential(auth);
-  if (localData.closed) throw new Error("Local data is being erased.");
+  const pending = modelRequests.get(auth.generation);
+  if (pending && !pending.controller.signal.aborted) return pending.task;
+  if (!refresh && catalogCache?.generation === auth.generation && catalogCache.expires > Date.now()) return catalogCache.models;
   const controller = new AbortController();
-  controller.generation = auth.generation;
-  modelRequests.add(controller);
   const timer = setTimeout(() => controller.abort(), 20000);
-  try {
-  const response = await fetch("https://api.openai.com/v1/models", { credentials: "omit", redirect: "error", cache: "no-store", headers: { Authorization: `Bearer ${token}` }, signal: controller.signal });
-  if (!response.ok) throw new Error(`Could not load models (HTTP ${response.status}). Check your connection and account access.`);
-  const data = await response.json();
-  if (localData.closed) throw new Error("Local data is being erased.");
-  const values = modelCatalog(data);
-  controller.signal.throwIfAborted();
-  catalogCache = values.length ? { generation: auth.generation, models: values, expires: Date.now() + 300000 } : null;
-  return values;
-  } finally { clearTimeout(timer); modelRequests.delete(controller); }
+  const task = (async () => {
+    const token = await credential(auth);
+    checkSession(await native("auth.status"), auth.account, auth.generation);
+    controller.signal.throwIfAborted();
+    const response = await fetch("https://api.openai.com/v1/models", { credentials: "omit", redirect: "error", cache: "no-store", headers: { Authorization: `Bearer ${token}` }, signal: controller.signal });
+    if (!response.ok) throw new Error(`Could not load models (HTTP ${response.status}). Check your connection and account access.`);
+    const values = modelCatalog(await response.json());
+    checkSession(await native("auth.status"), auth.account, auth.generation);
+    controller.signal.throwIfAborted();
+    if (localData.closed) throw new Error("Local data is being erased.");
+    catalogCache = values.length ? { generation: auth.generation, models: values, expires: Date.now() + 300000 } : null;
+    return values;
+  })();
+  modelRequests.set(auth.generation, { controller, task });
+  try { return await task; } finally {
+    clearTimeout(timer);
+    if (modelRequests.get(auth.generation)?.task === task) modelRequests.delete(auth.generation);
+  }
 }
 
 async function eraseLocalData() {
   localData.stop();
   frameDrafts.clear();
+  temporaryChats.tabs.clear();
   catalogCache = null;
   recentResults.clear();
   for (const run of activeRuns.values()) run.abort();
-  for (const request of modelRequests) request.abort();
+  for (const request of modelRequests.values()) request.controller.abort();
   await desktop.cancelAll();
   nativePort?.disconnect(); nativePort = null;
   // Every open panel drops in-memory chat, input, and attachments before cancellation finishes.
@@ -3020,6 +4151,7 @@ async function eraseLocalData() {
 async function showPanel(tab, share) {
   if (!Number.isInteger(tab?.id) || dock.panelURLMatches(tab.url) || localData.closed) return;
   if (share && !localData.closed) {
+    const temporary = temporaryChats.tabs.get(tab.id);
     const selection = share.selectionText;
     const frameURL = share.frameId ? share.frameUrl : tab.url;
     let auth;
@@ -3033,14 +4165,16 @@ async function showPanel(tab, share) {
         const access = await checkCapture(auth.account, tab.url);
         checkSession(await native("auth.status"), auth.account, auth.generation);
         const kind = selection ? "selection" : "page", url = publicURL(page.url);
-        await storage.set({ [`draft:${tab.id}`]: { kind, key: `${kind}:${tab.id}:${url}`, tabId: tab.id, text: page.text.slice(0, limit), title: page.title ?? "Page", url, truncated: !!page.truncated || page.text.length > limit, generation: auth.generation, created: Date.now() } });
+        temporaryChats.get(tab.id, temporary?.id ?? null, auth.generation);
+        await (temporary?.store ?? storage).set({ [`draft:${tab.id}`]: { kind, key: `${kind}:${tab.id}:${url}`, tabId: tab.id, text: page.text.slice(0, limit), title: page.title ?? "Page", url, truncated: !!page.truncated || page.text.length > limit, generation: auth.generation, created: Date.now() } });
         return selection && visibleWebsite(frameURL, access);
       });
       if (markSelection) await indicatePageAction(api, tab.id, frameURL, "selection", "copy", share.frameId);
     } catch (error) {
       if (!localData.closed) await localData.write(async storage => {
         if (auth) checkSession(await native("auth.status"), auth.account, auth.generation);
-        await storage.set({ [`draft:${tab.id}`]: { error: error.message, ...(auth ? { generation: auth.generation } : {}), created: Date.now() } });
+        temporaryChats.get(tab.id, temporary?.id ?? null, auth?.generation);
+        await (temporary?.store ?? storage).set({ [`draft:${tab.id}`]: { error: error.message, ...(auth ? { generation: auth.generation } : {}), created: Date.now() } });
       }).catch(() => {});
     }
   }
@@ -3082,6 +4216,7 @@ async function restoreDock(tab) {
 }
 async function dismissDock(source, token) {
   const dismissed = await dock.dismiss(source, token, () => {
+    temporaryChats.tabs.delete(source);
     for (const run of activeRuns.values()) if (run.source === source) run.abort();
   });
   if (dismissed) await dockStatus(source);
@@ -3096,6 +4231,7 @@ api.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === "ask") return openFromSafari(tab, info);
 });
 api.tabs.onRemoved.addListener(tabId => {
+  temporaryChats.tabs.delete(tabId);
   for (const run of activeRuns.values()) {
     if (run.source === tabId || run.panelTab === tabId) run.abort(new Error("The chat or its source tab was closed."));
   }
@@ -3109,7 +4245,8 @@ api.tabs.onUpdated.addListener((id, change, tab) => {
 
 async function handleMessage(message, sender) {
   if (!await dock.trusted(sender, message.dockToken)) throw new Error("Untrusted chat panel.");
-  if (message.type === "panel.present") {
+  if (message.type === "panel.present") return true;
+  if (message.type === "panel.visible") {
     if (sender.frameId) await api.tabs.sendMessage(sender.tab.id, { type: "panel.ready", token: message.dockToken }, { frameId: 0 });
     return true;
   }
@@ -3118,7 +4255,18 @@ async function handleMessage(message, sender) {
     return cleanupTask;
   }
   if (localData.closed && !["bootstrap", "auth.open", "panel.close"].includes(message.type)) throw new Error("Local data was erased. Close the extension before removing the app.");
+  const ownerTab = sourceTabId(sender) ?? sender.tab?.id;
+  const temporary = () => temporaryChats.get(ownerTab, message.temporaryId ?? null, message.generation);
   switch (message.type) {
+    case "temporary.start":
+    case "temporary.end": return localData.write(async () => {
+      const auth = checkSession(await native("auth.status"), message.account, message.generation);
+      if (ownedRun(sender, auth.account, auth.generation)) throw new Error("Wait for the current reply before changing chats.");
+      const existing = temporary();
+      if (message.type === "temporary.start") return temporaryChats.start(ownerTab, auth.account, auth.generation);
+      if (existing) temporaryChats.tabs.delete(ownerTab);
+      return true;
+    });
     case "bootstrap": {
       connectNativeEvents();
       if (localData.closed) return { prefs: normalizeSettings(), auth: { connected: false, account: "local" }, models: [], removalPrepared: true };
@@ -3126,33 +4274,37 @@ async function handleMessage(message, sender) {
       let auth;
       try { auth = await native("auth.status"); } catch (error) { auth = { connected: false, error: error.message }; }
       const source = sourceTabId(sender);
-      if (message.openEditor && auth.generation && frameDrafts.pending.has(source)) {
-        await localData.write(storage => frameDrafts.recover(storage, source, message.openEditor, auth, async () => checkSession(await native("auth.status"), auth.account, auth.generation)));
+      if (auth.generation) temporaryChats.changeAccount(auth.generation);
+      const temp = temporaryChats.tabs.get(ownerTab);
+      if (temp && (auth.generation !== temp.generation || auth.account !== temp.account)) throw new Error("Could not verify the temporary chat's account.");
+      const store = temp?.store ?? api.storage.local, drafts = temp?.drafts ?? frameDrafts;
+      if (message.openEditor && auth.generation && drafts.pending.has(source)) {
+        await localData.write(() => drafts.recover(store, source, message.openEditor, auth, async () => checkSession(await native("auth.status"), auth.account, auth.generation)));
       }
       const cached = catalogCache?.generation === auth.generation && catalogCache?.expires > Date.now();
       const catalog = auth.connected && auth.canInfer ? (cached ? catalogCache.models : null) : [];
       const pointer = sessionKey(auth.account ?? "local", message.tabId);
-      const session = (await api.storage.local.get(pointer))[pointer];
+      const session = (await store.get(pointer))[pointer];
       const key = `draft:${message.tabId}`;
-      const hasContext = Number.isInteger(message.tabId) && !!(await api.storage.local.get(key))[key];
+      const hasContext = Number.isInteger(message.tabId) && !!(await store.get(key))[key];
       const access = auth.connected ? await readWebsiteAccess(api.storage.local, auth.account) : undefined;
       let run = ownedRun(sender, auth.account, auth.generation, message.chatId);
       let draftChatId;
       const editorId = message.chatId || session?.id;
       if (activeRuns.size && editorId && editorId !== run?.chat.id) {
-        const key = draftKey(editorId), draft = (await api.storage.local.get(key))[key];
+        const key = draftKey(editorId), draft = (await store.get(key))[key];
         run = ownedRun(sender, auth.account, auth.generation, message.chatId);
         if (draft?.account === auth.account && draft.sourceChatId) {
           run ??= ownedRun(sender, auth.account, auth.generation, draft.sourceChatId);
           if (run?.chat.id === draft.sourceChatId) draftChatId = editorId;
         }
       }
-      return { prefs, auth, models: catalog, activeChat: session?.id, hasContext, access, ...(run ? { run: { id: run.id, chatId: run.chat.id, draftChatId } } : {}) };
+      return { prefs, auth, temporaryId: temp?.id ?? null, models: catalog, activeChat: session?.id, hasContext, access, ...(run ? { run: { id: run.id, chatId: run.chat.id, draftChatId, interactionMode: run.mode } } : {}) };
     }
     case "models.list": {
       const auth = checkSession(await native("auth.status"), message.account, message.generation);
       if (!auth.connected || !auth.canInfer) throw new Error("Connect an account with model access first.");
-      const catalog = await models(auth);
+      const catalog = await models(auth, message.refresh === true);
       checkSession(await native("auth.status"), message.account, message.generation);
       return catalog;
     }
@@ -3177,6 +4329,7 @@ async function handleMessage(message, sender) {
       await notifyAccountChange(); return result;
     }
     case "context.take": return localData.write(async storage => {
+      storage = temporary()?.store ?? storage;
       if (!Number.isInteger(message.tabId)) return null;
       const key = `draft:${message.tabId}`, item = (await storage.get(key))[key];
       if (!item) return null;
@@ -3192,8 +4345,10 @@ async function handleMessage(message, sender) {
       const auth = await native("auth.status");
       checkSession(auth, auth.account, message.generation);
       const tab = await api.tabs.get(message.tabId);
+      if (message.expectedOrigin && (!safeWebURL(tab.url) || new URL(tab.url).origin !== message.expectedOrigin)) throw new Error("The tab's website changed. Select it again.");
       await checkCapture(auth.account, tab.url);
       const page = await readTab(api, message.tabId, prefs.pageChars, { selectionOnly: message.selection === true, expectedURL: tab.url });
+      if (safeWebURL(page.url) !== safeWebURL(tab.url) || (await api.tabs.get(message.tabId)).url !== tab.url) throw new Error("The tab changed while reading. Choose the page again.");
       await checkCapture(auth.account, page.url);
       checkSession(await native("auth.status"), auth.account, auth.generation);
       if (message.selection && !page.selection) throw new Error("Select a passage on the page first.");
@@ -3206,25 +4361,37 @@ async function handleMessage(message, sender) {
       const tabs = await api.tabs.query(Number.isInteger(windowId) ? { windowId } : { currentWindow: true });
       const access = await readWebsiteAccess(api.storage.local, auth.account);
       checkSession(await native("auth.status"), auth.account, auth.generation);
-      return tabs.filter(tab => visibleWebsite(tab.url, access)).slice(0, 200).map(tab => ({ id: tab.id, title: (tab.title ?? "Untitled").slice(0, 160), url: publicURL(tab.url) }));
+      return listedTabs(tabs, access, 200, sender.frameId ? null : sender.tab?.id);
+    }
+    case "tabs.origin": {
+      if (!Number.isInteger(message.tabId) || message.tabId < 0) throw new Error("Select an existing tab.");
+      const auth = await native("auth.status");
+      checkSession(auth, auth.account, message.generation);
+      const windowId = await sourceWindowId(api, sourceTabId(sender));
+      const tab = message.wait ? await readyTab(api, message.tabId, AbortSignal.timeout(10500),
+        current => !!current.url && current.url !== "about:blank", "Safari still hides this tab's address. Check the website address and try again.") : await api.tabs.get(message.tabId);
+      if (tab.windowId !== windowId) throw new Error("This tab moved to another window. List the tabs again.");
+      if (tab.url) await checkCapture(auth.account, tab.url);
+      checkSession(await native("auth.status"), auth.account, auth.generation);
+      return tab.url ? new URL(tab.url).origin : null;
     }
     case "chats.list": { const auth = await native("auth.status"); checkSession(auth, auth.account, message.generation); return listChats(api.storage.local, auth.account); }
     case "chat.load": {
       const auth = await native("auth.status");
       checkSession(auth, auth.account, message.generation);
-      const data = (await api.storage.local.get(chatKey(message.id)))[chatKey(message.id)];
+      const data = (await (temporary()?.store ?? api.storage.local).get(chatKey(message.id)))[chatKey(message.id)];
       if (data && data.account !== (auth.account ?? "local")) throw new Error("This chat belongs to a different account.");
       return data && { ...data, revision: data.revision ?? 1 };
     }
     case "draft.load": {
       const auth = await native("auth.status");
       checkSession(auth, auth.account, message.generation);
-      const data = (await api.storage.local.get(draftKey(message.id)))[draftKey(message.id)];
+      const data = (await (temporary()?.store ?? api.storage.local).get(draftKey(message.id)))[draftKey(message.id)];
       if (data && data.account !== (auth.account ?? "local")) throw new Error("This draft belongs to a different account.");
       return data && { ...data, revision: data.revision ?? 1 };
     }
     case "draft.stage":
-      if (sender.frameId && /^[a-f0-9-]{36}$/i.test(message.draft?.id)) frameDrafts.stage(sourceTabId(sender), message);
+      if (sender.frameId && /^[a-f0-9-]{36}$/i.test(message.draft?.id)) (temporary()?.drafts ?? frameDrafts).stage(sourceTabId(sender), message);
       return true;
     case "draft.save": return localData.write(async storage => {
       const auth = await native("auth.status");
@@ -3232,16 +4399,17 @@ async function handleMessage(message, sender) {
       if (typeof message.draft.id !== "string" || !/^[a-f0-9-]{36}$/i.test(message.draft.id)) throw new Error("Invalid draft identifier.");
       const source = sourceTabId(sender);
       if (sender.frameId && message.tabId !== source) throw new Error("This draft belongs to another tab.");
-      const recovered = frameDrafts.receipt(source, message);
+      const temp = temporary(), drafts = temp?.drafts ?? frameDrafts;
+      const recovered = drafts.receipt(source, message);
       if (recovered) return recovered;
-      const saved = await saveDraft(storage, message.draft, message.tabId);
-      frameDrafts.saved(source, message, saved);
+      const saved = await saveDraft(temp?.store ?? storage, message.draft, message.tabId);
+      drafts.saved(source, message, saved);
       return saved;
     });
     case "chat.save": {
       return localData.write(async storage => {
         checkSession(await native("auth.status"), message.chat.account, message.generation);
-        return saveChat(storage, message.chat);
+        return saveChat(temporary()?.store ?? storage, message.chat);
       });
     }
     case "chat.delete": {
@@ -3311,20 +4479,24 @@ api.runtime.onConnect.addListener(port => {
     if (message.type === "resume") {
       try {
         checkSession(await native("auth.status"), message.account, message.generation);
+        temporaryChats.get(source ?? host, message.temporaryId ?? null, message.generation);
         if (localData.closed || disconnected) return;
         const run = activeRuns.get(message.id);
-        if (run?.matches(source, host, message.account, message.generation) && run.chat.id === message.chatId) {
+        if (run?.matches(source, host, message.account, message.generation) && run.chat.id === message.chatId && run.temporaryId === (message.temporaryId ?? null)) {
           if (port.sender.frameId) run.panelTab = source;
           attached = run; run.attach(port, true);
         } else {
           const recent = recentResults.get(message.id);
-          const own = recent && recent.source === source && (source !== null || recent.host === host) && recent.generation === message.generation && recent.account === message.account;
+          const own = !message.temporaryId && recent && recent.source === source && (source !== null || recent.host === host) && recent.generation === message.generation && recent.account === message.account;
           port.postMessage({ type: "run.ended", saved: own ? recent.saved : undefined, message: own ? recent.message : undefined });
         }
       } catch (error) { port.postMessage({ type: "run.ended", message: error.message }); }
       return;
     }
     if (message.type !== "run" || (attached && activeRuns.has(attached.id))) return;
+    let temporary;
+    try { temporary = temporaryChats.get(source ?? host, message.temporaryId ?? null, message.generation); }
+    catch (error) { port.postMessage({ type: "error", message: error.message }); return; }
     const existing = ownedRun(port.sender, message.account, message.generation, message.chatId);
     if (existing) {
       try {
@@ -3342,43 +4514,65 @@ api.runtime.onConnect.addListener(port => {
     activeRuns.set(run.id, run);
     const controller = run.controller;
     const emit = event => run.emit(event);
-    // A finite deadline also bounds abandoned network reads and approval prompts.
-    const timeoutError = new Error("This message reached its five-minute time limit. Check the current page before continuing.");
-    const timer = setTimeout(() => controller.abort(timeoutError), 300000);
-    let runChat;
+    let runChat, timer, timeoutError;
     let writing = false;
     const started = Date.now();
     let usedTools = false, workMs;
     const verifySession = async () => checkSession(await native("auth.status"), message.account, message.generation);
-    const finish = (text, error = false) => localData.write(async storage => {
+    const finish = (text, errorMessage) => localData.write(async storage => {
       await verifySession();
-      const pointer = !run.ports.size && !frameDrafts.pending.has(source) ? sessionKey(run.account, source) : undefined;
+      const drafts = temporary?.drafts ?? frameDrafts;
+      const pointer = !run.ports.size && !drafts.pending.has(source) ? sessionKey(run.account, source) : undefined;
       const browserActions = run.state.get("browser.actions")?.actions;
-      const saved = await saveChat(storage, { ...runChat, messages: [...runChat.messages, { role: "assistant", text, workMs, browserActions, ...(error ? { error: true } : {}) }] }, pointer);
+      const saved = await saveChat(temporary?.store ?? storage, { ...runChat, messages: [...runChat.messages, { role: "assistant", text, workMs, browserActions, toolErrors: run.toolErrors, ...(errorMessage ? { error: true, errorMessage } : {}) }] }, pointer);
       return { id: saved.id, title: saved.title, revision: saved.revision };
     });
     const runEmit = event => { controller.signal.throwIfAborted(); if (event.type === "activity") usedTools = true; emit(event); };
     const terminal = event => {
-      if (!localData.closed && (event.saved || !controller.signal.aborted)) {
-        recentResults.set(run.id, { source, host, account: run.account, generation: run.generation, saved: event.saved, message: event.saveError || event.message });
+      if (!temporary && !localData.closed && (event.saved || !controller.signal.aborted)) {
+        recentResults.set(run.id, { source, host, account: run.account, generation: run.generation, saved: event.saved, message: event.saveError || (!event.saved ? event.message : undefined) });
         if (recentResults.size > 16) recentResults.delete(recentResults.keys().next().value);
       }
       emit(event);
     };
     try {
+      const prefs = { ...await settings(api.storage.local), interactionMode: run.mode, webSearch: message.webSearch === true };
+      const expire = () => {
+        timeoutError = new Error(`This message reached its ${prefs.turnMinutes}-minute time limit.` + (usedTools ? " Check the page before continuing." : ""));
+        controller.abort(timeoutError);
+      };
+      const remaining = started + prefs.turnMinutes * 60000 - Date.now();
+      if (remaining <= 0) expire();
+      else timer = setTimeout(expire, remaining);
+      controller.signal.throwIfAborted();
       const auth = await verifySession();
       if (!auth.connected || !auth.canInfer) throw new Error("Connect ChatGPT plan usage or an API key in the companion app first.");
       if (typeof message.chatId !== "string" || !/^[a-f0-9-]{36}$/i.test(message.chatId)) throw new Error("Invalid chat identifier. Start a new chat.");
       runChat = run.chat;
-      const prefs = { ...await settings(api.storage.local), webSearch: message.webSearch === true };
       controller.signal.throwIfAborted();
       const requestedEffort = message.effort ?? "auto";
-      const selectedModel = requestedEffort === "auto" ? undefined : (await models(auth)).find(model => model.id === message.model);
-      const effort = resolveEffort(selectedModel, requestedEffort);
+      const choices = await models(auth);
+      let route;
+      if (run.mode === "chat") {
+        const family = chatFamilies(choices).find(item => item.id === message.model);
+        route = family && Object.hasOwn(family.routes, requestedEffort) && family.routes[requestedEffort];
+        if (!route?.model) throw new Error("This Chat model or thinking level is unavailable. Reopen the model picker.");
+      } else {
+        const selected = choices.find(model => model.id === message.model);
+        if (!selected) throw new Error("This model is no longer listed for this connection. Reload models and choose an available one.");
+        route = { model: message.model, effort: resolveEffort(selected, requestedEffort) };
+      }
       const built = buildInput(message.messages.filter(m => !m.error), prefs);
       emit({ type: "context", chars: built.chars, trimmed: built.trimmed });
+      const defaultTabId = sourceTabId(port.sender);
+      const tabFocus = new TabFocus(api, defaultTabId);
+      const promptInChat = async (details, signal) => {
+        await tabFocus.returnSelection(true, verifySession);
+        signal.throwIfAborted();
+        return run.prompt(details, signal);
+      };
       const approve = async (details, signal) => {
-        const scope = await run.prompt(details, signal);
+        const scope = await promptInChat(details, signal);
         if (scope === "once") return scope;
         if (scope === "site" && details.hosts.length !== 1) throw new Error("This action involves more than one website.");
         const change = scope === "site" ? { host: details.hosts[0], rule: "allow" } : { mode: "auto" };
@@ -3386,34 +4580,42 @@ api.runtime.onConnect.addListener(port => {
         return scope;
       };
       const initialTabs = (message.messages.at(-1)?.contexts ?? []).map(c => ({ id: c.tabId, url: c.url }));
-      const defaultTabId = sourceTabId(port.sender);
-      const requestSiteAccess = (siteOrigin, signal) => run.prompt({ operation: "read", siteOrigin,
+      const requestSiteAccess = (siteOrigin, signal) => promptInChat({ operation: "read", siteOrigin,
         title: "Read " + new URL(siteOrigin).hostname + "?",
         detail: "Allow website access in Safari to let this chat read the open tab and continue." }, signal);
+      const requestTabAccess = (tabId, tabLabel, signal) => promptInChat({ operation: "read", tabId, tabLabel,
+        title: "Read " + tabLabel + "?", detail: "Safari is hiding this tab's title and address. Allow access to identify and read it here." }, signal);
       const motionSession = new MotionSession(api, state => emit({ type: "motion.state", state }));
       run.motionSession = motionSession;
       const inputs = new PageInputs(api, {
         write: text => native("clipboard.write", { generation: auth.generation, text }),
         read: async () => (await native("clipboard.read", { generation: auth.generation })).text,
       });
-      const executeTool = createBrowserTools({ api, pageChars: prefs.pageChars, motionSession, inputs, approve, requestSiteAccess, readAccess: () => readWebsiteAccess(api.storage.local, auth.account), verifySession: async () => {
+      const executeTool = createBrowserTools({ api, pageChars: prefs.pageChars, motionSession, inputs, tabFocus, approve, requestSiteAccess, requestTabAccess, readAccess: () => readWebsiteAccess(api.storage.local, auth.account), verifySession: async () => {
         try { await verifySession(); } catch (error) { controller.abort(error); throw error; }
       }, initialTabs, defaultTabId, protectedTabId: port.sender.frameId ? null : host });
       const stopMotion = reason => motionSession.stop(reason);
-      const result = await runAgent({ input: built.input, model: message.model, effort, settings: prefs, signal: controller.signal }, { credential: () => credential(auth), executeTool, stopMotion, emit: runEmit })
-        .finally(() => Promise.all([stopMotion("task ended"), inputs.release()]));
+      const result = await runAgent({ input: built.input, ...route, settings: prefs, signal: controller.signal }, { credential: () => credential(auth), executeTool, stopMotion, emit: runEmit, browserAPI: api })
+        .finally(async () => {
+          await Promise.all([stopMotion("task ended"), inputs.release()]);
+          await tabFocus.returnSelection(false, verifySession);
+        });
       controller.signal.throwIfAborted();
+      clearTimeout(timer);
       writing = true;
       workMs = usedTools ? Date.now() - started : undefined;
       terminal({ type: "done", workMs, usage: result.usage, saved: await finish(result.text) });
     } catch (error) {
       let saved, saveError;
+      const reason = controller.signal.aborted ? controller.signal.reason : error;
+      const timedOut = !!timeoutError && reason === timeoutError;
+      const message = (controller.signal.aborted && reason?.name === "AbortError" ? "Response stopped." : reason?.message || "The request could not finish.").slice(0, 1000);
+      workMs = usedTools ? Date.now() - started : undefined;
       if (runChat && !localData.closed && !writing) {
-        const stopped = controller.signal.reason === timeoutError ? timeoutError.message : "Response stopped.";
-        try { saved = await finish(run.text || (controller.signal.aborted ? stopped : "No response received."), true); }
+        try { saved = await finish(run.text || message, message); }
         catch (failure) { saveError = failure.message; }
       }
-      terminal({ type: controller.signal.aborted ? "cancelled" : "error", saved, saveError: saveError || (writing ? error.message : undefined), message: (controller.signal.aborted ? controller.signal.reason?.message : error?.message) ?? "The request could not finish." });
+      terminal({ type: controller.signal.aborted && !timedOut ? "cancelled" : "error", workMs, saved, saveError: saveError || (writing ? error.message : undefined), message });
     } finally {
       clearTimeout(timer); activeRuns.delete(run.id); run.release();
     }

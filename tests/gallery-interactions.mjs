@@ -68,6 +68,16 @@ export async function testGalleryInteractions(browser) {
   await page.locator('[role=tab]').nth(1).click();
   const advanced = await scroll(gallery(snapshot).id, 'left');
   assert.equal(advanced.fromItem, 2); assert.equal(advanced.requestedItem, 1);
+  // A site can scroll its dot strip independently while the gallery stays visible.
+  await page.locator('[role=tablist]').evaluate(list => {
+    list.style.cssText = 'width:60px;overflow:hidden;white-space:nowrap';
+    for (const tab of list.children) tab.style.flex = '0 0 52px';
+    list.scrollLeft = list.scrollWidth;
+  });
+  snapshot = await read();
+  assert.equal((await scroll(gallery(snapshot).id, 'right')).requestedItem, 2);
+  snapshot = await read();
+  assert.equal((await scroll(gallery(snapshot).id, 'left')).requestedItem, 1);
   snapshot = await read();
   assert.equal(gallery(snapshot).currentItem, 1, 'relative navigation follows the live selected item');
   await page.locator('[role=tab]').nth(1).evaluate(tab => tab.setAttribute('aria-selected', 'true'));
