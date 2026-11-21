@@ -3,6 +3,16 @@ import assert from "node:assert/strict";
 import { chatPort, fixture } from "./background-fixture.mjs";
 
 const turn = { type: "run", generation: "session-a", chatId: "00000000-0000-4000-8000-000000000011", title: "First", account: "account-a", model: "model-a", messages: [{ role: "user", text: "First" }] };
+test("model loading reports provider details in the picker and saved turn", async () => {
+  const catalog = Response.json({ error: { code: 4101, message: "Account cannot list models" } }, { status: 403, headers: { "x-request-id": "req_models" } });
+  const f = await fixture({ catalog }), events = [];
+  const result = await f.events.message({ type: "models.list", generation: turn.generation, account: turn.account }, f.sender);
+  assert.equal(result.error, "Account cannot list models (4101, HTTP 403, Request req_models)");
+  await chatPort(f, event => events.push(event))(turn);
+  assert.equal(events.at(-1).message, result.error);
+  assert.equal(f.data["chat:" + turn.chatId].messages.at(-1).errorCode, "4101");
+  assert.equal(f.requests.length, 0);
+});
 test("temporary drafts and replies survive a pane reload without entering the regular history or active-chat pointer", async () => {
   const f = await fixture({ catalog: { models: [{ slug: "gpt-6-sol", display_name: "GPT-6 Sol", visibility: "list", supported_reasoning_levels: ["medium"] }] } }), events = [];
   const rpc = (type, fields = {}) => f.events.message({ type, generation: turn.generation, account: turn.account, tabId: 1, ...fields }, f.sender);

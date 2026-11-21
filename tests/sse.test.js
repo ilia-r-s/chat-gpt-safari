@@ -29,6 +29,35 @@ test("failed and incomplete responses remain failures after partial output", asy
 test("nonstandard admission errors preserve HTTP detail and request ID", async () => {
   await assert.rejects(readResponse(new Response(JSON.stringify({ detail: "Plan permission missing" }), { status: 403, headers: { "x-request-id": "req_test" } })), /Plan permission missing.*req_test/);
 });
+test("streamed failures retain the provider's message, code, parameter and request reference", async () => {
+  const event = { type: "response.failed", response: { error: { message: "This app reached its limit.", code: "subscription_sharing_usage_limit_exceeded", param: "model" } } };
+  const streamed = response([event]);
+  streamed.headers.set("x-request-id", "req_test");
+  await assert.rejects(readResponse(streamed), error => {
+    assert.equal(error.providerCode, event.response.error.code);
+    assert.match(error.message, /^This app reached its limit\..*credit-use settings.*subscription_sharing_usage_limit_exceeded.*parameter model.*req_test/);
+    return true;
+  });
+  for (const frame of [
+    { type: "error", code: 0 }, { type: "error", error: { code: 0 } },
+    { type: "response.failed", response: { id: "resp_a", error: { code: 0 } } },
+  ]) {
+    await assert.rejects(readResponse(response([frame])), { providerCode: "0", message: frame.response ? "OpenAI error 0. (Response resp_a)" : "OpenAI error 0." });
+  }
+  await assert.rejects(readResponse(new Response('event: error\ndata: {"message":"Service is offline","code":8102}\n\n')), { message: "Service is offline (8102)" });
+  await assert.rejects(readResponse(response([{ type: "error", status: 503 }])), { message: "Status 503" });
+  await assert.rejects(readResponse(response([{ type: "response.failed", response: { error: { code: "subscription_sharing_usage_unavailable" } } }])), /could not check your ChatGPT usage.*subscription_sharing_usage_unavailable/);
+});
+test("admission errors show safe plain text, numeric codes and an HTTP-only fallback", async () => {
+  await assert.rejects(readResponse(new Response(JSON.stringify({ error: { code: 42 } }), { status: 429 })), { message: "OpenAI error 42. (HTTP 429)" });
+  await assert.rejects(readResponse(new Response("Rejected test-credential", { status: 401 }), { credential: "test-credential" }), { message: "Rejected [redacted] (HTTP 401)" });
+  await assert.rejects(readResponse(new Response("<html>upstream site</html>", { status: 502 })), { message: "HTTP 502" });
+  await assert.rejects(readResponse(Response.json({ error: { code: "model_unavailable" } })), { message: "OpenAI error model_unavailable." });
+  await assert.rejects(readResponse(Response.json({ error: { code: 4101, type: "workspace_restricted" } }, { status: 403 })), { message: "OpenAI error workspace_restricted. (4101, HTTP 403)" });
+  await assert.rejects(readResponse(Response.json({ detail: "Account approval is pending." })), { message: "Account approval is pending." });
+  await assert.rejects(readResponse(Response.json({ detail: [{ msg: "A model is required.", input: "private input" }] }, { status: 422 })), { message: "A model is required. (HTTP 422)" });
+  await assert.rejects(readResponse(new Response(null, { status: 503, statusText: "Service Unavailable" })), { message: "HTTP 503 Service Unavailable" });
+});
 test("cancellation and malformed stream data fail promptly", async () => {
   const controller = new AbortController(); controller.abort();
   await assert.rejects(readResponse(response([{ type: "response.completed", response: {} }]), { signal: controller.signal }), { name: "AbortError" });

@@ -63,7 +63,7 @@ export async function fixture({ nativeFailure = false, nativeUnavailable = false
   };
   const context = vm.createContext({ browser: api, console, URL, TextEncoder, TextDecoder, AbortController, AbortSignal, crypto: webcrypto, Date, setTimeout, clearTimeout, structuredClone,
     fetch: async (url, options) => {
-      if (url.endsWith("/models")) return new Response(JSON.stringify(catalog ?? { models: [{ visibility: "list", slug: "model-a", display_name: "Model A", supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }] }));
+      if (url.endsWith("/models")) return catalog instanceof Response ? catalog.clone() : new Response(JSON.stringify(catalog ?? { models: [{ visibility: "list", slug: "model-a", display_name: "Model A", supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }] }));
       requests.push(JSON.parse(options.body));
       if (responseGate) { responseGate.started(); await responseGate.promise; }
       const response = responseForRequest?.(requests.length);

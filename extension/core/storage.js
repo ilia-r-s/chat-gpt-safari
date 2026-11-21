@@ -30,6 +30,7 @@ export function prepareChat(all, chat, retainID) {
     contexts: boundedContexts(m.contexts),
     ...(m.error ? { error: true } : {}),
     ...(m.role === "assistant" && m.error && typeof m.errorMessage === "string" ? { errorMessage: m.errorMessage.slice(0, 1000) } : {}),
+    ...(m.role === "assistant" && m.error && typeof m.errorCode === "string" ? { errorCode: m.errorCode.slice(0, 96) } : {}),
     ...(m.role === "assistant" && Number.isFinite(m.workMs) ? { workMs: Math.max(0, Math.min(MAX_TURN_MINUTES * 60000, m.workMs)) } : {}),
     ...actionCount(m),
     ...(m.role === "assistant" && Array.isArray(m.toolErrors) && m.toolErrors.length ? {

@@ -50,7 +50,10 @@ struct OAuthAttempt {
         guard Set(names).count == names.count else { throw ChatError.message("The sign-in callback contained duplicate parameters.") }
         let fields = Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
         guard fields["state"] == state else { throw ChatError.message("The sign-in state did not match. Please try again.") }
-        if let error = fields["error"] { throw ChatError.message(error == "access_denied" ? "Sign-in was cancelled. You can try again at any time." : "OpenAI could not authorize this sign-in.") }
+        if let error = fields["error"] {
+            let description = fields["error_description"] ?? (error == "access_denied" ? "Sign-in was cancelled." : "")
+            throw OpenAIRequestError(["error": error, "error_description": description], redacting: [state, nonce, verifier])
+        }
         guard let code = fields["code"], !code.isEmpty else { throw ChatError.message("OpenAI did not return an authorization code.") }
         let clientID = fields["client_id"] ?? account?.id
         guard let clientID, clientID.hasPrefix("oaiapp_"), clientID.count < 256 else { throw ChatError.message("OpenAI did not return a valid client registration.") }
@@ -72,7 +75,7 @@ struct TokenResponse: Decodable {
 enum OAuthClient {
     static func revoke(token: String, clientID: String,
                        send: (URLRequest) async throws -> (Data, URLResponse) = { try await SecureHTTP.session.data(for: $0) },
-                       backoff: Duration = .milliseconds(300)) async -> Bool {
+                       backoff: Duration = .milliseconds(300)) async throws {
         var endpoint: URL?
         for attempt in 0..<2 {
             do {
@@ -80,29 +83,32 @@ enum OAuthClient {
                 if endpoint == nil {
                     let discovery = URL(string: Configuration.issuer + "/.well-known/openid-configuration")!
                     let (data, response) = try await send(URLRequest(url: discovery, timeoutInterval: 5))
-                    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                    if (500...599).contains(status) { throw URLError(.badServerResponse) }
-                    guard status == 200, data.count < 100000,
+                    try OpenAIRequestError.requireOK(data, response)
+                    guard data.count < 100000,
                           let metadata = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                           metadata["issuer"] as? String == Configuration.issuer,
                           let address = metadata["revocation_endpoint"] as? String, let url = URL(string: address),
                           url.scheme == "https", url.host == discovery.host, url.port == nil, url.user == nil,
-                          url.password == nil, url.query == nil, url.fragment == nil else { return false }
+                          url.password == nil, url.query == nil, url.fragment == nil else {
+                        throw ChatError.message("OpenAI did not return a valid revocation endpoint.")
+                    }
                     endpoint = url
                 }
-                guard let endpoint else { return false }
+                guard let endpoint else { throw ChatError.message("The revocation endpoint is missing.") }
                 var request = URLRequest(url: endpoint, timeoutInterval: 5)
                 request.httpMethod = "POST"
                 request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
                 request.httpBody = form(["token": token, "token_type_hint": "refresh_token", "client_id": clientID])
-                let (_, response) = try await send(request)
-                guard let status = (response as? HTTPURLResponse)?.statusCode else { return false }
-                if status == 200 { return true }
-                if !(500...599).contains(status) { return false }
-            } catch { if Task.isCancelled { return false } }
-            if attempt == 0 { do { try await Task.sleep(for: backoff) } catch { return false } }
+                let (data, response) = try await send(request)
+                try OpenAIRequestError.requireOK(data, response, redacting: [token])
+                return
+            } catch {
+                try Task.checkCancellation()
+                if attempt > 0 || error is ChatError { throw error }
+                if let failure = error as? OpenAIRequestError, !(500...599).contains(failure.status ?? 0) { throw error }
+                try await Task.sleep(for: backoff)
+            }
         }
-        return false
     }
     static func form(_ fields: [String: String]) -> Data {
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
@@ -117,10 +123,7 @@ enum OAuthClient {
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.httpBody = form(fields)
         let (data, response) = try await SecureHTTP.session.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw ChatError.message("OpenAI could not complete sign-in (HTTP \(status)). Please sign in again.")
-        }
+        try OpenAIRequestError.requireOK(data, response, redacting: ["code", "code_verifier", "refresh_token"].compactMap { fields[$0] })
         let token = try JSONDecoder().decode(TokenResponse.self, from: data)
         guard token.token_type.lowercased() == "bearer", !token.access_token.isEmpty, token.expires_in > 0 else { throw ChatError.message("OpenAI returned an invalid token response.") }
         return token

@@ -26,8 +26,12 @@ actor AuthService {
         refreshes[account.id]?.cancel()
         guard !account.isAPIKey, let token = account.refreshToken else { return "Signed out on this Mac." }
         // Only this call retains the retiring token. A delayed reply cannot alter a newer login.
-        let revoked = await OAuthClient.revoke(token: token, clientID: account.id)
-        return revoked ? "Signed out on this Mac. OpenAI accepted the revocation request." : "Signed out on this Mac. Remote revocation could not be confirmed. You can disconnect the app in ChatGPT settings."
+        do {
+            try await OAuthClient.revoke(token: token, clientID: account.id)
+            return "Signed out on this Mac. OpenAI accepted the revocation request."
+        } catch {
+            return "Signed out on this Mac. Remote revocation could not be confirmed. \(error.localizedDescription) You can disconnect the app in ChatGPT settings."
+        }
     }
 
     func credential(generation: String) async throws -> Account {

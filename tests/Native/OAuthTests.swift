@@ -45,6 +45,34 @@ final class OAuthTests: XCTestCase {
         XCTAssertTrue(body.contains("code=a%26b%3Dc%2B%20d"))
     }
 
+    func testCallbackPreservesTheProvidersDeclineReasonAfterValidatingState() throws {
+        let attempt = try OAuthAttempt(port: 54321, hostID: "test")
+        let url = URL(string: "\(attempt.redirectURI)?state=\(attempt.state)&error=access_denied&error_description=Workspace%20policy")!
+        XCTAssertThrowsError(try attempt.validateCallback(url)) {
+            XCTAssertEqual($0.localizedDescription, "Workspace policy (access_denied)")
+        }
+    }
+
+    func testOpenAIErrorsPreferMessagesAndPreserveCodesAndHTTPStatus() {
+        func reason(_ body: String, _ status: Int = 403, type: String = "application/json") -> String? {
+            let http = HTTPURLResponse(url: Configuration.token, statusCode: status, httpVersion: nil,
+                                       headerFields: ["x-request-id": "req_test", "Content-Type": type])!
+            do { try OpenAIRequestError.requireOK(Data(body.utf8), http, redacting: ["test-credential"]); return nil }
+            catch { return error.localizedDescription }
+        }
+        XCTAssertEqual(reason(#"{"error":{"message":"Rejected test-credential","code":2041,"param":"model"}}"#),
+                       "Rejected [redacted] (2041, HTTP 403, parameter model, Request req_test)")
+        XCTAssertEqual(reason(#"{"error":"invalid_grant","error_description":"This grant expired."}"#),
+                       "This grant expired. (invalid_grant, HTTP 403, Request req_test)")
+        XCTAssertEqual(reason(#"{"error":{"code":0}}"#, 200), "OpenAI error 0. (HTTP 200, Request req_test)")
+        XCTAssertEqual(reason(#"{"error":{"code":4101,"type":"workspace_restricted"}}"#),
+                       "OpenAI error workspace_restricted. (4101, HTTP 403, Request req_test)")
+        XCTAssertEqual(reason("Try later", 503, type: "text/plain"), "Try later (HTTP 503, Request req_test)")
+        XCTAssertEqual(reason(#"{"detail":[{"msg":"A model is required.","input":"private input"}]}"#, 422),
+                       "A model is required. (HTTP 422, Request req_test)")
+        XCTAssertEqual(reason("<html>gateway error</html>", 502, type: "text/html"), "HTTP 502 (Request req_test)")
+    }
+
     @MainActor func testCallbackListenerRejectsHostAndMethodConfusion() {
         let valid = "GET /auth/callback?state=nonce&code=test HTTP/1.1\r\nHost: 127.0.0.1:1234\r\n\r\n"
         XCTAssertNotNil(LoopbackListener.callbackURL(request: valid, port: 1234, state: "nonce"))

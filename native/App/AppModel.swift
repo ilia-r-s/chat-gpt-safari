@@ -107,9 +107,9 @@ final class AppModel: ObservableObject {
                 let original = try CredentialStore.update { _ in }
                 var request = URLRequest(url: URL(string: Configuration.resource + "/models")!)
                 request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-                let (_, response) = try await SecureHTTP.session.data(for: request)
+                let (data, response) = try await SecureHTTP.session.data(for: request)
                 try Task.checkCancellation()
-                guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw ChatError.message("This API key could not access the model catalog. Check its permissions and try again.") }
+                try OpenAIRequestError.requireOK(data, response, redacting: [key])
                 try CredentialStore.update { vault in
                     guard vault.hostID == original.hostID else { throw ChatError.message("Local data was erased while connecting. Connect again if you want to keep using Safari Chat.") }
                     guard vault.generation == original.generation else { throw ChatError.message("The selected account changed while connecting. Please try again.") }

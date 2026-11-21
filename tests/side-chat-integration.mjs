@@ -218,6 +218,39 @@ export async function testConversationModes(browser, origin) {
   } finally { await page.close(); }
 }
 
+export async function testProviderFailures(browser, origin) {
+  const page = await browser.newPage({ viewport: { width: 440, height: 720 } });
+  try {
+    const f = await fixture({ catalog: { data: [{ id: "gpt-6-sol" }] }, responseForRequest: number => {
+      if (number === 1) {
+        const event = { type: "response.failed", response: { error: { code: "subscription_sharing_usage_limit_exceeded" } } };
+        return new Response("data: " + JSON.stringify(event) + "\n\n", { headers: { "x-request-id": "req_limit" } });
+      }
+      return new Response('data: {"type":"response.output_text.delta","delta":"Partial reply"}\n\ndata: {"type":"error","error":{"message":"Service is offline","code":8102}}\n\n');
+    } });
+    await connectPanel(page, f);
+    await page.goto(origin + "/panel/panel.html?tab=1");
+    const prompt = page.locator("#prompt"), answers = page.locator("#messages .assistant");
+    await prompt.fill("Can you draw a turtle?");
+    await page.waitForFunction(() => !document.getElementById("send-button").disabled);
+    await prompt.press("Enter");
+    const manage = answers.getByRole("link", { name: "Open ChatGPT usage settings" });
+    await manage.waitFor();
+    assert.match(await answers.first().innerText(), /usage limit.*subscription_sharing_usage_limit_exceeded.*req_limit/i);
+    assert.equal(await manage.getAttribute("href"), "https://chatgpt.com/settings/usage");
+    await page.setViewportSize({ width: 320, height: 640 }); await page.reload();
+    await manage.waitFor();
+    assert.equal(f.requests.length, 1);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await prompt.fill("Try a second message"); await prompt.press("Enter");
+    await answers.last().getByText("Service is offline (8102)", { exact: true }).waitFor();
+    assert.match(await answers.last().innerText(), /Partial reply/);
+    assert.equal(await answers.last().getByRole("link").count(), 0);
+    assert.equal(f.requests.length, 2);
+    assert.equal(f.createdTabs.length, 0);
+  } finally { await page.close(); }
+}
+
 export async function testActionAllowance(browser, origin) {
   const page = await browser.newPage({ viewport: { width: 440, height: 720 } });
   const gate = Promise.withResolvers();

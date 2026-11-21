@@ -85,6 +85,7 @@ h1 { margin: 0 0 22px; font-size: clamp(22px, 5.5vw, 27px); font-weight: 580; li
 .message-content pre code { padding: 0; background: transparent; }
 .message-content a { color: var(--text); text-underline-offset: 3px; }
 .message-error, #edit-error { font-size: 12px; color: var(--error); }
+.manage-usage { color: var(--link); font-size: 13px; text-underline-offset: 3px; }
 .typing, .muted { color: var(--muted); }
 .turn-feedback { padding-inline: 16px; }
 .activity { margin-bottom: 12px; padding: 0 0 8px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }

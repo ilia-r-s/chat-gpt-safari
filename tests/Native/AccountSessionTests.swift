@@ -58,7 +58,7 @@ final class AccountSessionTests: XCTestCase {
     func testRevocationUsesDiscoveredEndpointAndRetriesTransientFailure() async throws {
         let address = Configuration.issuer + "/example/revoke"
         var posts = 0, discoveries = 0
-        let revoked = await OAuthClient.revoke(token: "retiring&token", clientID: "issued", send: { request in
+        try await OAuthClient.revoke(token: "retiring&token", clientID: "issued", send: { request in
             let url = try XCTUnwrap(request.url)
             var data = Data(), status = 200
             if request.httpMethod == "GET" {
@@ -74,20 +74,38 @@ final class AccountSessionTests: XCTestCase {
             }
             return (data, HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)!)
         }, backoff: .zero)
-        XCTAssertTrue(revoked); XCTAssertEqual(discoveries, 1); XCTAssertEqual(posts, 2)
+        XCTAssertEqual(discoveries, 1); XCTAssertEqual(posts, 2)
     }
 
     func testRevocationRejectsUntrustedDiscoveryAndReportsOfflineFailure() async {
-        let refused = await OAuthClient.revoke(token: "retiring", clientID: "issued", send: { request in
-            XCTAssertEqual(request.httpMethod, "GET"); XCTAssertNil(request.httpBody)
-            let metadata = ["issuer": Configuration.issuer, "revocation_endpoint": "https://example.org/revoke"]
-            return (try JSONSerialization.data(withJSONObject: metadata), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
-        }, backoff: .zero)
-        XCTAssertFalse(refused)
+        do {
+            try await OAuthClient.revoke(token: "retiring", clientID: "issued", send: { request in
+                XCTAssertEqual(request.httpMethod, "GET"); XCTAssertNil(request.httpBody)
+                let metadata = ["issuer": Configuration.issuer, "revocation_endpoint": "https://example.org/revoke"]
+                return (try JSONSerialization.data(withJSONObject: metadata), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }, backoff: .zero)
+            XCTFail("Untrusted endpoint accepted")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("valid revocation endpoint")) }
         var attempts = 0
-        let offline = await OAuthClient.revoke(token: "retiring", clientID: "issued", send: { _ in
-            attempts += 1; throw URLError(.notConnectedToInternet)
-        }, backoff: .zero)
-        XCTAssertFalse(offline); XCTAssertEqual(attempts, 2)
+        do {
+            try await OAuthClient.revoke(token: "retiring", clientID: "issued", send: { _ in
+                attempts += 1; throw URLError(.notConnectedToInternet)
+            }, backoff: .zero)
+            XCTFail("Offline revocation reported success")
+        } catch { XCTAssertEqual((error as? URLError)?.code, .notConnectedToInternet) }
+        XCTAssertEqual(attempts, 2)
+    }
+
+    func testRevocationPreservesAProviderDenial() async {
+        var attempts = 0
+        do {
+            try await OAuthClient.revoke(token: "retiring", clientID: "issued", send: { request in
+                attempts += 1
+                let http = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: ["x-request-id": "req_revoke"])!
+                return (Data(#"{"error":"client_denied","error_description":"This client is disabled."}"#.utf8), http)
+            }, backoff: .zero)
+            XCTFail("A provider denial reported success")
+        } catch { XCTAssertEqual(error.localizedDescription, "This client is disabled. (client_denied, HTTP 403, Request req_revoke)") }
+        XCTAssertEqual(attempts, 1)
     }
 }

@@ -301,6 +301,7 @@ function prepareChat(all, chat, retainID) {
     contexts: boundedContexts(m.contexts),
     ...(m.error ? { error: true } : {}),
     ...(m.role === "assistant" && m.error && typeof m.errorMessage === "string" ? { errorMessage: m.errorMessage.slice(0, 1000) } : {}),
+    ...(m.role === "assistant" && m.error && typeof m.errorCode === "string" ? { errorCode: m.errorCode.slice(0, 96) } : {}),
     ...(m.role === "assistant" && Number.isFinite(m.workMs) ? { workMs: Math.max(0, Math.min(MAX_TURN_MINUTES * 60000, m.workMs)) } : {}),
     ...actionCount(m),
     ...(m.role === "assistant" && Array.isArray(m.toolErrors) && m.toolErrors.length ? {
@@ -3529,15 +3530,73 @@ class FrameDrafts {
 return {FrameDrafts};
 })();
 
+// core/api-errors.js
+modules["core/api-errors.js"] = (() => {
+const CHATGPT_USAGE_LIMIT = "subscription_sharing_usage_limit_exceeded";
+
+const recoveryByCode = new Map([
+  [CHATGPT_USAGE_LIMIT, "OpenAI reported a ChatGPT usage limit for this app. Check your plan allowance, app limit, and credit-use settings."],
+  ["subscription_sharing_usage_unavailable", "OpenAI could not check your ChatGPT usage. Try again later."],
+]);
+
+function apiError(response, payload, credential, fallback = "OpenAI ended the response without giving a reason.") {
+  function field(value, limit) {
+    if (typeof value !== "string" && !Number.isFinite(value)) return "";
+    const text = String(value).trim();
+    return (credential ? text.replaceAll(credential, "[redacted]") : text).slice(0, limit);
+  }
+  const detail = payload?.response?.error ?? payload?.error ?? payload?.detail ?? payload;
+  const scalar = field(detail, 700);
+  const explicitCode = field(detail?.code, 96) || field(payload?.code, 96) || field(detail?.error_code ?? payload?.error_code, 96)
+    || (Number.isFinite(detail) || (payload?.error === detail && /^[\w.-]{1,96}$/.test(scalar)) ? scalar : "");
+  const type = field(detail?.type, 96);
+  const typeCode = ["error", "response.failed", "response.incomplete"].includes(type) ? "" : type;
+  const code = (!explicitCode || /^-?\d+$/.test(explicitCode) ? typeCode : "") || explicitCode;
+  const validation = Array.isArray(detail) ? detail.slice(0, 4)
+    .map(item => field(item?.msg ?? item?.message, 160)).filter(Boolean).join(" ") : "";
+  const description = field(detail?.message, 700) || field(payload?.message, 700) || field(payload?.error_description, 700)
+    || field(detail?.msg, 700) || field(payload?.detail, 700) || validation || (scalar !== explicitCode ? scalar : "");
+  const param = field(detail?.param, 96);
+  const requestID = field(response.headers.get("x-request-id") || payload?.request_id || detail?.request_id, 128);
+  const responseID = field(payload?.response?.id, 128);
+  const eventStatus = field(payload?.status ?? detail?.status ?? payload?.status_code ?? detail?.status_code, 96);
+  const streamStatus = /^\d{3}$/.test(eventStatus) ? `Status ${eventStatus}` : "";
+  const status = response.ok ? streamStatus : `HTTP ${response.status}`;
+  const explanation = [description, recoveryByCode.get(code)].filter(Boolean).join(" ");
+  const statusSummary = response.ok ? status : [status, field(response.statusText, 96)].filter(Boolean).join(" ");
+  const summary = explanation || (code && `OpenAI error ${code}.`) || statusSummary || fallback;
+  const diagnostics = [explanation && code, explicitCode !== code && explicitCode, (explanation || code) && status, param && `parameter ${param}`,
+    requestID ? `Request ${requestID}` : responseID && `Response ${responseID}`].filter(Boolean);
+  const suffix = diagnostics.length ? ` (${diagnostics.join(", ")})` : "";
+  const error = new Error(summary.slice(0, 1000 - suffix.length) + suffix);
+  if (code) error.providerCode = code;
+  return error;
+}
+
+async function readAPIError(response, credential, fallback) {
+  const body = await response.text();
+  let payload;
+  try { payload = JSON.parse(body); }
+  catch {
+    if (response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() === "text/plain" && !body.trimStart().startsWith("<")) payload = body;
+  }
+  return apiError(response, payload, credential, fallback);
+}
+
+return {CHATGPT_USAGE_LIMIT, apiError, readAPIError};
+})();
+
 // core/sse.js
 modules["core/sse.js"] = (() => {
+const { apiError, readAPIError } = modules["core/api-errors.js"];
 /** Handles split UTF-8, CR/LF boundaries, comments, and multi-line SSE data. */
-async function* readSSE(body, signal) {
+async function* readEvents(body, signal) {
   if (!body) throw new Error("The server returned an empty stream.");
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let data = [];
+  let name = "";
   let eventSize = 0;
   try {
     while (true) {
@@ -3550,9 +3609,12 @@ async function* readSSE(body, signal) {
         const line = buffer.slice(0, index).replace(/\r$/, "");
         buffer = buffer.slice(index + 1);
         if (line === "") {
-          if (data.length) yield data.join("\n");
+          if (data.length) yield { name, data: data.join("\n") };
           data = [];
           eventSize = 0;
+          name = "";
+        } else if (line.startsWith("event:")) {
+          name = line.slice(6).trim();
         } else if (line.startsWith("data:")) {
           eventSize += line.length;
           if (eventSize > 2_000_000) throw new Error("The server sent an oversized stream event.");
@@ -3561,7 +3623,7 @@ async function* readSSE(body, signal) {
       }
       if (done) {
         if (buffer.startsWith("data:")) data.push(buffer.slice(5).replace(/^ /, "").replace(/\r$/, ""));
-        if (data.length) yield data.join("\n");
+        if (data.length) yield { name, data: data.join("\n") };
         break;
       }
     }
@@ -3571,24 +3633,29 @@ async function* readSSE(body, signal) {
   }
 }
 
-async function readResponse(response, { signal, onDelta = () => {}, onActivity = () => {} } = {}) {
-  if (!response.ok) {
-    const body = await response.text();
-    let message = `OpenAI returned HTTP ${response.status}.`;
-    try {
-      const json = JSON.parse(body);
-      message = json.error?.message || json.detail || message;
-    } catch { /* Do not expose raw HTML error pages. */ }
-    const requestID = response.headers.get("x-request-id");
-    throw new Error(`${String(message).slice(0, 700)}${requestID ? ` (Request ${requestID})` : ""}`);
+async function* readSSE(body, signal) {
+  for await (const event of readEvents(body, signal)) yield event.data;
+}
+
+async function readResponse(response, { signal, credential, onDelta = () => {}, onActivity = () => {} } = {}) {
+  if (!response.ok) throw await readAPIError(response, credential);
+  if (response.headers.get("content-type")?.split(";")[0].trim().toLowerCase().endsWith("json")) {
+    throw await readAPIError(response, credential, "OpenAI returned JSON instead of the requested response stream.");
   }
   let receivedText = false;
   const finishedItems = new Map();
   let itemChars = 0;
-  for await (const data of readSSE(response.body, signal)) {
+  for await (const { name, data } of readEvents(response.body, signal)) {
     if (data === "[DONE]") continue;
     let event;
-    try { event = JSON.parse(data); } catch { throw new Error("The server returned an invalid stream event."); }
+    try { event = JSON.parse(data); } catch {
+      if (name === "error" || name === "response.failed") throw apiError(response, data, credential);
+      throw new Error("The server returned an invalid stream event.");
+    }
+    if (name === "error" || name === "response.failed" || event?.type === "error" || event?.type === "response.failed" || (!event?.type && event?.error != null)) {
+      throw apiError(response, event, credential);
+    }
+    if (!event || typeof event !== "object") throw new Error("The server returned an invalid stream event.");
     if (event.type === "response.web_search_call.in_progress") onActivity({ type: "activity", operation: "web_search", state: "working" });
     if (event.type === "response.web_search_call.completed") onActivity({ type: "activity", operation: "web_search", state: "done" });
     if (event.type === "response.output_text.delta" || event.type === "response.refusal.delta") {
@@ -3602,10 +3669,10 @@ async function readResponse(response, { signal, onDelta = () => {}, onActivity =
       if (itemChars > 1_000_000) throw new Error("The response exceeded the output item size limit.");
       finishedItems.set(index, event.item);
     }
-    if (event.type === "error" || event.type === "response.failed") {
-      throw new Error(event.response?.error?.message || event.message || "The response failed. Please try again.");
+    if (event.type === "response.incomplete") {
+      if (event.response?.error) throw apiError(response, event, credential);
+      throw new Error(`The response was incomplete (${event.response?.incomplete_details?.reason ?? "unknown reason"}).`);
     }
-    if (event.type === "response.incomplete") throw new Error(`The response was incomplete (${event.response?.incomplete_details?.reason ?? "unknown reason"}).`);
     if (event.type === "response.completed" && event.response) {
       // Retain completed streamed items when the terminal event contains only
       // metadata. Tools must still wait for this successful terminal event.
@@ -3798,7 +3865,7 @@ async function runAgent({ input, model, effort, reasoningMode, settings: rawSett
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body,
     });
     const previousText = resultText;
-    const completed = await readResponse(response, { signal, onDelta: text => {
+    const completed = await readResponse(response, { signal, credential: token, onDelta: text => {
       if (resultText.length + text.length > 120000) throw new Error("The answer reached the output size limit. Ask for a shorter response.");
       resultText += text; emit({ type: "delta", text });
     }, onActivity: event => emit(event) });
@@ -4014,6 +4081,7 @@ const { ChatDock, sourceTabId } = modules["core/chat-dock.js"];
 const { ChatRun } = modules["core/chat-run.js"];
 const { FrameDrafts } = modules["core/frame-drafts.js"];
 const { runAgent } = modules["core/agent.js"];
+const { apiError, readAPIError } = modules["core/api-errors.js"];
 const { PageInputs } = modules["core/page-input.js"];
 const { MotionSession } = modules["core/motion-session.js"];
 const { LocalData } = modules["core/local-data.js"];
@@ -4139,8 +4207,10 @@ async function models(auth, refresh = false) {
     checkSession(await native("auth.status"), auth.account, auth.generation);
     controller.signal.throwIfAborted();
     const response = await fetch("https://api.openai.com/v1/models", { credentials: "omit", redirect: "error", cache: "no-store", headers: { Authorization: `Bearer ${token}` }, signal: controller.signal });
-    if (!response.ok) throw new Error(`Could not load models (HTTP ${response.status}). Check your connection and account access.`);
-    const values = modelCatalog(await response.json());
+    if (!response.ok) throw await readAPIError(response, token);
+    const payload = await response.json();
+    if (payload?.error != null) throw apiError(response, payload, token);
+    const values = modelCatalog(payload);
     checkSession(await native("auth.status"), auth.account, auth.generation);
     controller.signal.throwIfAborted();
     if (localData.closed) throw new Error("Local data is being erased.");
@@ -4550,12 +4620,12 @@ api.runtime.onConnect.addListener(port => {
     const started = Date.now();
     let usedTools = false, workMs;
     const verifySession = async () => checkSession(await native("auth.status"), message.account, message.generation);
-    const finish = (text, errorMessage) => localData.write(async storage => {
+    const finish = (text, failure) => localData.write(async storage => {
       await verifySession();
       const drafts = temporary?.drafts ?? frameDrafts;
       const pointer = !run.ports.size && !drafts.pending.has(source) ? sessionKey(run.account, source) : undefined;
       const browserActions = run.state.get("browser.actions")?.actions;
-      const saved = await saveChat(temporary?.store ?? storage, { ...runChat, messages: [...runChat.messages, { role: "assistant", text, workMs, browserActions, toolErrors: run.toolErrors, ...(errorMessage ? { error: true, errorMessage } : {}) }] }, pointer);
+      const saved = await saveChat(temporary?.store ?? storage, { ...runChat, messages: [...runChat.messages, { role: "assistant", text, workMs, browserActions, toolErrors: run.toolErrors, ...failure }] }, pointer);
       return { id: saved.id, title: saved.title, revision: saved.revision };
     });
     const runEmit = event => { controller.signal.throwIfAborted(); if (event.type === "activity") usedTools = true; emit(event); };
@@ -4641,12 +4711,13 @@ api.runtime.onConnect.addListener(port => {
       const reason = controller.signal.aborted ? controller.signal.reason : error;
       const timedOut = !!timeoutError && reason === timeoutError;
       const message = (controller.signal.aborted && reason?.name === "AbortError" ? "Response stopped." : reason?.message || "The request could not finish.").slice(0, 1000);
+      const errorCode = reason?.providerCode;
       workMs = usedTools ? Date.now() - started : undefined;
       if (runChat && !localData.closed && !writing) {
-        try { saved = await finish(run.text || message, message); }
+        try { saved = await finish(run.text || message, { error: true, errorMessage: message, errorCode }); }
         catch (failure) { saveError = failure.message; }
       }
-      terminal({ type: controller.signal.aborted && !timedOut ? "cancelled" : "error", workMs, saved, saveError: saveError || (writing ? error.message : undefined), message });
+      terminal({ type: controller.signal.aborted && !timedOut ? "cancelled" : "error", workMs, saved, saveError: saveError || (writing ? error.message : undefined), message, errorCode });
     } finally {
       clearTimeout(timer); activeRuns.delete(run.id); run.release();
     }

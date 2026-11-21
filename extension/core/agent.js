@@ -74,7 +74,7 @@ export async function runAgent({ input, model, effort, reasoningMode, settings: 
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body,
     });
     const previousText = resultText;
-    const completed = await readResponse(response, { signal, onDelta: text => {
+    const completed = await readResponse(response, { signal, credential: token, onDelta: text => {
       if (resultText.length + text.length > 120000) throw new Error("The answer reached the output size limit. Ask for a shorter response.");
       resultText += text; emit({ type: "delta", text });
     }, onActivity: event => emit(event) });

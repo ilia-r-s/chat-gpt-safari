@@ -9,7 +9,8 @@ enum IDToken {
         var request = URLRequest(url: Configuration.jwks)
         request.timeoutInterval = 20
         let (data, response) = try await SecureHTTP.session.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200, data.count < 200000,
+        try OpenAIRequestError.requireOK(data, response)
+        guard data.count < 200000,
               let jwks = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let keys = jwks["keys"] as? [[String: Any]] else { throw ChatError.message("Could not retrieve OpenAI's signing keys.") }
         return try verify(token, keys: keys, audience: audience, nonce: nonce)

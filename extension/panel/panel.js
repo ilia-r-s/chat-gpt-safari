@@ -1,4 +1,5 @@
 import { DEFAULTS, MAX_TURN_MINUTES } from "../core/config.js";
+import { CHATGPT_USAGE_LIMIT } from "../core/api-errors.js";
 import { estimateTokens } from "../core/context.js";
 import { markdown } from "./markdown.js";
 import { branchChat, continuationMessage } from "./conversation.js";
@@ -350,6 +351,12 @@ function appendMessage(message, index) {
       const hint = document.createElement("div"); hint.className = "message-error";
       hint.textContent = message.errorMessage || "This response did not complete."; article.append(hint);
     }
+    if (message.error && message.errorCode === CHATGPT_USAGE_LIMIT) {
+      const link = document.createElement("a");
+      link.className = "manage-usage"; link.href = "https://chatgpt.com/settings/usage";
+      link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "Open ChatGPT usage settings";
+      article.append(link);
+    }
     if (running && message === chat.messages.at(-1)) { currentAssistant = body; tools.hidden = true; }
   }
   article.append(tools);
@@ -441,7 +448,11 @@ function settle(error, cancelled = false, terminal, runID) {
   }
   const last = chat.messages.at(-1);
   if (Number.isFinite(terminal?.workMs)) last.workMs = terminal.workMs;
-  if (error) { last.error = true; last.errorMessage = error; if (!last.text) last.text = error; }
+  if (error) {
+    last.error = true; last.errorMessage = error;
+    if (terminal?.errorCode) last.errorCode = terminal.errorCode;
+    if (!last.text) last.text = error;
+  }
   if (terminal?.saved) acceptSave(chat, terminal.saved);
   if (terminal?.saveError) notice(`Could not save this chat: ${terminal.saveError}`);
   $("activity").hidden = true;

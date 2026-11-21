@@ -1,10 +1,13 @@
+import { apiError, readAPIError } from "./api-errors.js";
+
 /** Handles split UTF-8, CR/LF boundaries, comments, and multi-line SSE data. */
-export async function* readSSE(body, signal) {
+async function* readEvents(body, signal) {
   if (!body) throw new Error("The server returned an empty stream.");
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let data = [];
+  let name = "";
   let eventSize = 0;
   try {
     while (true) {
@@ -17,9 +20,12 @@ export async function* readSSE(body, signal) {
         const line = buffer.slice(0, index).replace(/\r$/, "");
         buffer = buffer.slice(index + 1);
         if (line === "") {
-          if (data.length) yield data.join("\n");
+          if (data.length) yield { name, data: data.join("\n") };
           data = [];
           eventSize = 0;
+          name = "";
+        } else if (line.startsWith("event:")) {
+          name = line.slice(6).trim();
         } else if (line.startsWith("data:")) {
           eventSize += line.length;
           if (eventSize > 2_000_000) throw new Error("The server sent an oversized stream event.");
@@ -28,7 +34,7 @@ export async function* readSSE(body, signal) {
       }
       if (done) {
         if (buffer.startsWith("data:")) data.push(buffer.slice(5).replace(/^ /, "").replace(/\r$/, ""));
-        if (data.length) yield data.join("\n");
+        if (data.length) yield { name, data: data.join("\n") };
         break;
       }
     }
@@ -38,24 +44,29 @@ export async function* readSSE(body, signal) {
   }
 }
 
-export async function readResponse(response, { signal, onDelta = () => {}, onActivity = () => {} } = {}) {
-  if (!response.ok) {
-    const body = await response.text();
-    let message = `OpenAI returned HTTP ${response.status}.`;
-    try {
-      const json = JSON.parse(body);
-      message = json.error?.message || json.detail || message;
-    } catch { /* Do not expose raw HTML error pages. */ }
-    const requestID = response.headers.get("x-request-id");
-    throw new Error(`${String(message).slice(0, 700)}${requestID ? ` (Request ${requestID})` : ""}`);
+export async function* readSSE(body, signal) {
+  for await (const event of readEvents(body, signal)) yield event.data;
+}
+
+export async function readResponse(response, { signal, credential, onDelta = () => {}, onActivity = () => {} } = {}) {
+  if (!response.ok) throw await readAPIError(response, credential);
+  if (response.headers.get("content-type")?.split(";")[0].trim().toLowerCase().endsWith("json")) {
+    throw await readAPIError(response, credential, "OpenAI returned JSON instead of the requested response stream.");
   }
   let receivedText = false;
   const finishedItems = new Map();
   let itemChars = 0;
-  for await (const data of readSSE(response.body, signal)) {
+  for await (const { name, data } of readEvents(response.body, signal)) {
     if (data === "[DONE]") continue;
     let event;
-    try { event = JSON.parse(data); } catch { throw new Error("The server returned an invalid stream event."); }
+    try { event = JSON.parse(data); } catch {
+      if (name === "error" || name === "response.failed") throw apiError(response, data, credential);
+      throw new Error("The server returned an invalid stream event.");
+    }
+    if (name === "error" || name === "response.failed" || event?.type === "error" || event?.type === "response.failed" || (!event?.type && event?.error != null)) {
+      throw apiError(response, event, credential);
+    }
+    if (!event || typeof event !== "object") throw new Error("The server returned an invalid stream event.");
     if (event.type === "response.web_search_call.in_progress") onActivity({ type: "activity", operation: "web_search", state: "working" });
     if (event.type === "response.web_search_call.completed") onActivity({ type: "activity", operation: "web_search", state: "done" });
     if (event.type === "response.output_text.delta" || event.type === "response.refusal.delta") {
@@ -69,10 +80,10 @@ export async function readResponse(response, { signal, onDelta = () => {}, onAct
       if (itemChars > 1_000_000) throw new Error("The response exceeded the output item size limit.");
       finishedItems.set(index, event.item);
     }
-    if (event.type === "error" || event.type === "response.failed") {
-      throw new Error(event.response?.error?.message || event.message || "The response failed. Please try again.");
+    if (event.type === "response.incomplete") {
+      if (event.response?.error) throw apiError(response, event, credential);
+      throw new Error(`The response was incomplete (${event.response?.incomplete_details?.reason ?? "unknown reason"}).`);
     }
-    if (event.type === "response.incomplete") throw new Error(`The response was incomplete (${event.response?.incomplete_details?.reason ?? "unknown reason"}).`);
     if (event.type === "response.completed" && event.response) {
       // Retain completed streamed items when the terminal event contains only
       // metadata. Tools must still wait for this successful terminal event.

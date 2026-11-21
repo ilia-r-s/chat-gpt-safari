@@ -7,6 +7,7 @@ import { ChatDock, sourceTabId } from "./core/chat-dock.js";
 import { ChatRun } from "./core/chat-run.js";
 import { FrameDrafts } from "./core/frame-drafts.js";
 import { runAgent } from "./core/agent.js";
+import { apiError, readAPIError } from "./core/api-errors.js";
 import { PageInputs } from "./core/page-input.js";
 import { MotionSession } from "./core/motion-session.js";
 import { LocalData } from "./core/local-data.js";
@@ -133,8 +134,10 @@ async function models(auth, refresh = false) {
     checkSession(await native("auth.status"), auth.account, auth.generation);
     controller.signal.throwIfAborted();
     const response = await fetch("https://api.openai.com/v1/models", { credentials: "omit", redirect: "error", cache: "no-store", headers: { Authorization: `Bearer ${token}` }, signal: controller.signal });
-    if (!response.ok) throw new Error(`Could not load models (HTTP ${response.status}). Check your connection and account access.`);
-    const values = modelCatalog(await response.json());
+    if (!response.ok) throw await readAPIError(response, token);
+    const payload = await response.json();
+    if (payload?.error != null) throw apiError(response, payload, token);
+    const values = modelCatalog(payload);
     checkSession(await native("auth.status"), auth.account, auth.generation);
     controller.signal.throwIfAborted();
     if (localData.closed) throw new Error("Local data is being erased.");
@@ -544,12 +547,12 @@ api.runtime.onConnect.addListener(port => {
     const started = Date.now();
     let usedTools = false, workMs;
     const verifySession = async () => checkSession(await native("auth.status"), message.account, message.generation);
-    const finish = (text, errorMessage) => localData.write(async storage => {
+    const finish = (text, failure) => localData.write(async storage => {
       await verifySession();
       const drafts = temporary?.drafts ?? frameDrafts;
       const pointer = !run.ports.size && !drafts.pending.has(source) ? sessionKey(run.account, source) : undefined;
       const browserActions = run.state.get("browser.actions")?.actions;
-      const saved = await saveChat(temporary?.store ?? storage, { ...runChat, messages: [...runChat.messages, { role: "assistant", text, workMs, browserActions, toolErrors: run.toolErrors, ...(errorMessage ? { error: true, errorMessage } : {}) }] }, pointer);
+      const saved = await saveChat(temporary?.store ?? storage, { ...runChat, messages: [...runChat.messages, { role: "assistant", text, workMs, browserActions, toolErrors: run.toolErrors, ...failure }] }, pointer);
       return { id: saved.id, title: saved.title, revision: saved.revision };
     });
     const runEmit = event => { controller.signal.throwIfAborted(); if (event.type === "activity") usedTools = true; emit(event); };
@@ -635,12 +638,13 @@ api.runtime.onConnect.addListener(port => {
       const reason = controller.signal.aborted ? controller.signal.reason : error;
       const timedOut = !!timeoutError && reason === timeoutError;
       const message = (controller.signal.aborted && reason?.name === "AbortError" ? "Response stopped." : reason?.message || "The request could not finish.").slice(0, 1000);
+      const errorCode = reason?.providerCode;
       workMs = usedTools ? Date.now() - started : undefined;
       if (runChat && !localData.closed && !writing) {
-        try { saved = await finish(run.text || message, message); }
+        try { saved = await finish(run.text || message, { error: true, errorMessage: message, errorCode }); }
         catch (failure) { saveError = failure.message; }
       }
-      terminal({ type: controller.signal.aborted && !timedOut ? "cancelled" : "error", workMs, saved, saveError: saveError || (writing ? error.message : undefined), message });
+      terminal({ type: controller.signal.aborted && !timedOut ? "cancelled" : "error", workMs, saved, saveError: saveError || (writing ? error.message : undefined), message, errorCode });
     } finally {
       clearTimeout(timer); activeRuns.delete(run.id); run.release();
     }

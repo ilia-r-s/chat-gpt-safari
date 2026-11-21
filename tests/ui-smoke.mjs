@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 import { snapshotPage, actOnPage } from "../extension/content/page.js";
 import { testPageInteractions } from "./page-interactions.mjs";
 import { testGalleryInteractions } from "./gallery-interactions.mjs";
-import { testSideChatIntegration, testDockWorkflow, testActionAllowance, testConversationModes, testVoiceComposer } from "./side-chat-integration.mjs";
+import { testSideChatIntegration, testDockWorkflow, testActionAllowance, testConversationModes, testVoiceComposer, testProviderFailures } from "./side-chat-integration.mjs";
 import { testBrowserAgent } from "./browser-agent.mjs";
 import { testContinuousScroll } from "./continuous-scroll.mjs";
 import { testDirectInput } from "./direct-input.mjs";
@@ -428,6 +428,7 @@ try {
   await testDirectInput(browser, origin);
   await testSideChatIntegration(browser, origin);
   await testConversationModes(browser, origin);
+  await testProviderFailures(browser, origin);
   await testVoiceComposer(browser, origin);
   await testActionAllowance(browser, origin);
   await testPanelMount(browser, origin);
