@@ -3152,6 +3152,7 @@ return {indicatePageAction, readTab, sourceWindowId, createBrowserTools};
 
 // core/chat-dock.js
 modules["core/chat-dock.js"] = (() => {
+const { safeWebURL } = modules["core/context.js"];
 const storageKey = "chatDocks";
 const frameKeys = ["left", "top", "width", "height"];
 const restoreScript = "safari-chat-dock-restore";
@@ -3217,13 +3218,16 @@ class ChatDock {
     await this.load();
     return this.entries[source]?.token === token || this.closing?.[source] === token;
   }
-  async mount(tab, entry, restore) {
+  async mount(tab, entry, restore, grantedOrigin) {
     if (tab.url && !/^https?:\/\//i.test(tab.url)) throw new Error("Safari protects this page. Open Safari Chat on a website.");
     const url = this.panelURL + "?tab=" + tab.id;
     try { await this.api.scripting.executeScript({ target: { tabId: tab.id }, files: ["content/mount.js"], ...(restore && { injectImmediately: true }) }); }
     catch { throw new Error("Safari could not open the pane here. Check Safari Chat's access to this website and try again."); }
-    const reply = await this.api.tabs.sendMessage(tab.id, { type: "panel.show", url, token: entry.token, width: entry.width, restore }, { frameId: 0 }).catch(() => null);
+    const reply = await this.api.tabs.sendMessage(tab.id, { type: "panel.show", url, token: entry.token, width: entry.width, restore,
+      ...(grantedOrigin && { grantedOrigin }) }, { frameId: 0 }).catch(() => null);
+    if (grantedOrigin && reply?.skipped) return false;
     if (!reply?.ok) throw new Error("Safari could not display the pane on this page. Reload the page and try again.");
+    return true;
   }
   async earlyRestore(enable) {
     const scripting = this.api.scripting;
@@ -3236,18 +3240,42 @@ class ChatDock {
     } catch { /* tabs.onUpdated also restores the dock on supported documents. */ }
   }
   open(tab, { restore = false } = {}) {
+    return this.serial(() => this.openInTab(tab, restore));
+  }
+  openAfterGrant(origins, reportStatus) {
     return this.serial(async () => {
-      if (this.closed || this.panelURLMatches(tab.url)) return;
-      let entry = this.entries[tab.id];
-      if (restore && !entry) return;
-      if (!entry) {
-        entry = this.entries[tab.id] = { token: crypto.randomUUID() };
-        await this.save();
+      if (this.closed) return;
+      // Safari can consume the toolbar click. Its grant event supplies match
+      // patterns but no tab ID. Let Safari match only its focused website.
+      const win = await this.api.windows.getLastFocused();
+      if (!win?.focused || win.type !== "normal") return;
+      const [tab] = await this.api.tabs.query({ windowId: win.id, active: true, url: origins });
+      if (!safeWebURL(tab?.url)) return;
+      try {
+        if (await this.openInTab(tab, Boolean(this.entries[tab.id]), new URL(tab.url).origin)) await reportStatus(tab.id);
+      } catch (error) {
+        await reportStatus(tab.id, error.message);
       }
-      await this.mount(tab, entry, restore);
-      await this.earlyRestore(true);
-      return true;
     });
+  }
+  async openInTab(tab, restore, grantedOrigin) {
+    if (this.closed || this.panelURLMatches(tab.url)) return;
+    let entry = this.entries[tab.id];
+    if (restore && !entry) return;
+    const provisional = !entry && Boolean(grantedOrigin);
+    if (!entry) {
+      entry = this.entries[tab.id] = { token: crypto.randomUUID() };
+      if (!provisional) await this.save();
+    }
+    // The iframe can authenticate as soon as it loads. Remember a new grant-
+    // driven dock across navigation only after the intended document shows it.
+    let shown;
+    try { shown = await this.mount(tab, entry, restore, grantedOrigin); }
+    finally { if (provisional && !shown) delete this.entries[tab.id]; }
+    if (!shown) return;
+    if (provisional) await this.save();
+    await this.earlyRestore(true);
+    return true;
   }
   width(source, token, width) {
     return this.serial(async () => {
@@ -4222,6 +4250,9 @@ async function dismissDock(source, token) {
   if (dismissed) await dockStatus(source);
 }
 api.action.onClicked.addListener(tab => openFromSafari(tab));
+api.permissions?.onAdded?.addListener(({ origins }) => {
+  if (origins?.length && !localData.closed) return dock.openAfterGrant(origins, dockStatus).catch(console.error);
+});
 api.runtime.onInstalled.addListener(() => {
   api.contextMenus.removeAll().then(() => {
     api.contextMenus.create({ id: "ask", title: "Ask Safari Chat", contexts: ["selection", "page"] });

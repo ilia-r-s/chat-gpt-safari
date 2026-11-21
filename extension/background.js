@@ -244,6 +244,9 @@ async function dismissDock(source, token) {
   if (dismissed) await dockStatus(source);
 }
 api.action.onClicked.addListener(tab => openFromSafari(tab));
+api.permissions?.onAdded?.addListener(({ origins }) => {
+  if (origins?.length && !localData.closed) return dock.openAfterGrant(origins, dockStatus).catch(console.error);
+});
 api.runtime.onInstalled.addListener(() => {
   api.contextMenus.removeAll().then(() => {
     api.contextMenus.create({ id: "ask", title: "Ask Safari Chat", contexts: ["selection", "page"] });

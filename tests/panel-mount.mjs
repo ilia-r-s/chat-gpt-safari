@@ -49,10 +49,14 @@ export async function testPanelMount(browser, origin) {
   await page.locator('#draft').focus();
   await page.locator('#floating').evaluate(button => button.addEventListener('click', () => { window.pageClicks = (window.pageClicks ?? 0) + 1; }));
   const initial = await page.evaluate(() => ({ root: document.documentElement.style.cssText, body: document.body.style.cssText, site: document.getElementById('site').style.cssText, header: document.querySelector('header').style.cssText, floating: document.getElementById('floating').style.cssText }));
-  const message = type => page.evaluate(type => globalThis.__mountMessage({ type, token: 'test-grant', url: browser.runtime.getURL('panel/panel.html?tab=1') }, { id: browser.runtime.id }), type);
+  const message = (type, extra = {}) => page.evaluate(({ type, extra }) => globalThis.__mountMessage({ type, ...extra, token: 'test-grant', url: browser.runtime.getURL('panel/panel.html?tab=1') }, { id: browser.runtime.id }), { type, extra });
   await assert.rejects(page.evaluate(() => globalThis.__mountMessage({ type: 'panel.show', url: 'https://other.example/panel.html' }, { id: browser.runtime.id })), /Invalid panel URL/);
   assert.equal(await page.evaluate(() => globalThis.__mountMessage({ type: 'panel.show', url: browser.runtime.getURL('panel/panel.html') }, { id: 'another-extension' })), undefined);
+  assert.deepEqual(await message('panel.show', { grantedOrigin: 'https://other.example' }), { skipped: true });
+  assert.equal(await page.locator('#safari-chat-host').count(), 0);
+  assert.equal((await message('panel.show', { grantedOrigin: origin })).ok, true);
   assert.equal((await message('panel.show')).ok, true);
+  assert.equal(await page.locator('#safari-chat-host').count(), 1);
   assert.ok(await page.evaluate(() => {
     const frame = window.dockShadow.querySelector('iframe');
     return frame.getAttribute('aria-label') === 'Safari Chat' && !frame.hasAttribute('title');

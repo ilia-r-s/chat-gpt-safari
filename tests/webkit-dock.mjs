@@ -201,6 +201,9 @@ async function drivePanel(scenario) {
   try {
     const phase = await native("test.phase");
     await wait(() => !el("prompt").disabled && el("model-name").textContent === "GPT-6", "the connected composer");
+    if (scenario === "website-grant" || scenario === "all-sites-grant") {
+      await native("test.done"); return;
+    }
     if (scenario === "paint" || scenario === "finance") {
       await native("test.showSource"); el("actions-guidance").click(); el("auto-mode").click();
       await wait(() => el("mode-label").textContent === "Approve for me", "automatic actions");
@@ -312,7 +315,7 @@ async function drivePanel(scenario) {
   } catch (error) { await native("test.fail", { error: error.message }); }
 }
 
-const workflows = ["tabs", "navigation", "carousel", "paint", "finance"];
+const workflows = ["website-grant", "all-sites-grant", "tabs", "navigation", "carousel", "paint", "finance"];
 
 export async function testWebKitDock(origin, scenarios = workflows) {
   for (const scenario of scenarios) if (!workflows.includes(scenario)) throw Error("Unknown WebKit workflow: " + scenario);
@@ -339,7 +342,7 @@ export async function testWebKitDock(origin, scenarios = workflows) {
       if (scenario === "paint" || scenario === "finance") provider = `(${installTabProvider})(${scenario === "paint" ? paintWorkflow : financeWorkflow}, ${JSON.stringify(new URL("/__workflow/" + scenario, destination).href)});`;
       await writeFile(path.join(ext, "provider-fixture.js"), provider);
       await writeFile(path.join(ext, "panel/driver-fixture.js"), `(${drivePanel})(${JSON.stringify(scenario)});`);
-      const start = origin + "/__workflow/" + ({ carousel: "carousel", paint: "paint-source", finance: "finance-source", tabs: "one?slow-resource", navigation: "one" })[scenario];
+      const start = origin + "/__workflow/" + ({ "website-grant": "website-grant", "all-sites-grant": "website-grant?all", carousel: "carousel", paint: "paint-source", finance: "finance-source", tabs: "one?slow-resource", navigation: "one" })[scenario];
       const { stdout } = await run(host, [ext, start], { timeout: 90000 });
       process.stdout.write(stdout);
     }

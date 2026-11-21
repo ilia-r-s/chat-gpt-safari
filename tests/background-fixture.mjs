@@ -56,6 +56,7 @@ export async function fixture({ nativeFailure = false, nativeUnavailable = false
       },
       update: async (id, options) => Object.assign(windows.get(id), options),
     },
+    permissions: { onAdded: listen("permissionAdded") },
     contextMenus: { onClicked: listen("menu"), removeAll: async () => {}, create() {} },
     storage: { local: { get: async key => key === null ? data : { [key]: data[key] }, set: async value => Object.assign(data, value), remove: async keys => { for (const key of Array.isArray(keys) ? keys : [keys]) delete data[key]; }, clear: async () => { for (const key of Object.keys(data)) delete data[key]; } },
       session: { get: async key => Object.fromEntries((Array.isArray(key) ? key : [key]).map(k => [k, structuredClone(session[k])])), set: async items => Object.assign(session, structuredClone(items)), remove: async key => { delete session[key]; } } },

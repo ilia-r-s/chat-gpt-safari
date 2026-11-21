@@ -149,6 +149,11 @@ static void fail(NSString *reason) {
                 if (self.loads == 1) [self.window setContentSize:NSMakeSize(620, 800)];
                 [self.view reload];
             } else {
+                if ([self.sourceURL.path isEqual:@"/__workflow/website-grant"]) {
+                    if (self.loads != 1 || self.destination || self.siteRequests || self.tabSwitches) fail(@"The first grant should open chat in the original document.");
+                    puts("System WebKit opened the dock after the website grant without a toolbar action or reload.");
+                    exit(0);
+                }
                 if ([self.sourceURL.path isEqual:@"/__workflow/finance-source"]) {
                     if (self.loads != 1 || self.siteRequests != 1 || self.destination || self.tabSwitches) fail(@"Unexpected tab or permission state after the background quote lookup.");
                     puts("System WebKit found a quote by typing and submitting in a background tab, recovered from a stale control, and closed only the requested tab.");
@@ -218,7 +223,15 @@ static void fail(NSString *reason) {
 - (void)webView:(WKWebView *)view didFinishNavigation:(WKNavigation *)navigation {
     fprintf(stderr, "Source loaded %lu\n", self.loads);
     [self.controller didChangeTabProperties:WKWebExtensionTabChangedPropertiesLoading | WKWebExtensionTabChangedPropertiesURL forTab:self];
-    if (self.loads == 1) [self.context performActionForTab:self];
+    if (self.loads != 1) return;
+    if ([self.sourceURL.path isEqual:@"/__workflow/website-grant"]) {
+        // Safari can use the first toolbar click for its own permission sheet.
+        // Deliver only the resulting host grant, after the page has loaded.
+        BOOL allSites = self.sourceURL.query != nil;
+        WKWebExtensionMatchPattern *pattern = [WKWebExtensionMatchPattern matchPatternWithString:allSites ? @"<all_urls>" : @"http://127.0.0.1/*"];
+        NSDate *expiry = allSites ? nil : [NSDate dateWithTimeIntervalSinceNow:86400];
+        [self.context setPermissionStatus:WKWebExtensionContextPermissionStatusGrantedExplicitly forMatchPattern:pattern expirationDate:expiry];
+    } else [self.context performActionForTab:self];
 }
 - (void)load:(NSURL *)directory {
     [WKWebExtension extensionWithResourceBaseURL:directory completionHandler:^(WKWebExtension *extension, NSError *error) {
@@ -230,7 +243,7 @@ static void fail(NSString *reason) {
         self.context = [WKWebExtensionContext contextForExtension:extension];
         self.context.hasAccessToPrivateData = YES;
         for (NSString *permission in extension.requestedPermissions) [self.context setPermissionStatus:WKWebExtensionContextPermissionStatusGrantedExplicitly forPermission:permission];
-        [self.context setPermissionStatus:WKWebExtensionContextPermissionStatusGrantedExplicitly forURL:self.sourceURL];
+        if (![self.sourceURL.path isEqual:@"/__workflow/website-grant"]) [self.context setPermissionStatus:WKWebExtensionContextPermissionStatusGrantedExplicitly forURL:self.sourceURL];
         WKWebViewConfiguration *config = [WKWebViewConfiguration new];
         config.preferences.inactiveSchedulingPolicy = WKInactiveSchedulingPolicyNone;
         config.webExtensionController = self.controller;

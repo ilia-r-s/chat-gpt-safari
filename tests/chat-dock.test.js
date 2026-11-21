@@ -65,6 +65,64 @@ test("denied access and failed mounts report the problem in the source tab and r
   assert.deepEqual(selected, []); assert.deepEqual(f.createdTabs, []); assert.deepEqual(f.createdWindows, []);
 });
 
+test("Safari can grant a foreground website before or after delivering the toolbar click", async () => {
+  for (const clickFirst of [false, true]) {
+    const f = await fixture(), shown = [], injected = [];
+    const tab = { ...source, url: "https://www.yahoo.com/news" };
+    const origins = clickFirst ? ["<all_urls>"] : ["*://*.yahoo.com/*"];
+    f.api.windows.getLastFocused = async () => ({ id: tab.windowId, type: "normal", focused: true });
+    f.api.tabs.query = async query => {
+      assert.deepEqual(structuredClone(query), { windowId: tab.windowId, active: true, url: origins });
+      return [tab];
+    };
+    let allowed = false;
+    f.api.scripting = { executeScript: async spec => {
+      if (!allowed) throw Error("Website access is pending");
+      injected.push(...spec.files);
+    } };
+    f.api.tabs.sendMessage = async (id, message) => { assert.equal(id, tab.id); shown.push(message); return { ok: true }; };
+    if (clickFirst) await f.events.action(tab);
+    const originalToken = f.session.chatDocks?.[tab.id]?.token;
+    allowed = true;
+    await f.events.permissionAdded({ origins });
+    assert.equal(shown.length, 1);
+    assert.equal(shown[0].grantedOrigin, "https://www.yahoo.com");
+    const token = shown[0].token;
+    assert.equal(originalToken ?? token, token);
+    assert.equal(f.session.chatDocks[tab.id].token, token);
+    assert.equal(f.badges.get(tab.id), "");
+    await f.events.action(tab);
+    assert.equal(shown[1].token, token);
+    assert.deepEqual(injected, ["content/mount.js", "content/mount.js"]);
+    assert.deepEqual(f.requests, []); assert.deepEqual(f.data, {});
+    assert.deepEqual(f.createdTabs, []); assert.deepEqual(f.createdWindows, []);
+  }
+});
+
+test("grants ignore unrelated websites, unfocused windows and documents that change before mounting", async () => {
+  const f = await fixture(), origins = ["https://example.com/*"];
+  let focused = false, matchingTabs = [], mounts = 0;
+  const queries = [];
+  f.api.windows.getLastFocused = async () => ({ id: source.windowId, focused, type: "normal" });
+  f.api.tabs.query = async query => { queries.push(Array.from(query.url)); return matchingTabs; };
+  f.api.scripting = { executeScript: async () => { mounts++; } };
+  f.api.tabs.sendMessage = async () => ({ skipped: true });
+  await f.events.permissionAdded({ permissions: ["storage"] });
+  await f.events.permissionAdded({ origins });
+  assert.deepEqual(queries, []);
+  focused = true;
+  await f.events.permissionAdded({ origins }); // Safari's URL filter found no active match.
+  matchingTabs = [{ ...source, url: "about:blank" }];
+  await f.events.permissionAdded({ origins: ["<all_urls>"] });
+  assert.equal(mounts, 0);
+  matchingTabs = [source];
+  await f.events.permissionAdded({ origins });
+  assert.equal(mounts, 1);
+  await f.events.updated(source.id, { status: "complete" }, source);
+  assert.deepEqual(queries, [origins, ["<all_urls>"], origins]);
+  assert.equal(mounts, 1); assert.deepEqual(f.session, {}); assert.deepEqual(f.data, {});
+});
+
 test("an upgrade forgets the detached-tab mapping and restores the saved pane width on the source", async () => {
   const f = await fixture(), token = crypto.randomUUID(), shown = [];
   f.session.chatDocks = { 1: { token, width: 520, tab: 42 } };

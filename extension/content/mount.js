@@ -307,6 +307,7 @@
     }
     if (message.type !== "panel.show") return;
     if (typeof message.url !== "string" || message.url.split(/[?#]/)[0] !== browser.runtime.getURL("panel/panel.html")) return Promise.reject(new Error("Invalid panel URL."));
+    if (message.grantedOrigin && (location.origin !== message.grantedOrigin || document.hidden)) return Promise.resolve({ skipped: true });
     if (!message.restore) removalCount = 0;
     if (!host?.isConnected) {
       if (!document.documentElement) return Promise.resolve({ ok: false });
